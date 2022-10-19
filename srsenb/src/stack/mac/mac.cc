@@ -616,7 +616,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
     dl_sched_t* dl_sched_res = &dl_sched_res_list[enb_cc_idx];
 
     // Copy data grants
-    for (uint32_t i = 0; i < sched_result.data.size(); i++) {
+    /*for (uint32_t i = 0; i < sched_result.data.size(); i++) {
       uint32_t tb_count = 0;
 
       // Get UE
@@ -636,7 +636,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
           }
 
           if (sched_result.data[i].nof_pdu_elems[tb] > 0) {
-            /* Get PDU if it's a new transmission */
+            // Get PDU if it's a new transmission 
             dl_sched_res->pdsch[n].data[tb] = ue_db[rnti]->generate_pdu(enb_cc_idx,
                                                                         sched_result.data[i].dci.pid,
                                                                         tb,
@@ -657,7 +657,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
                   dl_sched_res->pdsch[n].data[tb], sched_result.data[i].tbs[tb], rnti, true, tti_tx_dl, enb_cc_idx);
             }
           } else {
-            /* TB not enabled OR no data to send: set pointers to NULL  */
+            // TB not enabled OR no data to send: set pointers to NULL  
             dl_sched_res->pdsch[n].data[tb] = nullptr;
           }
 
@@ -671,10 +671,10 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
       } else {
         logger.warning("Invalid DL scheduling result. User 0x%x does not exist", rnti);
       }
-    }
+    }*/
 
     // Copy RAR grants
-    for (uint32_t i = 0; i < sched_result.rar.size(); i++) {
+    /*for (uint32_t i = 0; i < sched_result.rar.size(); i++) {
       // Copy dci info
       dl_sched_res->pdsch[n].dci = sched_result.rar[i].dci;
 
@@ -706,7 +706,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
                                  enb_cc_idx);
       }
       n++;
-    }
+    }*/
 
     // Copy SI and Paging grants
     for (uint32_t i = 0; i < sched_result.bc.size(); i++) {
@@ -727,8 +727,8 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
               dl_sched_res->pdsch[n].data[0], sched_result.bc[i].tbs, true, tti_tx_dl, enb_cc_idx);
         }
 #endif
-      } else {
-        dl_sched_res->pdsch[n].softbuffer_tx[0] = &common_buffers[enb_cc_idx].pcch_softbuffer_tx;
+      } else { // PCCH is for paging
+      /*  dl_sched_res->pdsch[n].softbuffer_tx[0] = &common_buffers[enb_cc_idx].pcch_softbuffer_tx;
         dl_sched_res->pdsch[n].data[0]          = common_buffers[enb_cc_idx].pcch_payload_buffer;
         rrc_h->read_pdu_pcch(tti_tx_dl, common_buffers[enb_cc_idx].pcch_payload_buffer, pcch_payload_buffer_len);
 
@@ -737,7 +737,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
         }
         if (pcap_net) {
           pcap_net->write_dl_pch(dl_sched_res->pdsch[n].data[0], sched_result.bc[i].tbs, true, tti_tx_dl, enb_cc_idx);
-        }
+        }*/
       }
 
       n++;

@@ -390,9 +390,9 @@ const cc_sched_result& sched::carrier_sched::generate_tti_result(tti_point tti_r
   bool dl_active = sf_dl_mask[tti_sched->get_tti_tx_dl().to_uint() % sf_dl_mask.size()] == 0;
 
   /* Refresh UE internal buffers and subframe vars */
-  for (auto& user : *ue_db) {
+  /*for (auto& user : *ue_db) {
     user.second->new_subframe(tti_rx, enb_cc_idx);
-  }
+  }*/
 
   /* Schedule PHICH */
 //  for (auto& ue_pair : *ue_db) {
@@ -415,24 +415,24 @@ const cc_sched_result& sched::carrier_sched::generate_tti_result(tti_point tti_r
   }
 
   /* Prioritize PDCCH scheduling for DL and UL data in a RoundRobin fashion */
-  if ((tti_rx.to_uint() % 2) == 0) {
-    alloc_ul_users(tti_sched);
-  }
+  //if ((tti_rx.to_uint() % 2) == 0) {
+    //alloc_ul_users(tti_sched);
+  //}
 
   /* Schedule DL user data */
-  alloc_dl_users(tti_sched);
+  //alloc_dl_users(tti_sched);
 
-  if ((tti_rx.to_uint() % 2) == 1) {
-    alloc_ul_users(tti_sched);
-  }
+  //if ((tti_rx.to_uint() % 2) == 1) {
+    //alloc_ul_users(tti_sched);
+  //}
 
   /* Select the winner DCI allocation combination, store all the scheduling results */
   tti_sched->generate_sched_results(*ue_db);
 
   /* Reset ue harq pending ack state, clean-up blocked pids */
-  for (auto& user : *ue_db) {
+  /*for (auto& user : *ue_db) {
     user.second->finish_tti(tti_rx, enb_cc_idx);
-  }
+  }*/
 
   log_dl_cc_results(logger, enb_cc_idx, cc_result->dl_sched_result);
   log_phich_cc_results(logger, enb_cc_idx, cc_result->ul_sched_result);

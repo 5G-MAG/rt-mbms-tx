@@ -1,1 +1,7 @@
 build
+.*.swp
+.*.swo
+.*.swn
+.*.swl
+.*.swm
+

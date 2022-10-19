@@ -151,7 +151,7 @@ public:
     cfg.um.tx_sn_field_length = rlc_umd_sn_size_t::size5bits;
     cfg.um.tx_mod             = 32;
     cfg.um.is_mrb             = true;
-    cfg.tx_queue_length       = 1024;
+    cfg.tx_queue_length       = 2048;
     return cfg;
   }
   static rlc_config_t srb_config(uint32_t idx)

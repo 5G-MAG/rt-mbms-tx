@@ -906,9 +906,9 @@ void sf_sched::generate_sched_results(sched_ue_list& ue_db)
   cc_sched_result* cc_result = cc_results->get_cc(cc_cfg->enb_cc_idx);
 
   /* Resume UL HARQs with pending retxs that did not get allocated */
-  using phich_t    = sched_interface::ul_sched_phich_t;
-  auto& phich_list = cc_result->ul_sched_result.phich;
-  for (auto& ue_pair : ue_db) {
+  //using phich_t    = sched_interface::ul_sched_phich_t;
+  //auto& phich_list = cc_result->ul_sched_result.phich;
+  /*for (auto& ue_pair : ue_db) {
     auto&         ue   = *ue_pair.second;
     uint16_t      rnti = ue.get_rnti();
     ul_harq_proc* h    = ue.get_ul_harq(get_tti_tx_ul(), cc_cfg->enb_cc_idx);
@@ -927,7 +927,7 @@ void sf_sched::generate_sched_results(sched_ue_list& ue_db)
         phich->phich = phich_t::ACK;
       }
     }
-  }
+  }*/
 
   /* Pick one of the possible DCI masks */
   sf_cch_allocator::alloc_result_t dci_result;
@@ -944,15 +944,15 @@ void sf_sched::generate_sched_results(sched_ue_list& ue_db)
     log_broadcast_allocation(cc_result->dl_sched_result.bc.back(), bc_alloc.rbg_range, *cc_cfg);
   }
 
-  for (const auto& rar_alloc : rar_allocs) {
+  /*for (const auto& rar_alloc : rar_allocs) {
     cc_result->dl_sched_result.rar.emplace_back(rar_alloc.rar_grant);
     cc_result->dl_sched_result.rar.back().dci.location = dci_result[rar_alloc.alloc_data.dci_idx]->dci_pos;
     log_rar_allocation(cc_result->dl_sched_result.rar.back(), rar_alloc.alloc_data.rbg_range);
-  }
+  }*/
 
-  set_dl_data_sched_result(dci_result, &cc_result->dl_sched_result, ue_db);
+  //set_dl_data_sched_result(dci_result, &cc_result->dl_sched_result, ue_db);
 
-  set_ul_sched_result(dci_result, &cc_result->ul_sched_result, ue_db);
+  //set_ul_sched_result(dci_result, &cc_result->ul_sched_result, ue_db);
 
   /* Store remaining sf_sched results for this TTI */
   cc_result->dl_mask   = tti_alloc.get_dl_mask();

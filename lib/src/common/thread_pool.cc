@@ -90,7 +90,7 @@ void thread_pool::init_worker(uint32_t id, worker* obj, uint32_t prio, uint32_t 
     }
     workers[id] = obj;
     obj->setup(id, this, prio, mask);
-    cvar_queue.notify_all();
+//    cvar_queue.notify_all();
   }
 }
 
