@@ -1,24 +1,13 @@
-srsRAN
+rt-tx-poc
 ======
 
-[![Build Status](https://app.travis-ci.com/srsran/srsRAN.svg?branch=master)](https://app.travis-ci.com/github/srsran/srsRAN)
-[![Language grade: C/C++](https://img.shields.io/lgtm/grade/cpp/g/srsran/srsRAN.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/srsran/srsRAN/context:cpp)
-[![Coverity](https://scan.coverity.com/projects/23045/badge.svg)](https://scan.coverity.com/projects/srsran)
+The 5G Braodcast transmitter builds a proof of concept development for the 3GPP LTE-based Terrestrial Broadcast (FeMBMS), base in the [srsRAN](https://www.srsran.com) implementation. This software is provided as is and are not part of the reference tools. It doesn't (and won't) have support from the developers team, it's main porpuse is to show and demonstrate an implementation of the standard and its capabilities.
 
-srsRAN is a 4G/5G software radio suite developed by [SRS](http://www.srs.io).
+The baseline of the transmitter is a Rel-9 eNodeB from the srsRAN suite, the actual tx includes:
+ * Release 14 CAS subframe.
+ * Subcarrier spacing of 1.25 kHz.
+ * Release 14 frame structure (1 CAS + 39 MCH subframes).
 
-See the [srsRAN project pages](https://www.srsran.com) for information, guides and project news.
+The rest of the features are the same as the srsRAN implementation.
 
-The srsRAN suite includes:
-  * srsUE - a full-stack SDR 4G/5G-NSA UE application (5G-SA coming soon)
-  * srsENB - a full-stack SDR 4G/5G-NSA eNodeB application (5G-SA coming soon)
-  * srsEPC - a light-weight 4G core network implementation with MME, HSS and S/P-GW
-
-For application features, build instructions and user guides see the [srsRAN documentation](https://docs.srsran.com).
-
-For license details, see LICENSE file.
-
-Support
-=======
-
-Mailing list: https://lists.srsran.com/mailman/listinfo/srsran-users
+For build instructions see the [srsRAN documentation](https://docs.srsran.com).
