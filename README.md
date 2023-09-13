@@ -40,7 +40,7 @@ The source can be obtained by cloning the github repository.
 
 ```bash
 cd ~
-git clone --recurse-submodules https://github.com/rt-mbms-tx.git
+git clone --recurse-submodules https://github.com/5G-MAG/rt-mbms-tx.git
 cd rt-mbms-tx
 git submodule update
 ```
