@@ -1,13 +1,15 @@
-# LTE-based 5G Broadcast Transmitter
+<h1 align="center">Standalone 5G Broadcast Transmitter</h1>
+<p align="center">
+  <img src="https://img.shields.io/badge/Status-Under_Development-yellow" alt="Under Development">
+  <img src="https://img.shields.io/github/v/tag/5G-MAG/rt-mbms-tx?label=version" alt="Version">
+  <img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License">
+</p>
 
 ## Introduction
 
-This repository holds the standalone LTE-based 5G Broadcast transmitter part of the 5G-MAG Reference Tools.
+The 5G Broadcast Transmitter is an extension of an MBMS-enabled eNodeB tailored to operate as a 5G Broadcast transmitter without uplink.
 
-### Specifications
-
-A list of specification related to this repository is available in
-the [Standards Wiki](https://github.com/5G-MAG/Standards/wiki/MBMS-&-LTE-based-5G-Broadcast:-Relevant-Specifications).
+Additional information can be found at: https://5g-mag.github.io/Getting-Started/pages/lte-based-5g-broadcast/
 
 ### About the implementation
 
@@ -23,8 +25,6 @@ Only a single MCH can be transmitted.
 
 Additional information can be found in the srsRAN
 documentation: https://docs.srsran.com/projects/4g/en/latest/app_notes/source/embms/source/index.html
-
-A list of currently supported features is available [here](https://github.com/5G-MAG/rt-mbms-tx/wiki/Features).
 
 ## Install dependencies
 
