@@ -90,6 +90,8 @@ Starting the transmitter requires the follwing 3 steps:
 2. Starting the EPC
 3. Starting the eNodeB
 
+Note that running the eNodeB may require an SDR platform. Check the following tutorial for support: https://5g-mag.github.io/Getting-Started/pages/3gpp-ran-and-core-platforms/tutorials/sdr-platforms.html
+
 ### Starting the MBMS-Gateway
 
 ```
