@@ -1,11 +1,48 @@
-<h1 align="center">Standalone 5G Broadcast Transmitter (rt-mbms-tx)</h1>
 <p align="center">
-  <img src="https://img.shields.io/badge/Status-Under_Development-yellow" alt="Under Development">
-  <img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License">
-  <img src="https://img.shields.io/badge/Platform-Linux-lightgrey" alt="Platform: Linux">
-  <img src="https://img.shields.io/badge/C%2B%2B-00599C?logo=cplusplus&logoColor=white" alt="C++">
-  <img src="https://img.shields.io/badge/3GPP-LTE--based%205G%20Broadcast-informational" alt="3GPP LTE-based 5G Broadcast">
+  <img src=".github/banner.svg" width="100%" alt="Reference Tools · 5G Broadcast - TV and Radio Services: 5G Broadcast Transmitter">
 </p>
+
+<p align="center">
+  EPC and eNB for an LTE-based 5G Terrestrial Broadcast cell: a standalone srsRAN fork that transmits FeMBMS, carries MBMS sessions over M3AP and relays Public Warning System messages over SBc-AP.
+</p>
+
+<p align="center">
+  <img alt="Status: under development"
+    src="https://img.shields.io/badge/Status-Under_Development-yellow">
+  <a href="https://github.com/5G-MAG/rt-mbms-tx/releases"><img alt="Version"
+    src="https://img.shields.io/github/v/release/5G-MAG/rt-mbms-tx?label=Version&sort=semver"></a>
+  <a href="LICENSE"><img alt="License: GNU Affero General Public License v3.0"
+    src="https://img.shields.io/badge/License-AGPL%20v3.0-blue"></a>
+</p>
+
+<p align="center">
+  <a href="https://www.5g-mag.com/reference-tools/5g-broadcast">Project page</a> &nbsp;&middot;&nbsp;
+  <a href="https://github.com/5G-MAG/rt-mbms-tx/issues">Issues</a> &nbsp;&middot;&nbsp;
+  <a href="https://www.5g-mag.com/contributing">Contributing</a>
+</p>
+
+---
+
+## At a glance
+
+|  |  |
+|---|---|
+| **Implements** | TS 36.211, TS 36.212, TS 36.213 and TS 36.331 for the FeMBMS radio; TS 29.274 (GTPv2-C) on Sm; TS 36.300 clause 15 for multi-PMCH. The repository does not record the version of each document it was built against. |
+| **Role** | Transmit side: the EPC (`srsepc`) and the eNB (`srsenb`) |
+| **Works with** | [rt-mbms-gw](https://github.com/5G-MAG/rt-mbms-gw), [rt-mbms-bmsc](https://github.com/5G-MAG/rt-mbms-bmsc) and [rt-mbms-modem](https://github.com/5G-MAG/rt-mbms-modem) |
+| **Part of** | [5G Broadcast - TV and Radio Services](https://www.5g-mag.com/reference-tools/5g-broadcast) |
+
+## Specification
+
+Built against the documents named above. Clause-by-clause coverage, and what is still absent, is
+recorded on the project page rather than here:
+<https://www.5g-mag.com/reference-tools/5g-broadcast>
+
+## Install dependencies
+
+The system packages for the whole broadcast chain, this component included, are listed in one
+place and verified from a clean machine by `check-build-from-clean.sh`:
+<https://github.com/5G-MAG/rt-mbms-examples/blob/main/scripts/mbms-broadcast-demo/README.md>
 
 ## Introduction
 
@@ -260,16 +297,19 @@ control endpoint is bound to a non-loopback address. The real SCTP interfaces (S
 SBc-AP) carry no application-layer authentication either and should be confined to a trusted
 transport network.
 
-## Specification coverage
-
-For the exhaustive, feature-by-feature 3GPP/ETSI specification coverage audit (PHY, MAC, RRC,
-S1AP, M3AP, Sm/GTPv2-C, SBc-AP, and the non-3GPP control server), including implemented /
-partial / stubbed / not-implemented status and release coverage (Rel-14 to Rel-19), see
-**the specification-coverage doc (kept separately, not in this repo)**.
-
 ## Development
 
 This project follows the
 [Gitflow workflow](https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow).
 The `development` branch is the integration branch for new features; branch from it before
 starting a new feature.
+
+## Contributing
+
+Contributions are welcome. How to raise an issue, fork the repository and open a pull request, and
+the Contributor License Agreement required before code can be merged, are described at
+<https://www.5g-mag.com/contributing>.
+
+## License
+
+Distributed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
