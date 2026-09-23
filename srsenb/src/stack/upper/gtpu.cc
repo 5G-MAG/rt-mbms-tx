@@ -65,10 +65,37 @@ gtpu_tunnel_manager::ue_bearer_tunnel_list* gtpu_tunnel_manager::find_rnti_tunne
   return it != ue_teidin_db.end() ? &ue_teidin_db[rnti] : nullptr;
 }
 
+/* is_lte_rb() (common_lte.h, MAX_LTE_LCID=10) validates the regular, unicast-UE DRB
+ * logicalChannelIdentity field (TS 36.331 clause 6.3.2, DRB-ToAddMod: INTEGER(3..10)).
+ * Applying it to the broadcast RNTI's bearers here was simply wrong, on two counts,
+ * not just one: (1) MBMS's own OTA session-numbering field -- logicalChannelIdentity-r9
+ * (clause 6.3.7, MBMS-SessionInfo-r9): INTEGER(0..maxSessionPerPMCH-1) = 0..28
+ * (maxSessionPerPMCH=29, clause 6.4) -- is a distinct ASN.1 field in an unrelated
+ * SEQUENCE, not a narrower view of the regular-DRB one; and (2), more to the point for
+ * THIS check specifically, the value that actually reaches here for the broadcast RNTI
+ * isn't that OTA field at all -- it's compose_mch_lcid()'s own composite key
+ * (enb_pdcp_interfaces.h), an implementation-internal encoding that flattens (PMCH
+ * index, that PMCH's own lc_ch_id) into one integer so PDCP/GTP-U/bearer_manager (which
+ * have no native PMCH concept) can use a single flat, always-unique id. That composite
+ * was never a real ASN.1 field to begin with, so neither 3..10 nor 0..28 is the right
+ * bound for it -- what actually bounds it is bearer_manager::add_eps_bearer()'s uint8_t
+ * eps_bearer_id parameter, i.e. exactly PMCH_LCID_MAX_COMPOSITE (enb_pdcp_interfaces.h,
+ * already included below), reused here rather than inventing a third number. Confirmed
+ * live before this fix: a second PMCH's composite bearer id of 17 -- comfortably inside
+ * that real range -- was rejected with "invalid eps-BearerID=17" by the misapplied 3..10
+ * regular-DRB check. */
+static bool is_valid_eps_bearer_id(uint16_t rnti, uint32_t eps_bearer_id)
+{
+  if (rnti == SRSRAN_MRNTI) {
+    return eps_bearer_id <= PMCH_LCID_MAX_COMPOSITE;
+  }
+  return is_lte_rb(eps_bearer_id);
+}
+
 srsran::span<gtpu_tunnel_manager::bearer_teid_pair>
 gtpu_tunnel_manager::find_rnti_bearer_tunnels(uint16_t rnti, uint32_t eps_bearer_id)
 {
-  if (not is_lte_rb(eps_bearer_id)) {
+  if (not is_valid_eps_bearer_id(rnti, eps_bearer_id)) {
     logger.warning("Searching for bearer with invalid eps-BearerID=%d", eps_bearer_id);
     return {};
   }
@@ -85,7 +112,7 @@ gtpu_tunnel_manager::find_rnti_bearer_tunnels(uint16_t rnti, uint32_t eps_bearer
 const gtpu_tunnel*
 gtpu_tunnel_manager::add_tunnel(uint16_t rnti, uint32_t eps_bearer_id, uint32_t teidout, uint32_t spgw_addr)
 {
-  if (not is_lte_rb(eps_bearer_id)) {
+  if (not is_valid_eps_bearer_id(rnti, eps_bearer_id)) {
     logger.warning("Adding TEID with invalid eps-BearerID=%d", eps_bearer_id);
     return nullptr;
   }
@@ -421,7 +448,8 @@ int gtpu::init(const gtpu_args_t& gtpu_args, pdcp_interface_gtpu* pdcp_)
 
   // Start MCH socket if enabled
   //if (args.embms_enable) {
-    if (not m1u.init(args.embms_m1u_multiaddr, args.embms_m1u_if_addr, args.embms_session_teids)) {
+    if (not m1u.init(
+            args.embms_m1u_multiaddr, args.embms_m1u_if_addr, args.embms_session_teids, args.embms_extra_session_teids)) {
       return SRSRAN_ERROR;
     }
  // }
@@ -920,28 +948,45 @@ gtpu::m1u_handler::~m1u_handler()
   }
 }
 
-bool gtpu::m1u_handler::init(std::string m1u_multiaddr_, std::string m1u_if_addr_, std::string session_teids_csv_)
+bool gtpu::m1u_handler::init(std::string                      m1u_multiaddr_,
+                             std::string                      m1u_if_addr_,
+                             std::string                      session_teids_csv_,
+                             const std::vector<std::string>& extra_session_teids_csv_)
 {
   m1u_multiaddr = std::move(m1u_multiaddr_);
   m1u_if_addr   = std::move(m1u_if_addr_);
   pdcp          = parent->pdcp;
 
-  if (not session_teids_csv_.empty()) {
+  session_teids_per_pmch.assign(1 + extra_session_teids_csv_.size(), {});
+  size_t total_configured = 0;
+  for (size_t p = 0; p < session_teids_per_pmch.size(); p++) {
+    const std::string& csv = (p == 0) ? session_teids_csv_ : extra_session_teids_csv_[p - 1];
+    if (csv.empty()) {
+      continue;
+    }
+    std::vector<uint32_t>&   out = session_teids_per_pmch[p];
     std::vector<std::string> teid_strs;
-    boost::split(teid_strs, session_teids_csv_, boost::is_any_of(","));
+    boost::split(teid_strs, csv, boost::is_any_of(","));
     for (const std::string& s : teid_strs) {
       try {
-        session_teids.push_back(static_cast<uint32_t>(std::stoul(s, nullptr, 0)));
+        out.push_back(static_cast<uint32_t>(std::stoul(s, nullptr, 0)));
       } catch (const std::exception& e) {
-        logger.error("Invalid entry in embms.session_teids: '%s' (%s) -- ignoring the whole list, falling back to "
-                     "legacy single-bearer M1-U demux",
+        logger.error("Invalid entry in %s: '%s' (%s) -- ignoring the whole list, falling back to legacy "
+                     "single-bearer M1-U demux for PMCH %zu",
+                     (p == 0) ? "embms.session_teids" : "embms.pmchN.session_teids",
                      s.c_str(),
-                     e.what());
-        session_teids.clear();
+                     e.what(),
+                     p);
+        out.clear();
         break;
       }
     }
-    logger.info("M1-U TEID demux configured for %zu session(s)", session_teids.size());
+    total_configured += out.size();
+  }
+  if (total_configured > 0) {
+    logger.info("M1-U TEID demux configured for %zu session(s) across %zu PMCH(s)",
+               total_configured,
+               session_teids_per_pmch.size());
   }
 
   // Set up sink socket
@@ -1005,19 +1050,34 @@ void gtpu::m1u_handler::handle_rx_packet(srsran::unique_byte_buffer_t pdu, const
   if (not gtpu_read_header(pdu.get(), &header, logger)) {
     return;
   }
-  int lcid = bearer_counter;
-  if (not session_teids.empty()) {
-    auto it = std::find(session_teids.begin(), session_teids.end(), header.teid);
-    if (it != session_teids.end()) {
-      lcid = static_cast<int>(std::distance(session_teids.begin(), it)) + 1;
-    } else {
-      logger.warning("M1-U packet with unrecognized TEID 0x%08x (embms.session_teids configured but no match) -- "
-                     "dropping",
+  bool any_configured = false;
+  for (const auto& teids : session_teids_per_pmch) {
+    if (!teids.empty()) {
+      any_configured = true;
+      break;
+    }
+  }
+
+  uint32_t composite = (uint32_t)bearer_counter; // legacy fallback: PMCH0, lcid=bearer_counter (always 1)
+  if (any_configured) {
+    bool found = false;
+    for (size_t pmch_idx = 0; pmch_idx < session_teids_per_pmch.size() && !found; pmch_idx++) {
+      const std::vector<uint32_t>& teids = session_teids_per_pmch[pmch_idx];
+      auto                          it    = std::find(teids.begin(), teids.end(), header.teid);
+      if (it != teids.end()) {
+        uint32_t lcid = static_cast<uint32_t>(std::distance(teids.begin(), it)) + 1;
+        composite     = compose_mch_lcid((uint32_t)pmch_idx, lcid);
+        found         = true;
+      }
+    }
+    if (!found) {
+      logger.warning("M1-U packet with unrecognized TEID 0x%08x (embms.[pmchN.]session_teids configured but no "
+                     "match) -- dropping",
                      header.teid);
       return;
     }
   }
-  pdcp->write_sdu(SRSRAN_MRNTI, lcid, std::move(pdu));
+  pdcp->write_sdu(SRSRAN_MRNTI, composite, std::move(pdu));
 }
 
 } // namespace srsenb

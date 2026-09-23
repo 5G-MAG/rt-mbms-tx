@@ -24,6 +24,8 @@
 
 #include "srsran/adt/expected.h"
 #include "srsran/common/byte_buffer.h"
+#include <string>
+#include <vector>
 
 namespace srsenb {
 
@@ -35,6 +37,11 @@ struct gtpu_args_t {
   /* Comma-separated per-session TEIDs for M1-U demux (e.g. "0xAAAAAAAA,0xAAAAAAAB"),
    * index i -> LCID i+1. Empty = legacy single-bearer behavior. See m1u_handler. */
   std::string embms_session_teids;
+  /* Same format/semantics as embms_session_teids above, but one entry per configured
+   * extra PMCH (index i here == PMCH i+1's own session_teids, i.e. cfg.extra_pmch[i].
+   * session_teids on the RRC side). Plain strings, not srsenb::pmch_cfg_t, since lib/
+   * must not depend on a srsenb/-level header -- see m1u_handler::init(). */
+  std::vector<std::string> embms_extra_session_teids;
   bool        embms_enable                 = false;
   uint32_t    indirect_tunnel_timeout_msec = 0;
 };

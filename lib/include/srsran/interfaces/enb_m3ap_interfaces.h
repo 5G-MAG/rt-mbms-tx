@@ -46,10 +46,13 @@ class rrc_interface_m3ap
 {
 public:
   // Real per-session MBMS state driven by M3AP -- see srsenb/hdr/stack/rrc/rrc.h's own doc comment on these.
+  // teid is the session's downlink M1-U GTP TEID (M3AP TNL-Information IE, tnl_info.gtp_dl_teid) -- 0 if
+  // the session start request carried none, which RRC treats the same as "no TEID-based PMCH routing".
   virtual void mbms_session_start(const std::string&    tmgi_key,
                                   const srsran::tmgi_t& tmgi,
                                   uint8_t               session_id,
-                                  bool                  session_id_present) = 0;
+                                  bool                  session_id_present,
+                                  uint32_t              teid) = 0;
   virtual void mbms_session_stop(const std::string& tmgi_key) = 0;
 };
 

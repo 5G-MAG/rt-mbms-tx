@@ -129,6 +129,20 @@ typedef struct {
    * PMCH-InfoList to be smaller than or equal to mcch-RepetitionPeriod") -
    * that's not configurable and is enforced in rrc.cc's reconfigure_embms(). */
   std::vector<pmch_cfg_t> extra_pmch;
+  /* Static-config-file-only route into the above: embms.nof_pmch (1-2, default 1) and
+   * embms.pmch1.* (enb_cfg_parser.cc's parse of main.cc's registered options) fill in
+   * pmch1 and, if nof_pmch>=2, enb_cfg_parser.cc pushes it into extra_pmch once at
+   * startup. Needed because control_server.cc's live embms.pmch1.session_teids/
+   * embms.nof_pmch SETs can't help gtpu.cc's m1u_handler learn a TEID-to-PMCH1 mapping
+   * -- m1u_handler only reads embms_extra_session_teids once, at gtpu::init(), which
+   * runs long before the control socket starts listening (see control_server.cc's
+   * restart_only_keys comment on embms.session_teids). This is the only way, today, to
+   * get a real (non-fabricated) session routed to and delivered from PMCH1. Only one
+   * extra PMCH, and only a practical subset of pmch_cfg_t's fields -- see main.cc's
+   * embms.pmch1.* registrations for exactly which; anything else on PMCH1 still needs
+   * the live control socket, same as before this existed. */
+  uint8_t    nof_pmch = 1;
+  pmch_cfg_t pmch1;
 } embms_args_t;
 
 typedef struct {
@@ -195,7 +209,8 @@ public:
                                    uint8_t            nof_mbms_sessions,
                                    bool               time_separation_sl2,
                                    const std::string& subcarrier_spacing,
-                                   const std::vector<pmch_cfg_t>& extra_pmch = {}) {}
+                                   const std::vector<pmch_cfg_t>& extra_pmch    = {},
+                                   const std::string&             session_teids = "") {}
 
   virtual void reload_sib12(bool activate) {}
 };

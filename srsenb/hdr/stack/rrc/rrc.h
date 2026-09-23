@@ -42,6 +42,7 @@
 #include "srsran/srslog/srslog.h"
 #include <atomic>
 #include <map>
+#include <set>
 #include <pthread.h>
 
 namespace srsenb {
@@ -110,7 +111,8 @@ public:
                          uint8_t            nof_mbms_sessions,
                          bool               time_separation_sl2,
                          const std::string& subcarrier_spacing,
-                         const std::vector<pmch_cfg_t>& extra_pmch = {});
+                         const std::vector<pmch_cfg_t>& extra_pmch    = {},
+                         const std::string&             session_teids = "");
   void reload_sib12(bool activate);
   // Real per-session MBMS state, driven by M3AP (srsenb/hdr/stack/m3ap/m3ap.h) instead of the
   // static nof_mbms_sessions/fabricated-TMGI loop reconfigure_embms()/pack_mcch() otherwise fall
@@ -119,7 +121,8 @@ public:
   void mbms_session_start(const std::string&    tmgi_key,
                           const srsran::tmgi_t& tmgi,
                           uint8_t               session_id,
-                          bool                  session_id_present) override;
+                          bool                  session_id_present,
+                          uint32_t              teid) override;
   void mbms_session_stop(const std::string& tmgi_key) override;
 
   // rrc_interface_mac
@@ -241,7 +244,8 @@ private:
   void     rem_user(uint16_t rnti);
   uint32_t generate_sibs();
   void     configure_mbsfn_sibs();
-  int      pack_mcch(uint16_t mbms_mcs);
+  void     configure_mbms_bearers();
+  int      pack_mcch(const std::vector<uint16_t>& mbms_mcs_per_pmch);
 
   void config_mac();
   void fill_sib_lens(uint32_t ccidx, sched_interface::cell_cfg_sib_t (&sibs)[sched_interface::MAX_SIBS]) const;
@@ -280,6 +284,11 @@ private:
   // ever been established" -- configure_mbsfn_sibs()/pack_mcch() then fall back to their pre-existing
   // static-config/fabricated-TMGI behavior, so a deployment with no MME/M3AP connection at all is unaffected.
   std::map<std::string, srsran::pmch_info_t::mbms_session_info_t> mbms_sessions;
+  // Composite bearer ids (compose_mch_lcid()) already registered with rlc/pdcp/gtpu/
+  // bearer_manager by configure_mbms_bearers() -- lets repeat calls (safe, but not
+  // free: bearer_manager logs an ERROR for a duplicate id) skip ids they already know
+  // about instead of re-registering (and re-logging) them every MCCH repack.
+  std::set<uint32_t>     _registered_mbms_bearers;
   bool                   enable_mbms     = false;
   rrc_cfg_t              cfg             = {};
   uint32_t               nof_si_messages = 0;

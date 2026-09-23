@@ -28,6 +28,7 @@
 #include "srsran/common/rwlock_guard.h"
 #include "srsran/common/standard_streams.h"
 #include "srsran/common/time_prof.h"
+#include "srsran/interfaces/enb_pdcp_interfaces.h"
 #include "srsran/interfaces/enb_phy_interfaces.h"
 #include "srsran/interfaces/enb_rlc_interfaces.h"
 #include "srsran/interfaces/enb_rrc_interfaces.h"
@@ -146,12 +147,34 @@ int mac::rlc_buffer_state(uint16_t rnti, uint32_t lc_id, uint32_t tx_queue, uint
     if (rnti != SRSRAN_MRNTI) {
       ret = scheduler.dl_rlc_buffer_state(rnti, lc_id, tx_queue, retx_queue);
     } else {
-      for (uint32_t p = 0; p < 15u; p++) {
-        for (uint32_t i = 0; i < mch_per_pmch[p].num_mtch_sched; i++) {
-          if (lc_id == mch_per_pmch[p].mtch_sched[i].lcid) {
-            mch_per_pmch[p].mtch_sched[i].lcid_buffer_size = tx_queue;
+      /* lc_id here is a PMCH-composite lcid (see the matching compose step in
+       * srsran::rlc::add_bearer_mrb's bsr_callback wrapper, lib/src/rlc/rlc.cc) -
+       * NOT a bare lcid. Every PMCH numbers its own MRB sessions starting at 1, so
+       * a bare lcid alone can't tell "PMCH 0's lcid 1" from "PMCH 1's lcid 1" apart.
+       * Looping over every PMCH and matching on the bare value (the previous
+       * approach) applied ANY PMCH's buffer-state report to every other PMCH
+       * sharing that lcid number - confirmed live: PMCH0's real (SACH) session
+       * periodically stamped its own queue depth onto PMCH1's empty session,
+       * corrupting PMCH1's build_mch_sched() into scheduling real transmissions
+       * against a bearer that actually had nothing queued, causing near-total CRC
+       * failure on the RX side. Decompose and update only the PMCH this report is
+       * actually for. */
+      uint32_t mch_idx, true_lcid;
+      decompose_mch_lcid(lc_id, mch_idx, true_lcid);
+      bool matched = false;
+      if (mch_idx < 15u) {
+        for (uint32_t i = 0; i < mch_per_pmch[mch_idx].num_mtch_sched; i++) {
+          if (true_lcid == mch_per_pmch[mch_idx].mtch_sched[i].lcid) {
+            mch_per_pmch[mch_idx].mtch_sched[i].lcid_buffer_size = tx_queue;
+            matched = true;
           }
         }
+      }
+      if (getenv("MCH_BSR_DIAG")) {
+        fprintf(stderr,
+                "MCH_BSR_DIAG lc_id=%u mch_idx=%u true_lcid=%u tx_queue=%u num_mtch_sched=%u matched=%d\n",
+                lc_id, mch_idx, true_lcid, tx_queue,
+                mch_idx < 15u ? mch_per_pmch[mch_idx].num_mtch_sched : 0u, (int)matched);
       }
       ret = 0;
     }
@@ -802,6 +825,13 @@ void mac::build_mch_sched(uint32_t tbs, uint8_t pmch_idx)
       last_mtch_stop       = m.mtch_sched[i].stop;
     }
   }
+  if (getenv("MCH_BSR_DIAG")) {
+    fprintf(stderr,
+            "BUILD_MCH_SCHED pmch_idx=%u num_mtch_sched=%u total_bytes_to_tx=%d "
+            "sfs_per_sched_period=%d bytes_per_sf=%d mtch_stop=%u\n",
+            pmch_idx, m.num_mtch_sched, total_bytes_to_tx, sfs_per_sched_period, bytes_per_sf,
+            m.num_mtch_sched > 0 ? m.mtch_sched[m.num_mtch_sched - 1].stop : 0u);
+  }
 }
 
 int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res_list)
@@ -809,31 +839,49 @@ int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_li
   srsran::rwlock_read_guard lock(rwlock);
   dl_sched_t*               dl_sched_res = &dl_sched_res_list[0];
   logger.set_context(tti);
+  // cell_config is a std::vector populated by cell_cfg(), called from the RRC/MAC init
+  // sequence -- the PHY worker can start calling get_mch_sched() fractionally before that
+  // completes (there's no ordering guarantee between "PHY workers started" and "MAC cell
+  // config applied"), in which case cell_config[0] below would index an empty vector
+  // (undefined behaviour, crashed here in practice). Nothing to schedule yet either way.
+  if (cell_config.empty()) {
+    dl_sched_res->pdsch[0].dci.rnti = 0;
+    return SRSRAN_SUCCESS;
+  }
   /* Clamp pmch_idx to valid range. */
   if (pmch_idx >= mcch.nof_pmch_info) {
     pmch_idx = 0;
   }
   srsran_ra_tb_t mcs      = {};
   srsran_ra_tb_t mcs_data = {};
-  mcs.mcs_idx      = enum_to_number(this->sib13.mbsfn_area_info_list[0].mcch_cfg.sig_mcs);
+  // Guard mbsfn_area_info_list[0]: this function is called from the PHY worker every
+  // subframe, including the brief window before RRC has published any MBSFN-AreaInfo (SIB13
+  // hasn't arrived/been configured yet, e.g. right at cell bring-up) -- nof_mbsfn_area_info==0
+  // then, and indexing [0] on an empty list is undefined behaviour (crashed here in practice).
+  // Same pattern already used a few lines down for the MCCH modification-period check; this
+  // mirrors it for the two accesses above that were missing it.
+  const bool has_mbsfn_area = this->sib13.nof_mbsfn_area_info > 0;
+  mcs.mcs_idx      = has_mbsfn_area ? enum_to_number(this->sib13.mbsfn_area_info_list[0].mcch_cfg.sig_mcs) : 0;
   mcs_data.mcs_idx = this->mcch.pmch_info_list[pmch_idx].data_mcs;
   // MCCH/MTCH TBS depends on MBSFN PRBs; mbsfn_prb equals nof_prb when pmch_bandwidth=0
   // and is smaller (30/35/40 PRBs at 1.25 kHz SCS) when pmch_bandwidth > 0 (Rel-17 extended bandwidth).
   const uint32_t mbsfn_prb = cell_config[0].cell.mbsfn_prb;
   srsran_dl_fill_ra_mcs(&mcs, 0, mbsfn_prb, false);
   /* Derive srsran_scs_t from the area_info SCS enum for PMCH MCS table selection. */
-  srsran_scs_t pmch_scs;
+  srsran_scs_t pmch_scs = SRSRAN_SCS_1KHZ25;
   using scs_t = srsran::mbsfn_area_info_t::subcarrier_spacing_t;
-  switch (this->sib13.mbsfn_area_info_list[0].subcarrier_spacing) {
-    case scs_t::khz_0dot37:
-      pmch_scs = (this->sib13.mbsfn_area_info_list[0].time_separation ==
-                      srsran::mbsfn_area_info_t::time_separation_t::sl2)
-                     ? SRSRAN_SCS_370HZ_SL2
-                     : SRSRAN_SCS_370HZ_SL4;
-      break;
-    case scs_t::khz_7dot5: pmch_scs = SRSRAN_SCS_7KHZ5;   break;
-    case scs_t::khz_2dot5: pmch_scs = SRSRAN_SCS_2KHZ5;   break;
-    default:               pmch_scs = SRSRAN_SCS_1KHZ25;  break;
+  if (has_mbsfn_area) {
+    switch (this->sib13.mbsfn_area_info_list[0].subcarrier_spacing) {
+      case scs_t::khz_0dot37:
+        pmch_scs = (this->sib13.mbsfn_area_info_list[0].time_separation ==
+                        srsran::mbsfn_area_info_t::time_separation_t::sl2)
+                       ? SRSRAN_SCS_370HZ_SL2
+                       : SRSRAN_SCS_370HZ_SL4;
+        break;
+      case scs_t::khz_7dot5: pmch_scs = SRSRAN_SCS_7KHZ5;   break;
+      case scs_t::khz_2dot5: pmch_scs = SRSRAN_SCS_2KHZ5;   break;
+      default:               pmch_scs = SRSRAN_SCS_1KHZ25;  break;
+    }
   }
   /* Rel-19: use PMCH-specific MCS table (TS 36.213 §11.1) */
   srsran_pmch_fill_ra_mcs(&mcs_data, mbsfn_prb,
@@ -920,6 +968,21 @@ int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_li
       m.current_sf_allocation_num         = 1;
       mch_period_start_sfn_base[pmch_idx] = period_sfn_base;
     }
+  }
+
+  // build_mch_sched() above only has real content to build once the RRC/MCCH layer has
+  // actually configured at least one MBMS session for this PMCH -- there's a real startup
+  // window (this cell's MCCH/SIB13 not yet received/scheduled, e.g. right after bring-up)
+  // where that hasn't happened yet and num_mtch_sched is still 0. Every branch below
+  // unconditionally computes m.num_mtch_sched-1 as an mtch_sched[] index (both to read
+  // mtch_sched[num_mtch_sched-1].stop and, in the is_mcch branch, mtch_sched[0].lcid
+  // alongside it), which underflows to a huge value on the unsigned num_mtch_sched-1
+  // when num_mtch_sched==0 -- an out-of-bounds mtch_sched[] access, not just a logic
+  // no-op. Same "no active grant" (rnti=0, data=nullptr) convention as the paragraph
+  // above already describes for the stale-schedule case.
+  if (m.num_mtch_sched == 0) {
+    dl_sched_res->pdsch[0].dci.rnti = 0;
+    return SRSRAN_SUCCESS;
   }
 
   if (is_mcch) {
@@ -1021,7 +1084,16 @@ int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_li
         int requested_bytes = (mcs_data.tbs / 8 > (int)m.mtch_sched[mtch_index].lcid_buffer_size)
                                   ? (m.mtch_sched[mtch_index].lcid_buffer_size)
                                   : ((mcs_data.tbs / 8) - 2);
-        int bytes_received = ue_db[SRSRAN_MRNTI]->read_pdu(current_lcid, mtch_payload_buffer, requested_bytes);
+        // current_lcid alone is ambiguous once 2+ PMCHs exist (each numbers its own
+        // sessions from 1) -- RLC has no way to tell "PMCH pmch_idx's lcid current_lcid"
+        // from "PMCH 0's lcid current_lcid" apart, so read_pdu() (which reaches PDCP/
+        // GTP-U/bearer_manager's flat, PMCH-agnostic bearer tables via RLC's own outer
+        // wrapper) is given the composite key those tables were actually registered
+        // under (rrc.cc's add_user()) instead of the bare lcid. m.pdu[0].lcid below
+        // stays the TRUE lcid -- it's packed into the actual over-the-air MAC subheader,
+        // which only ever knows about this one PMCH's own {1..N} lcid space.
+        int bytes_received = ue_db[SRSRAN_MRNTI]->read_pdu(
+            srsenb::compose_mch_lcid(pmch_idx, current_lcid), mtch_payload_buffer, requested_bytes);
         m.pdu[0].lcid    = current_lcid;
         m.pdu[0].nbytes  = bytes_received;
         m.mtch_sched[0].mtch_payload  = mtch_payload_buffer;

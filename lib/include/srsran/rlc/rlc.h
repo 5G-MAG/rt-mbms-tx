@@ -60,7 +60,7 @@ public:
 
   // PDCP interface
   void write_sdu(uint32_t lcid, unique_byte_buffer_t sdu);
-  void write_sdu_mch(uint32_t lcid, unique_byte_buffer_t sdu);
+  void write_sdu_mch(uint32_t mch_idx, uint32_t lcid, unique_byte_buffer_t sdu);
   bool rb_is_um(uint32_t lcid);
   void discard_sdu(uint32_t lcid, uint32_t discard_sn);
   bool sdu_queue_is_full(uint32_t lcid);
@@ -70,7 +70,7 @@ public:
   uint32_t get_buffer_state(const uint32_t lcid);
   uint32_t get_total_mch_buffer_state(uint32_t lcid, uint32_t mch_idx = 0);
   uint32_t read_pdu(uint32_t lcid, uint8_t* payload, uint32_t nof_bytes);
-  uint32_t read_pdu_mch(uint32_t lcid, uint8_t* payload, uint32_t nof_bytes);
+  uint32_t read_pdu_mch(uint32_t mch_idx, uint32_t lcid, uint8_t* payload, uint32_t nof_bytes);
   int      get_increment_sequence_num();
   void     write_pdu(uint32_t lcid, uint8_t* payload, uint32_t nof_bytes);
   void     write_pdu_bcch_bch(srsran::unique_byte_buffer_t pdu);
@@ -126,7 +126,7 @@ private:
   bool valid_lcid_mrb(uint32_t mch_idx, uint32_t lcid);
 
   void update_bsr(uint32_t lcid);
-  void update_bsr_mch(uint32_t lcid);
+  void update_bsr_mch(uint32_t mch_idx, uint32_t lcid);
 };
 
 void rlc_bearer_metrics_print(const rlc_bearer_metrics_t& metrics);

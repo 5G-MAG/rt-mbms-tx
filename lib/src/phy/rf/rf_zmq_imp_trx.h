@@ -75,6 +75,12 @@ typedef struct {
   uint32_t            trx_timeout_ms;
   bool                log_trx_timeout;
   int32_t             sample_offset;
+  /* Set once this channel has timed out at least once with fail_on_disconnect
+   * false -- i.e. we've confirmed nothing will ever answer. Once true, the
+   * caller can skip the separate real-time pacing sleep for this channel and
+   * let trx_timeout_ms's own wait provide the pacing instead, avoiding an
+   * additive (pacing-sleep + timeout-wait) slowdown on every subframe. */
+  bool                no_peer_confirmed;
 } rf_zmq_rx_t;
 
 typedef struct {

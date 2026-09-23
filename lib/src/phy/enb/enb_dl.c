@@ -531,14 +531,24 @@ static void put_mib(srsran_enb_dl_t* q)
   uint32_t sf_idx = q->dl_sf.tti % 10;
   uint32_t sfn    = q->dl_sf.tti / 10;
 
-  /* PBCH is transmitted only in SF0 of a CAS frame (sf_idx == 0 + SFN period check).
-   * The CAS-repetition requirement of TS 36.211 §6.6.4.1 is satisfied intra-SF0:
-   * srsran_pbch_encode calls srsran_pbch_put_cas_rep internally, which copies the
-   * PBCH symbols from slot 1 into additional symbols within the same SF0 resource
-   * grid (dst_ns in {0,1} — both slots of SF0).  No cross-subframe PBCH copies are
-   * produced or required by this implementation model; the sf_idx == 0 gate is
-   * therefore correct and intentional. */
-  bool is_cas_sf0 = (sf_idx == 0) && ((q->cell.nof_prb >= 25) ? (sfn % 4 == 0) : (sfn % 8 == 4));
+  /* PBCH is transmitted in SF0 of every frame on an MBMS/Unicast-mixed (non-MBMS-dedicated)
+   * cell -- TS 36.211 §6.6.1: standard MIB repeats every radio frame (10ms), relying on its own
+   * 4-consecutive-frame (40ms) combining window, not a reduced-period "CAS frame" concept
+   * (that's FeMBMS-dedicated only, TS 36.211 §6.6.4.1). On an MBMS-dedicated cell, PBCH is
+   * further restricted to the CAS-frame SFN period check below. Getting this wrong for the
+   * mixed-cell case silently breaks PBCH's own combining window: a receiver accumulating 4
+   * consecutive frames expecting 4 redundant MIB copies instead sees 1 real copy and 3
+   * frames of unrelated content, which cannot combine into a valid decode (confirmed live,
+   * 2026-07-22 -- this exact bug produced consistent mixed-cell-hypothesis decode failure while
+   * only ever the MBMS hypothesis "succeeded", against a cell actually configured as
+   * MBMS/Unicast-mixed).
+   * The CAS-repetition requirement of TS 36.211 §6.6.4.1 (MBMS-dedicated only) is satisfied
+   * intra-SF0: srsran_pbch_encode calls srsran_pbch_put_cas_rep internally, which copies the
+   * PBCH symbols from slot 1 into additional symbols within the same SF0 resource grid
+   * (dst_ns in {0,1} — both slots of SF0). No cross-subframe PBCH copies are produced or
+   * required by that repetition scheme; the sf_idx == 0 gate alone is correct for it. */
+  bool is_cas_sf0 = (sf_idx == 0) &&
+                    (!q->cell.mbms_dedicated || ((q->cell.nof_prb >= 25) ? (sfn % 4 == 0) : (sfn % 8 == 4)));
   if (is_cas_sf0) {
     if (q->cell.cas_muting) {
       if (sfn % (16u * (uint32_t)q->cell.n_cas) >= 4u * (uint32_t)q->cell.k_cas) {

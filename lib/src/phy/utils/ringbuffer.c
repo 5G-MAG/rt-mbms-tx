@@ -205,7 +205,13 @@ int srsran_ringbuffer_read_timed_block(srsran_ringbuffer_t* q, void* p, int nof_
 
     // check nsec wrap-around
     towait.tv_sec = now.tv_sec + timeout_ms / 1000L;
-    long nsec     = now.tv_nsec + ((timeout_ms % 1000U) * 1000UL);
+    // (timeout_ms % 1000) is a remainder in MILLISECONDS; tv_nsec is in
+    // NANOSECONDS, so this needs *1000000, not *1000 (1ms = 1e6ns, not 1e3ns).
+    // The old *1000UL factor made every non-exact-multiple-of-1000ms timeout
+    // expire ~1000x sooner than requested; every caller in this codebase
+    // happened to use exact multiples (where the remainder is 0 and the bug
+    // was invisible) until trx_timeout_ms=1 exposed it.
+    long nsec     = now.tv_nsec + ((timeout_ms % 1000U) * 1000000UL);
     towait.tv_sec += nsec / 1000000000L;
     towait.tv_nsec = nsec % 1000000000L;
   }
@@ -312,7 +318,13 @@ int srsran_ringbuffer_read_block(srsran_ringbuffer_t* q, void** p, int nof_bytes
 
     // check nsec wrap-around
     towait.tv_sec = now.tv_sec + timeout_ms / 1000L;
-    long nsec     = now.tv_nsec + ((timeout_ms % 1000U) * 1000UL);
+    // (timeout_ms % 1000) is a remainder in MILLISECONDS; tv_nsec is in
+    // NANOSECONDS, so this needs *1000000, not *1000 (1ms = 1e6ns, not 1e3ns).
+    // The old *1000UL factor made every non-exact-multiple-of-1000ms timeout
+    // expire ~1000x sooner than requested; every caller in this codebase
+    // happened to use exact multiples (where the remainder is 0 and the bug
+    // was invisible) until trx_timeout_ms=1 exposed it.
+    long nsec     = now.tv_nsec + ((timeout_ms % 1000U) * 1000000UL);
     towait.tv_sec += nsec / 1000000000L;
     towait.tv_nsec = nsec % 1000000000L;
   }

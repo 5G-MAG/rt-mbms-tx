@@ -260,8 +260,13 @@ bool generate_sib_dci(sched_interface::dl_sched_bc_t& bc,
                       uint32_t                        current_cfi)
 {
   bc           = {};
-  int tbs_bits = generate_ra_bc_dci_format1a_common(
-      bc.dci, SRSRAN_SIRNTI_MBMS_DEDICATED, tti_tx_dl, cell_params.cfg.sibs[sib_idx].len, rbg_range, cell_params, current_cfi);
+  // SI-RNTI value legally differs by cell type (TS 36.321 §7.1): the standard 0xFFFF value on a
+  // non-dedicated cell, the MBMS-dedicated 0xFFF9 value when cell.mbms_dedicated -- see this
+  // same flag already gating MIB packing (enb_dl.c's put_mib()) and MBSFN subframe eligibility
+  // (phy_common.cc's is_mch_subframe()).
+  uint16_t si_rnti  = cell_params.cfg.cell.mbms_dedicated ? SRSRAN_SIRNTI_MBMS_DEDICATED : SRSRAN_SIRNTI;
+  int      tbs_bits = generate_ra_bc_dci_format1a_common(
+      bc.dci, si_rnti, tti_tx_dl, cell_params.cfg.sibs[sib_idx].len, rbg_range, cell_params, current_cfi);
   if (tbs_bits < 0) {
     return false;
   }

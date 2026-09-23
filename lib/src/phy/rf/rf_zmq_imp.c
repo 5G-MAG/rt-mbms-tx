@@ -28,6 +28,7 @@
 #include <srsran/phy/utils/vector.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <zmq.h>
 
@@ -731,17 +732,52 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
      * ~20% of nominal on the RX side; CPU confirmed idle via pidstat, so
      * looking for a TX-side pacing/timing issue instead of a compute
      * bottleneck). See fembms-mbsfn-cfo-investigation memory. */
-    if (getenv("TX_PACING_DIAG")) {
-      static unsigned long call_count = 0;
-      call_count++;
-      if (call_count % 200 == 1) {
+    /* TX_PACING_DIAG2: added while chasing the residual sub-real-time gap left
+     * after fixing the additive pacing-sleep+timeout bug and the ringbuffer
+     * ms->ns unit bug. Splits total per-call wall time into gap_us (compute
+     * time since the previous call returned -- PHY processing, not this
+     * function's own waits), sleep_us (actual usleep duration, 0 if skipped),
+     * and recv_us (actual receive-loop duration). These three should sum to
+     * ~1000us for exact real-time pace; whichever term is inflated shows
+     * where the remaining time actually goes. */
+    static struct timespec diag_prev_call_end = {};
+    static unsigned long   diag_call_count    = 0;
+    bool                   diag_on            = getenv("TX_PACING_DIAG") != NULL;
+    struct timespec        diag_call_start = {}, diag_sleep_start = {}, diag_sleep_end = {};
+    if (diag_on) {
+      clock_gettime(CLOCK_MONOTONIC, &diag_call_start);
+      diag_call_count++;
+      if (diag_call_count % 200 == 1) {
         fprintf(stderr,
                 "TX_PACING_DIAG call=%lu nsamples=%u decim_factor=%u nsamples_baserate=%u base_srate=%u "
                 "rx_sleep_us=%lu\n",
-                call_count, nsamples, decim_factor, nsamples_baserate, handler->base_srate, rx_sleep_us);
+                diag_call_count, nsamples, decim_factor, nsamples_baserate, handler->base_srate, rx_sleep_us);
       }
     }
-    usleep(rx_sleep_us);
+    // If every running channel has already proven (on an earlier call) that
+    // nothing will ever answer it, trx_timeout_ms's own blocking wait below
+    // is already going to consume real time -- sleeping here too would be
+    // additive (pacing-sleep + timeout-wait on every subframe, forever),
+    // silently running the whole radio below real-time speed. Skip this
+    // sleep only in that all-channels-confirmed-unanswered case; leave it in
+    // place whenever any channel might still get a real reply (a genuine RF
+    // peer, or one that hasn't timed out even once yet).
+    bool all_channels_confirmed_no_peer = true;
+    for (int i = 0; i < handler->nof_channels; i++) {
+      if (rf_zmq_rx_is_running(&handler->receiver[i]) && !handler->receiver[i].no_peer_confirmed) {
+        all_channels_confirmed_no_peer = false;
+        break;
+      }
+    }
+    if (!all_channels_confirmed_no_peer) {
+      if (diag_on) {
+        clock_gettime(CLOCK_MONOTONIC, &diag_sleep_start);
+      }
+      usleep(rx_sleep_us);
+      if (diag_on) {
+        clock_gettime(CLOCK_MONOTONIC, &diag_sleep_end);
+      }
+    }
 
     // check for tx gap if we're also transmitting on this radio
     for (int i = 0; i < handler->nof_channels; i++) {
@@ -753,6 +789,10 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
     // copy from rx buffer as many samples as requested into provided buffer
     bool    completed                  = false;
     int32_t count[SRSRAN_MAX_CHANNELS] = {};
+    struct timespec diag_recv_start = {};
+    if (diag_on) {
+      clock_gettime(CLOCK_MONOTONIC, &diag_recv_start);
+    }
     while (!completed) {
       uint32_t completed_count = 0;
 
@@ -788,10 +828,17 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
             if (handler->receiver[i].log_trx_timeout) {
               fprintf(stderr, "Error: timeout receiving samples after %dms\n", handler->receiver[i].trx_timeout_ms);
             }
-            // Other end disconnected, either keep going, or fail
+            // Other end disconnected (or never connected): either fail, or
+            // zero-fill the unread remainder of this channel's buffer and
+            // treat it as complete for this call, instead of retrying the
+            // same blocking read forever -- nothing will ever advance
+            // count[i] if there truly is no peer on this channel.
             if (handler->receiver[i].fail_on_disconnect) {
               goto clean_exit;
             }
+            srsran_vec_zero(&ptr[count[i]], nsamples_baserate - count[i]);
+            count[i] = nsamples_baserate;
+            handler->receiver[i].no_peer_confirmed = true;
           } else if (n < SRSRAN_SUCCESS) {
             // Other error, exit
             fprintf(stderr, "Error: receiving data.\n");
@@ -805,6 +852,29 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
 
       // Check if all channels are completed
       completed = (completed_count == handler->nof_channels);
+    }
+    if (diag_on) {
+      struct timespec diag_recv_end = {};
+      clock_gettime(CLOCK_MONOTONIC, &diag_recv_end);
+      if (diag_call_count % 200 == 1) {
+        long gap_us = 0;
+        if (diag_prev_call_end.tv_sec != 0) {
+          gap_us = (diag_call_start.tv_sec - diag_prev_call_end.tv_sec) * 1000000L +
+                   (diag_call_start.tv_nsec - diag_prev_call_end.tv_nsec) / 1000L;
+        }
+        long sleep_us = (diag_sleep_end.tv_sec - diag_sleep_start.tv_sec) * 1000000L +
+                        (diag_sleep_end.tv_nsec - diag_sleep_start.tv_nsec) / 1000L;
+        long recv_us = (diag_recv_end.tv_sec - diag_recv_start.tv_sec) * 1000000L +
+                       (diag_recv_end.tv_nsec - diag_recv_start.tv_nsec) / 1000L;
+        fprintf(stderr,
+                "TX_PACING_DIAG2 call=%lu gap_us=%ld sleep_us=%ld recv_us=%ld total_us=%ld\n",
+                diag_call_count,
+                gap_us,
+                sleep_us,
+                recv_us,
+                gap_us + sleep_us + recv_us);
+      }
+      diag_prev_call_end = diag_recv_end;
     }
     rf_zmq_info(handler->id,
                 " - read %d samples. %d samples available\n",

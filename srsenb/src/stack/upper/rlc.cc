@@ -122,17 +122,30 @@ void rlc::add_bearer_mrb(uint16_t rnti, uint32_t lcid)
 {
   pthread_rwlock_rdlock(&rwlock);
   if (users.count(rnti)) {
-    users[rnti].rlc->add_bearer_mrb(0, lcid);
+    uint32_t mch_idx, true_lcid;
+    decompose_mch_lcid(lcid, mch_idx, true_lcid);
+    users[rnti].rlc->add_bearer_mrb(mch_idx, true_lcid);
   }
   pthread_rwlock_unlock(&rwlock);
 }
 
 bool rlc::has_bearer(uint16_t rnti, uint32_t lcid)
 {
+  // Same composite-lcid issue as is_suspended() just above -- lcid is a composed
+  // (pmch_idx, lcid) value for MRNTI, not a plain RLC array index. Decompose and use the
+  // MRB-aware check, matching write_sdu/add_bearer_mrb/read_pdu. Confirmed live, 2026-07-22:
+  // this was the second (of two) composite-lcid pre-checks pdcp_entity_lte::write_sdu() runs
+  // before delivering an SDU on PMCH1+, alongside is_suspended().
   pthread_rwlock_rdlock(&rwlock);
   bool result = false;
   if (users.count(rnti)) {
-    result = users[rnti].rlc->has_bearer(lcid);
+    if (rnti != SRSRAN_MRNTI) {
+      result = users[rnti].rlc->has_bearer(lcid);
+    } else {
+      uint32_t mch_idx, true_lcid;
+      decompose_mch_lcid(lcid, mch_idx, true_lcid);
+      result = users[rnti].rlc->has_bearer_mrb(mch_idx, true_lcid);
+    }
   }
   pthread_rwlock_unlock(&rwlock);
   return result;
@@ -161,6 +174,19 @@ bool rlc::suspend_bearer(uint16_t rnti, uint32_t lcid)
 
 bool rlc::is_suspended(uint16_t rnti, uint32_t lcid)
 {
+  // MBMS/MRB bearers have no "suspended" concept at all (that's a unicast RRC-reconfiguration
+  // state, e.g. during handover, which never applies to a broadcast bearer) -- and lcid here is
+  // a composite (pmch_idx, lcid) value for MRNTI (see compose_mch_lcid()'s doc comment), not a
+  // plain RLC array index, so passing it straight to the non-MRB is_suspended() below like every
+  // other rnti does is wrong on two counts. Missing this branch (unlike write_sdu/add_bearer_mrb/
+  // read_pdu just below, which all correctly decompose it) meant any composite lcid past
+  // PMCH_LCID_STRIDE-1 (i.e. any session on PMCH1+) tripped the generic valid_lcid() bound check
+  // deep inside pdcp_entity_lte::write_sdu()'s pre-delivery suspend check, dropping the SDU with
+  // "Radio bearer id must be in [0:11]" before it ever reached RLC's own MRB path. Never noticed
+  // on PMCH0 alone, where composite==lcid stays within that bound. Confirmed live, 2026-07-22.
+  if (rnti == SRSRAN_MRNTI) {
+    return false;
+  }
   pthread_rwlock_rdlock(&rwlock);
   bool result = false;
   if (users.count(rnti)) {
@@ -208,7 +234,9 @@ int rlc::read_pdu(uint16_t rnti, uint32_t lcid, uint8_t* payload, uint32_t nof_b
     if (rnti != SRSRAN_MRNTI) {
       ret = users[rnti].rlc->read_pdu(lcid, payload, nof_bytes);
     } else {
-      ret = users[rnti].rlc->read_pdu_mch(lcid, payload, nof_bytes);
+      uint32_t mch_idx, true_lcid;
+      decompose_mch_lcid(lcid, mch_idx, true_lcid);
+      ret = users[rnti].rlc->read_pdu_mch(mch_idx, true_lcid, payload, nof_bytes);
     }
   } else {
     ret = SRSRAN_ERROR;
@@ -233,7 +261,9 @@ void rlc::write_sdu(uint16_t rnti, uint32_t lcid, srsran::unique_byte_buffer_t s
     if (rnti != SRSRAN_MRNTI) {
       users[rnti].rlc->write_sdu(lcid, std::move(sdu));
     } else {
-      users[rnti].rlc->write_sdu_mch(lcid, std::move(sdu));
+      uint32_t mch_idx, true_lcid;
+      decompose_mch_lcid(lcid, mch_idx, true_lcid);
+      users[rnti].rlc->write_sdu_mch(mch_idx, true_lcid, std::move(sdu));
     }
   }
   pthread_rwlock_unlock(&rwlock);
@@ -262,6 +292,16 @@ bool rlc::rb_is_um(uint16_t rnti, uint32_t lcid)
 
 bool rlc::sdu_queue_is_full(uint16_t rnti, uint32_t lcid)
 {
+  // Same composite-lcid issue as is_suspended()/has_bearer() above -- lcid is a composed
+  // (pmch_idx, lcid) value for MRNTI. Unlike those two, srsran::rlc has no sdu_queue_is_full_mrb
+  // counterpart to decompose into, so -- matching is_suspended()'s precedent for a property that
+  // doesn't meaningfully apply to a broadcast bearer -- never report an MRB queue as full here.
+  // This was the third (of three) composite-lcid pre-checks pdcp_entity_lte::write_sdu() runs
+  // before delivering an SDU on PMCH1+, alongside is_suspended() and has_bearer(). Confirmed
+  // live, 2026-07-22.
+  if (rnti == SRSRAN_MRNTI) {
+    return false;
+  }
   bool ret = false;
   pthread_rwlock_rdlock(&rwlock);
   if (users.count(rnti)) {

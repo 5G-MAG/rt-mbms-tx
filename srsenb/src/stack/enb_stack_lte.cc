@@ -207,6 +207,9 @@ int enb_stack_lte::init(const stack_args_t&      args_,
   gtpu_args.embms_m1u_multiaddr          = args.embms.m1u_multiaddr;
   gtpu_args.embms_m1u_if_addr            = args.embms.m1u_if_addr;
   gtpu_args.embms_session_teids          = args.embms.session_teids;
+  for (const pmch_cfg_t& extra : args.embms.extra_pmch) {
+    gtpu_args.embms_extra_session_teids.push_back(extra.session_teids);
+  }
   gtpu_args.mme_addr                     = args.s1ap.mme_addr;
   gtpu_args.gtp_bind_addr                = args.s1ap.gtp_bind_addr;
   gtpu_args.indirect_tunnel_timeout_msec = args.gtpu_indirect_tunnel_timeout_msec;

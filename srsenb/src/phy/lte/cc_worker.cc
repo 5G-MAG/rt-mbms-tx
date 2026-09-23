@@ -143,8 +143,9 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     return;
   }
 
-  /* Setup SI-RNTI in PHY */
-  add_rnti( SRSRAN_SIRNTI_MBMS_DEDICATED);
+  /* Setup SI-RNTI in PHY -- value legally differs by cell type (TS 36.321 §7.1), matching the
+   * same cell.mbms_dedicated branch already used for MIB packing and SIB1/SI-DCI generation. */
+  add_rnti(cell.mbms_dedicated ? SRSRAN_SIRNTI_MBMS_DEDICATED : SRSRAN_SIRNTI);
 
   /* Setup P-RNTI in PHY */
   add_rnti(SRSRAN_PRNTI);

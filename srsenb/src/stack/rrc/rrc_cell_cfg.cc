@@ -66,6 +66,14 @@ enb_cell_common_list::enb_cell_common_list(const rrc_cfg_t& cfg_) : cfg(cfg_)
     // Update DL EARFCN
     new_cell->sib1.freq_band_ind_r14 = (uint8_t)srsran_band_get_band(new_cell->cell_cfg.dl_earfcn);
 
+    // Set Cell SIB1 (legacy) -- same per-cell identity as the MBMS-r14 one above, just in
+    // the legacy cell_access_related_info layout. Used instead of sib1 when this cell's
+    // mbms_dedicated is false; see rrc::generate_sibs().
+    new_cell->sib1_legacy                                  = cfg.sib1_legacy;
+    new_cell->sib1_legacy.cell_access_related_info.cell_id.from_number((cfg.enb_id << 8u) + new_cell->cell_cfg.cell_id);
+    new_cell->sib1_legacy.cell_access_related_info.tac.from_number(new_cell->cell_cfg.tac);
+    new_cell->sib1_legacy.freq_band_ind = (uint8_t)srsran_band_get_band(new_cell->cell_cfg.dl_earfcn);
+
     // Set Cell SIB2
     // update PRACH root seq index for this cell
     new_cell->sib2                                      = cfg.sibs[1].sib2();

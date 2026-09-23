@@ -515,8 +515,12 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
   }
 
   /* additionalNonMBSFNSubframes-r14 (MIB-MBMS bits[9-10]): SFs 1..N of active CAS frames
-   * are non-MBSFN (TS 36.331 §6.7.4.1).  Apply after the sf=0 CAS gate above. */
-  uint8_t add_non = cas_cfg.additional_non_mbms_frames;
+   * are non-MBSFN (TS 36.331 §6.7.4.1). MBMS-dedicated only -- an MBMS/Unicast-mixed cell's
+   * MIB has no such field (see enb_dl.c's srsran_pbch_mib_pack(), which never touches it),
+   * so applying it regardless of cell type would carry Rel-14 signalling onto a Rel-9 cell
+   * even though nothing OTA declared it; harmless today only because the config default is
+   * 0. Apply after the sf=0 CAS gate above. */
+  uint8_t add_non = (!cell_list_lte.empty() && cell_list_lte[0].cell.mbms_dedicated) ? cas_cfg.additional_non_mbms_frames : 0u;
   if (add_non > 0u) {
     bool sfn_is_cas    = narrow_cell ? (sfn % 8 == 4) : (sfn % 4 == 0);
     bool sfn_is_active = sfn_is_cas;

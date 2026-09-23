@@ -1220,6 +1220,14 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
       uint32_t n_cb_cap = srsran_pmch_n_cb_cap(
           cfg->n_soft_ref_category, cfg->scaling_factor_beta_num, cfg->scaling_factor_beta_den, M, ti_cb_segm.C);
 
+      if (getenv("TI_RM_DIAG")) {
+        fprintf(stderr,
+                "TI_RM_DIAG_TX subframe_idx=%u N=%u M=%u slot_m=%u slot_n=%u tbs=%d C=%u K1=%u K2=%u "
+                "Mbit_sf=%u Qm=%u Gp=%u e_min=%u n_cb_cap=%u\n",
+                cfg->subframe_idx, (unsigned)N, (unsigned)M, slot_m, slot_n, cfg->pdsch_cfg.grant.tb[0].tbs,
+                ti_cb_segm.C, ti_cb_segm.K1, ti_cb_segm.K2, Mbit_sf, Qm_ti, Gp_ti, e_min, n_cb_cap);
+      }
+
       /* shared_ti_tx_buf (caller-owned, pre-allocated for every slot) takes
        * priority over q->ti_tx_buf[] (this instance's own, lazily-allocated
        * cache) whenever the caller supplies one - see this function's doc

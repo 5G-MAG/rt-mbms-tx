@@ -23,12 +23,14 @@
 #define SRSRAN_RRC_CONFIG_H
 
 #include "rrc_config_common.h"
+#include "srsenb/hdr/stack/enb_stack_base.h" // pmch_cfg_t
 #include "srsran/asn1/rrc.h"
 #include "srsran/common/security.h"
 #include "srsran/interfaces/enb_rrc_interface_types.h"
 #include "srsran/phy/common/phy_common.h"
 #include <array>
 #include <string>
+#include <vector>
 
 namespace srsenb {
 
@@ -69,6 +71,13 @@ struct rrc_cfg_t {
   uint32_t enb_id; ///< Required to pack SIB1
   // Per eNB SIBs
   asn1::rrc::sib_type1_mbms_r14_s     sib1;
+  // Legacy (non-MBMS-r14) SIB1, used instead of `sib1` when cell.mbms_dedicated is false --
+  // derived from `sib1` post-parse (see enb_cfg_parser.cc's make_sib1_legacy()), not
+  // separately configured. This is TS 36.300 §15.2.2's "MBMS/Unicast-mixed cell": a genuinely
+  // camping-capable cell broadcasting eMBMS via the standard max-6-subframe MBSFN allocation
+  // (cell_barred is set not_barred -- see make_sib1_legacy()), even though no real unicast UE
+  // ever actually attaches.
+  asn1::rrc::sib_type1_s              sib1_legacy;
   asn1::rrc::sib_info_item_c sibs[ASN1_RRC_MAX_SIB];
   asn1::rrc::mac_main_cfg_s  mac_cnfg;
 
@@ -101,6 +110,17 @@ struct rrc_cfg_t {
   bool                                                                                    pmch_time_separation_sl2;     /* false=SL4 (default), true=SL2 (TS 36.211 §4.1) */
   std::string                                                                             pmch_subcarrier_spacing;      /* "" = derive from r9 SCS; "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" = override */
   uint16_t                                                                                sf_alloc_info_r16 = 0;        /* MCCH sf-AllocInfo-r16 (10-bit, first bit SF0); 0 = derive from r9 (TS 36.331 MBSFN-AreaInfo-r16) */
+  /* Extra PMCHs beyond PMCH0 (empty = today's single-PMCH behavior, using only
+   * the flat pmch_* fields above). Persisted here (set in reconfigure_embms(),
+   * read in configure_mbsfn_sibs()/pack_mcch()) rather than only threaded as a
+   * function parameter, since configure_mbsfn_sibs() has other call sites
+   * (startup, cell reconfiguration) that don't go through reconfigure_embms(). */
+  std::vector<pmch_cfg_t>                                                                 extra_pmch;
+  /* PMCH0's own session TEIDs, same format/semantics as embms_args_t::session_teids (comma-
+   * separated hex/decimal, e.g. "0xAAAAAAAA,0xAAAAAAAB") -- empty (default) means "no
+   * TEID-based filtering", the pre-existing behavior of signalling every known real session
+   * on PMCH0 unfiltered. See rrc.cc's resolve_pmch_sessions(). */
+  std::string                                                                             session_teids;
   uint32_t                                                                                inactivity_timeout_ms;
   std::array<srsran::CIPHERING_ALGORITHM_ID_ENUM, srsran::CIPHERING_ALGORITHM_ID_N_ITEMS> eea_preference_list;
   std::array<srsran::INTEGRITY_ALGORITHM_ID_ENUM, srsran::INTEGRITY_ALGORITHM_ID_N_ITEMS> eia_preference_list;

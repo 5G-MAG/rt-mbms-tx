@@ -408,6 +408,10 @@ struct pmch_info_t {
     tmgi_t  tmgi;
     uint8_t session_id;
     uint8_t lc_ch_id = 0;
+    // Not an OTA field (like lc_ch_id above) -- this session's M1-U downlink GTP TEID, from
+    // M3AP's TNL-Information IE, used only for embms.[pmchN.]session_teids-based PMCH
+    // assignment (rrc.cc). 0 if the session start request carried none.
+    uint32_t teid = 0;
   };
   uint32_t              nof_mbms_session_info;
   static const uint32_t max_session_per_pmch = 29;

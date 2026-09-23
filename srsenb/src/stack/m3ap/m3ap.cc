@@ -21,6 +21,7 @@
 
 #include "srsenb/hdr/stack/m3ap/m3ap.h"
 #include "srsran/common/bcd_helpers.h"
+#include "srsran/common/int_helpers.h"
 #include "srsran/common/standard_streams.h"
 #include <cerrno>
 #include <cstring>
@@ -345,7 +346,17 @@ bool m3ap::handle_mbms_session_start_request(const mbms_session_start_request_s&
 
   uint8_t session_id         = req.mbms_session_id_present ? req.mbms_session_id[0] : 0;
   bool    session_id_present = req.mbms_session_id_present;
-  rrc->mbms_session_start(key, to_tmgi_t(req.tmgi), session_id, session_id_present);
+  // TS 36.444 clause 9.2.2.2 "GTP-TEID" (the tnl_info.gtp_dl_teid IE): "the GTP Tunnel
+  // Endpoint Identifier to be used for the user plane transport between eNB and the
+  // MBMS-GW" -- i.e. this session's real M1-U TEID, deferring its encoding/range to
+  // TS 29.281. Decoded with the same uint8_to_uint32() big-endian helper this codebase's
+  // own GTP-U data-plane header parser (gtpu.cc's gtpu_read_header()) already uses for
+  // the identical 4-octet TEID field on the wire, rather than a fresh hand-rolled
+  // assembly -- confirmed live GTP-U traffic already decodes correctly with this exact
+  // byte order, so it's a directly-verified convention, not a fresh assumption.
+  uint32_t teid = 0;
+  srsran::uint8_to_uint32(req.tnl_info.gtp_dl_teid.data(), &teid);
+  rrc->mbms_session_start(key, to_tmgi_t(req.tmgi), session_id, session_id_present, teid);
 
   m3ap_pdu_c resp_pdu;
   auto&      resp             = resp_pdu.set_successful_outcome_mbms_session_start_resp();

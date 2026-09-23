@@ -173,28 +173,47 @@ void control_server::handle_connection(int conn_fd)
   setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
   setsockopt(conn_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-  static const size_t MAX_LINE = 4096;
-  std::string         line;
+  /* Reads and dispatches every complete (newline-terminated) line the client sends in
+   * this one connection, not just the first -- previously, several GET/SET commands
+   * piped through a single connection (e.g. "printf 'SET a\nSET b\n' | nc host port",
+   * a natural way to batch commands) silently discarded every line after the first:
+   * they were often already sitting in the same recv() buffer as the first line (TCP
+   * doesn't preserve per-write message boundaries), and the old code truncated the
+   * buffer to the first line and returned without ever looking at the rest. Confirmed
+   * live during the SIB13/MBSFN campaign: batched SETs for embms.k_cas/n_cas/
+   * cas_muting and embms.pmch1.time_interleaving_n were silently dropped this way,
+   * with no error -- every dropped command still individually returned "OK" when
+   * re-sent alone, which is what made the drops so easy to miss at the time.
+   * accept_loop() still closes the connection after this one call (unchanged, still a
+   * deliberately one-shot-per-connection design) -- this only fixes what happens
+   * *within* that one connection when the client wrote more than one line to it. */
+  static const size_t MAX_BUFFERED = 4096; // cap on data awaiting a newline, not on total lines/connection
+  std::string         buf_str;
+  std::string         responses;
   char                buf[256];
-  while (line.size() < MAX_LINE) {
+  bool                got_any_line = false;
+  while (buf_str.size() < MAX_BUFFERED) {
     ssize_t n = recv(conn_fd, buf, sizeof(buf), 0);
     if (n <= 0) {
-      break; // EOF, error, or timeout -- process whatever was received so far
+      break; // EOF, error, or timeout -- process whatever complete lines arrived
     }
-    line.append(buf, static_cast<size_t>(n));
-    size_t nl = line.find('\n');
-    if (nl != std::string::npos) {
-      line.resize(nl);
-      break;
+    buf_str.append(buf, static_cast<size_t>(n));
+    size_t nl;
+    while ((nl = buf_str.find('\n')) != std::string::npos) {
+      std::string one_line = buf_str.substr(0, nl);
+      buf_str.erase(0, nl + 1);
+      if (!one_line.empty()) {
+        got_any_line = true;
+        responses += dispatch(one_line);
+      }
     }
   }
 
-  if (line.empty()) {
+  if (!got_any_line) {
     return;
   }
 
-  std::string response = dispatch(line);
-  ssize_t     n         = send(conn_fd, response.c_str(), response.size(), MSG_NOSIGNAL);
+  ssize_t n = send(conn_fd, responses.c_str(), responses.size(), MSG_NOSIGNAL);
   (void)n;
 }
 
@@ -241,7 +260,48 @@ std::string control_server::handle_get() const
   oss << "embms.time_separation_sl2=" << (cfg.pmch_time_separation_sl2 ? "true" : "false") << "\n";
   oss << "embms.subcarrier_spacing=" << cfg.pmch_subcarrier_spacing << "\n";
   oss << "embms.session_teids=" << cfg.session_teids << "\n";
+  oss << "embms.nof_pmch=" << (1 + cfg.extra_pmch.size()) << "\n";
+  for (size_t i = 0; i < cfg.extra_pmch.size(); i++) {
+    const pmch_cfg_t& p      = cfg.extra_pmch[i];
+    std::string       prefix = "embms.pmch" + std::to_string(i + 1) + ".";
+    oss << prefix << "mcs=" << p.mcs << "\n";
+    oss << prefix << "cyclic_shift_alpha=" << static_cast<unsigned>(p.cyclic_shift_alpha) << "\n";
+    oss << prefix << "freq_interleaving=" << (p.freq_interleaving ? "true" : "false") << "\n";
+    oss << prefix << "time_interleaving_n=" << static_cast<unsigned>(p.time_interleaving_n) << "\n";
+    oss << prefix << "time_interleaving_m=" << static_cast<unsigned>(p.time_interleaving_m) << "\n";
+    oss << prefix << "time_interleaving_n_last_mtch=" << static_cast<unsigned>(p.time_interleaving_n_last_mtch) << "\n";
+    oss << prefix << "time_interleaving_m_last_mtch=" << static_cast<unsigned>(p.time_interleaving_m_last_mtch) << "\n";
+    oss << prefix << "n_soft_ref_category=" << p.n_soft_ref_category << "\n";
+    oss << prefix << "scaling_factor_beta=" << p.scaling_factor_beta << "\n";
+    oss << prefix << "use_mcs_table2=" << (p.use_mcs_table2 ? "true" : "false") << "\n";
+    oss << prefix << "mch_sched_period_rf=" << static_cast<unsigned>(p.mch_sched_period_rf) << "\n";
+    oss << prefix << "nof_mbms_sessions=" << static_cast<unsigned>(p.nof_mbms_sessions) << "\n";
+    oss << prefix << "session_teids=" << p.session_teids << "\n";
+  }
   return oss.str();
+}
+
+// Parses "pmchN" from a key of the form "embms.pmchN.<field>", returning N (1-based,
+// i.e. extra_pmch index N-1) and the trailing "<field>" via out-params. Returns false
+// (key untouched) if the key doesn't match this shape at all, so callers can fall
+// through to their own "unknown key" handling.
+static bool parse_pmch_index_key(const std::string& key, uint32_t& index, std::string& field)
+{
+  const std::string prefix = "embms.pmch";
+  if (key.size() <= prefix.size() || key.compare(0, prefix.size(), prefix) != 0) {
+    return false;
+  }
+  size_t dot = key.find('.', prefix.size());
+  if (dot == std::string::npos) {
+    return false;
+  }
+  std::string idx_str = key.substr(prefix.size(), dot - prefix.size());
+  if (idx_str.empty() || idx_str.find_first_not_of("0123456789") != std::string::npos) {
+    return false;
+  }
+  index = static_cast<uint32_t>(std::stoul(idx_str));
+  field = key.substr(dot + 1);
+  return true;
 }
 
 // SET does only syntax validation (known key, correctly-typed value) -- it must not
@@ -256,10 +316,18 @@ std::string control_server::handle_set(const std::string& args) const
                                                             "embms.m1u_multiaddr",
                                                             "embms.m1u_if_addr",
                                                             "embms.additional_non_mbsfn_subframes",
+                                                            // As of the TEID-based multi-PMCH session routing
+                                                            // added to rrc.cc's resolve_pmch_sessions(),
+                                                            // session_teids DOES now reach RRC live (threaded
+                                                            // through reload_embms_config()). Kept restart-only
+                                                            // anyway: gtpu.cc's m1u_handler (the actual M1-U
+                                                            // packet-to-LCID demux) still only reads this same
+                                                            // config string once at startup, not on live reload
+                                                            // -- letting RRC's signalled LCID mapping change live
+                                                            // while GTP-U's delivery mapping stays stale would
+                                                            // silently desync the two. Revisit once GTP-U's own
+                                                            // demux also live-reloads.
                                                             "embms.session_teids",
-                                                            // Not part of reload_embms_config()'s live-reconfigure
-                                                            // chain (unlike time_interleaving_n/m) -- only take
-                                                            // effect on the next full config parse/eNB restart.
                                                             "embms.n_soft_ref_category",
                                                             "embms.scaling_factor_beta"};
 
@@ -359,8 +427,97 @@ std::string control_server::handle_set(const std::string& args) const
       cfg.pmch_time_separation_sl2 = bval;
     } else if (key == "embms.subcarrier_spacing") {
       cfg.pmch_subcarrier_spacing = val;
+    } else if (key == "embms.nof_pmch") {
+      /* Live-settable (unlike the plan's original "restart-only" framing) for
+       * this pass, since configure_mbsfn_sibs()/pack_mcch() already recompute
+       * nof_pmch fresh from cfg.extra_pmch.size() on every call and mac.cc's
+       * scheduler already loops mcch.nof_pmch_info generically - there's no
+       * stale-sizing hazard a restart would be protecting against. 1..15
+       * (maxPMCH-PerMBSFN); 1 = today's single-PMCH behavior (extra_pmch
+       * empty). New entries default-construct (pmch_cfg_t's own defaults:
+       * mcs=9, no time interleaving, mch_sched_period_rf=64, 1 session). */
+      if (!parse_uint(val, 15, uval) || uval < 1) {
+        return "ERROR invalid value for " + key + ": '" + val + "' (must be 1..15)\n";
+      }
+      cfg.extra_pmch.resize(uval - 1);
     } else {
-      return "ERROR unknown key: " + key + "\n";
+      uint32_t    pmch_idx;
+      std::string pmch_field;
+      if (!parse_pmch_index_key(key, pmch_idx, pmch_field)) {
+        return "ERROR unknown key: " + key + "\n";
+      }
+      /* embms.nof_pmch must already have been set (either earlier in this
+       * same SET command, or by a previous one) large enough to cover this
+       * index - there is no implicit auto-grow here, so a typo'd index
+       * doesn't silently create a sparse/garbage-filled extra_pmch tail. */
+      if (pmch_idx < 1 || pmch_idx > cfg.extra_pmch.size()) {
+        return "ERROR embms.pmch" + std::to_string(pmch_idx) + ".* set but embms.nof_pmch=" +
+               std::to_string(1 + cfg.extra_pmch.size()) + " (set embms.nof_pmch=" +
+               std::to_string(pmch_idx + 1) + " first, either earlier in this same command or a previous one)\n";
+      }
+      pmch_cfg_t& p = cfg.extra_pmch[pmch_idx - 1];
+      if (pmch_field == "mcs") {
+        if (!parse_uint(val, 65535, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.mcs = static_cast<uint16_t>(uval);
+      } else if (pmch_field == "cyclic_shift_alpha") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.cyclic_shift_alpha = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "freq_interleaving") {
+        if (!parse_bool(val, bval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "' (expected true|false)\n";
+        }
+        p.freq_interleaving = bval;
+      } else if (pmch_field == "time_interleaving_n") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.time_interleaving_n = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "time_interleaving_m") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.time_interleaving_m = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "time_interleaving_n_last_mtch") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.time_interleaving_n_last_mtch = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "time_interleaving_m_last_mtch") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.time_interleaving_m_last_mtch = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "use_mcs_table2") {
+        if (!parse_bool(val, bval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "' (expected true|false)\n";
+        }
+        p.use_mcs_table2 = bval;
+      } else if (pmch_field == "mch_sched_period_rf") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.mch_sched_period_rf = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "nof_mbms_sessions") {
+        if (!parse_uint(val, 255, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.nof_mbms_sessions = static_cast<uint8_t>(uval);
+      } else if (pmch_field == "n_soft_ref_category") {
+        if (!parse_uint(val, 65535, uval)) {
+          return "ERROR invalid value for " + key + ": '" + val + "'\n";
+        }
+        p.n_soft_ref_category = static_cast<uint16_t>(uval);
+      } else if (pmch_field == "scaling_factor_beta") {
+        p.scaling_factor_beta = val;
+      } else if (pmch_field == "session_teids") {
+        p.session_teids = val;
+      } else {
+        return "ERROR unknown key: " + key + "\n";
+      }
     }
   }
 

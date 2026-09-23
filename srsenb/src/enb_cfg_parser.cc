@@ -1122,7 +1122,6 @@ int parse_cell_cfg(all_args_t* args_, srsran_cell_t* cell)
   cell->cp         = args_->phy.extended_cp ? SRSRAN_CP_EXT : SRSRAN_CP_NORM;
   cell->nof_ports  = args_->enb.nof_ports;
   cell->nof_prb    = args_->enb.n_prb;
-  cell->mbsfn_prb    = (args_->stack.embms.pmch_bandwidth > 0) ? args_->stack.embms.pmch_bandwidth : args_->enb.n_prb;
   /* pmch_bandwidth may legitimately exceed enb.n_prb (e.g. n_prb=25 with
    * pmch_bandwidth=40): FeMBMS extended coverage, a wide PMCH allocation over
    * a narrower CAS/carrier. This used to be clamped down to n_prb here
@@ -1130,7 +1129,27 @@ int parse_cell_cfg(all_args_t* args_, srsran_cell_t* cell)
    * downstream MBSFN/PMCH buffer chain wasn't sized for it; both are now
    * fixed (see srsran_cell_isvalid()'s and cc_worker.cc's doc comments), so
    * the value passing the {0,25,30,35,40} membership check in
-   * set_derived_args() further down is used as configured. */
+   * set_derived_args() further down is used as configured -- but only for an
+   * MBMS-dedicated cell: pmch-Bandwidth-r17 (this extended-coverage concept)
+   * is Rel-17 signalling with no equivalent in Rel-9's original eMBMS spec, so
+   * an MBMS/Unicast-mixed cell's (TS 36.300 §15.2.2) PMCH must stay within its
+   * own carrier width regardless of what embms.pmch_bandwidth is configured
+   * to. Without this gate, the PHY's actual MBSFN buffer/RE-mapping width
+   * (sized from mbsfn_prb here) would silently exceed what generate_sibs()'s
+   * legacy-SIB1 branch now (correctly) never signals in SIB13, breaking every
+   * mixed-cell receiver's PMCH decode (confirmed live, 2026-07-22: "PMCH extract symbols
+   * error expecting 2250 symbols but got 2400" once SIB13 stopped announcing
+   * the override this same config value still requested at the PHY level). */
+  if (!args_->stack.embms.mbms_dedicated && args_->stack.embms.pmch_bandwidth > 0) {
+    fprintf(stderr,
+            "embms.pmch_bandwidth=%u has no effect on an MBMS/Unicast-mixed (non-MBMS-dedicated) cell -- "
+            "pmch-Bandwidth-r17 is Rel-17 MBMS-dedicated-only signalling; PMCH stays at the "
+            "carrier width (%u PRB)\n",
+            args_->stack.embms.pmch_bandwidth, args_->enb.n_prb);
+  }
+  cell->mbsfn_prb = (args_->stack.embms.mbms_dedicated && args_->stack.embms.pmch_bandwidth > 0)
+                        ? args_->stack.embms.pmch_bandwidth
+                        : args_->enb.n_prb;
   cell->mbms_dedicated    = args_->stack.embms.mbms_dedicated;
   cell->cas_muting        = args_->stack.embms.cas_muting;
   cell->k_cas             = args_->stack.embms.k_cas;
@@ -1511,6 +1530,16 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
   rrc_cfg_->nof_mbms_sessions          = (args_->stack.embms.nof_mbms_sessions > 0 &&
                                           args_->stack.embms.nof_mbms_sessions <= 8)
                                              ? args_->stack.embms.nof_mbms_sessions : 1u;
+  /* Was only ever threaded through reconfigure_embms()'s live-SET path (rrc.cc) --
+   * never copied here for startup, so resolve_pmch_sessions() always saw this empty
+   * at process start regardless of the static config file, silently falling back to
+   * "dump every real session onto PMCH0 unfiltered" until the first live SET touched
+   * any embms.* field (which happens to also call reconfigure_embms() and thus set
+   * this correctly from then on). Confirmed live: a real session meant for PMCH1
+   * (via pmch1.session_teids below) also showed up duplicated on PMCH0, because
+   * PMCH0's own filter was empty at startup and its "no filter -> take everything"
+   * fallback doesn't know PMCH1 already claimed that session. */
+  rrc_cfg_->session_teids              = args_->stack.embms.session_teids;
   rrc_cfg_->pmch_time_separation_sl2   = args_->stack.embms.pmch_time_separation_sl2;
   {
     const std::string& scs = args_->stack.embms.pmch_subcarrier_spacing;
@@ -1603,6 +1632,65 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
     }
     rrc_cfg_->pmch_scaling_factor_beta_num = beta_num;
     rrc_cfg_->pmch_scaling_factor_beta_den = beta_den;
+  }
+
+  /* embms.nof_pmch/embms.pmch1.* (see enb_stack_base.h's doc comment on embms_args_t::
+   * pmch1 for why this static-config-only path exists): construct PMCH1's pmch_cfg_t
+   * here, once, at startup, and push it into both extra_pmch vectors (rrc_cfg_'s, read
+   * by rrc.cc; args_->stack.embms's, read by control_server.cc's GET and by gtpu.cc's
+   * m1u_handler via enb_stack_lte.cc's gtpu_args construction). Mirrors -- deliberately
+   * not sharing code with -- reconfigure_embms()'s own validation of the equivalent
+   * flat PMCH0 fields (this file already duplicates that validation for PMCH0 at
+   * startup vs. rrc.cc's copy for live changes; same pattern here, not a new one). */
+  uint16_t nof_pmch16 = args_->stack.embms.nof_pmch;
+  if (nof_pmch16 < 1 || nof_pmch16 > 2) {
+    ERROR("embms.nof_pmch=%u is not valid (must be 1 or 2 -- only one extra PMCH is configurable via the static "
+          "config file; use the live control socket for more) — setting to 1",
+          nof_pmch16);
+    nof_pmch16 = 1;
+  }
+  args_->stack.embms.nof_pmch = (uint8_t)nof_pmch16;
+  if (args_->stack.embms.nof_pmch >= 2) {
+    pmch_cfg_t pmch1 = args_->stack.embms.pmch1;
+    if (pmch1.time_interleaving_n > 1) {
+      static const uint8_t valid_n[] = {2, 4, 8, 16};
+      bool                 n_ok      = false;
+      for (uint8_t v : valid_n) {
+        if (pmch1.time_interleaving_n == v) {
+          n_ok = true;
+          break;
+        }
+      }
+      if (!n_ok) {
+        ERROR("embms.pmch1.time_interleaving_n=%u is not valid (must be 2, 4, 8, or 16) — disabling time "
+              "interleaving on PMCH1",
+              pmch1.time_interleaving_n);
+        pmch1.time_interleaving_n = 0;
+        pmch1.time_interleaving_m = 0;
+      }
+    }
+    if (pmch1.time_interleaving_n > 1 && pmch1.time_interleaving_m > 0) {
+      static const uint8_t valid_m[] = {4, 8, 16, 32};
+      bool                 m_ok      = false;
+      for (uint8_t v : valid_m) {
+        if (pmch1.time_interleaving_m == v) {
+          m_ok = true;
+          break;
+        }
+      }
+      if (!m_ok) {
+        ERROR("embms.pmch1.time_interleaving_m=%u is not valid (must be 4, 8, 16, or 32) — setting to 4",
+              pmch1.time_interleaving_m);
+        pmch1.time_interleaving_m = 4;
+      }
+    }
+    if (pmch1.nof_mbms_sessions < 1 || pmch1.nof_mbms_sessions > 8) {
+      ERROR("embms.pmch1.nof_mbms_sessions=%u is not valid (must be 1-8) — setting to 1", pmch1.nof_mbms_sessions);
+      pmch1.nof_mbms_sessions = 1;
+    }
+    args_->stack.embms.pmch1 = pmch1;
+    args_->stack.embms.extra_pmch.push_back(pmch1);
+    rrc_cfg_->extra_pmch.push_back(pmch1);
   }
 
   // Check number of control symbols
@@ -2656,6 +2744,47 @@ int parse_sib13_r14(std::string filename, sib_type13_r9_s* data)
   return parser::parse_section(std::move(filename), &sib13);
 }
 
+// Derive the legacy (non-MBMS-r14) SIB1 from the already-parsed MBMS-r14 SIB1, for use when
+// cell.mbms_dedicated is false (see rrc::generate_sibs()). Not separately configured: this
+// MBMS/Unicast-mixed cell (TS 36.300 §15.2.2) shares the same PLMN/TAC/cell-ID/scheduling-info
+// content as the MBMS-dedicated cell, just wrapped in the legacy SI container instead of the
+// FeMBMS one. It is a genuinely camping-capable cell (confirmed against the actual spec text,
+// not assumed): cell_barred must be not_barred, since a barred cell is rejected outright by
+// any real UE's cell-selection algorithm before it ever reads anything else, and this cell
+// type is required to work for real Rel-9 phones, not just be tolerated by them. This is
+// §15.2.2's plain mixed cell, not §15.2.2.1's "FeMBMS/Unicast-mixed cell" (which legitimately
+// is barred/SCell-only/no-paging) -- deliberately not that variant here.
+static void make_sib1_legacy(const sib_type1_mbms_r14_s& src, sib_type1_s* dst)
+{
+  *dst = {};
+
+  auto& access = dst->cell_access_related_info;
+  access.plmn_id_list.resize(src.cell_access_related_info_r14.plmn_id_list_r14.size());
+  for (uint32_t i = 0; i < src.cell_access_related_info_r14.plmn_id_list_r14.size(); i++) {
+    access.plmn_id_list[i].plmn_id               = src.cell_access_related_info_r14.plmn_id_list_r14[i];
+    access.plmn_id_list[i].cell_reserved_for_oper = plmn_id_info_s::cell_reserved_for_oper_opts::not_reserved;
+  }
+  access.tac      = src.cell_access_related_info_r14.tac_r14;
+  access.cell_id  = src.cell_access_related_info_r14.cell_id_r14;
+  access.cell_barred      = sib_type1_s::cell_access_related_info_s_::cell_barred_opts::not_barred;
+  access.intra_freq_resel = sib_type1_s::cell_access_related_info_s_::intra_freq_resel_opts::allowed;
+
+  dst->freq_band_ind      = src.freq_band_ind_r14;
+  dst->sys_info_value_tag = src.sys_info_value_tag_r14;
+  asn1::number_to_enum(dst->si_win_len, src.si_win_len_r14.to_number());
+
+  dst->sched_info_list.resize(src.sched_info_list_mbms_r14.size());
+  for (uint32_t i = 0; i < src.sched_info_list_mbms_r14.size(); i++) {
+    const auto& src_entry = src.sched_info_list_mbms_r14[i];
+    auto&       dst_entry = dst->sched_info_list[i];
+    asn1::number_to_enum(dst_entry.si_periodicity, src_entry.si_periodicity_r14.to_number());
+    dst_entry.sib_map_info.resize(src_entry.sib_map_info_r14.size());
+    for (uint32_t j = 0; j < src_entry.sib_map_info_r14.size(); j++) {
+      asn1::number_to_enum(dst_entry.sib_map_info[j], src_entry.sib_map_info_r14[j].to_number());
+    }
+  }
+}
+
 int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_config_common)
 {
   // TODO: Leave 0 blank for now
@@ -2759,6 +2888,29 @@ int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_co
   }
   sib1->sib_type13_r14_present = true;
 
+  // On an MBMS/Unicast-mixed (non-MBMS-dedicated) cell, strip every Rel-14+ extension that
+  // sib.conf.mbsfn's shared parser (mbsfn_area_info_list_parser, above) sets unconditionally
+  // regardless of cell type (subcarrierSpacingMBMS-r14, the v1430 shortened-MCCH-period
+  // extension), plus whatever reconfigure_embms() would otherwise layer on top later
+  // (MBSFN-AreaInfo-r16/pmch-Bandwidth-r17, both Rel-16+ only). sib1->sib_type13_r14 is left
+  // untouched -- legacy SIB1 has no embedded SIB13 field at all, so it is never OTA-visible in
+  // this mode; only *sib13 (== cfg.sibs[12], the legacy SI-message copy generate_sibs() actually
+  // broadcasts) needs sanitizing. Rel-9's
+  // original eMBMS spec has none of these fields, so a mixed-mode cell must never carry them.
+  if (!args_->stack.embms.mbms_dedicated) {
+    for (uint32_t i = 0; i < sib13->mbsfn_area_info_list_r9.size(); i++) {
+      auto& area                                  = sib13->mbsfn_area_info_list_r9[i];
+      area.subcarrier_spacing_mbms_r14_present     = false;
+      area.mcch_cfg_r14.reset();
+      area.ext                                     = false;
+    }
+    sib13->ext                              = false;
+    sib13->mbsfn_area_info_list_r16_present = false;
+    sib13->mbsfn_area_info_list_r16.resize(0);
+    sib13->mbsfn_area_info_list_r17_present = false;
+    sib13->mbsfn_area_info_list_r17.resize(0);
+  }
+
   // SIB1-MBMS pdsch_cfg_common_r14 must carry the same RS power / p_b as SIB2
   // so UEs can correctly set their downlink receive power reference.
   sib1->pdsch_cfg_common_r14 = sib2->rr_cfg_common.pdsch_cfg_common;
@@ -2779,6 +2931,16 @@ int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_co
     std::string sib_dir = (pos != std::string::npos) ? sib_path.substr(0, pos + 1) : "./";
     rrc_cfg_->sib12_alert_file = sib_dir + "sib12_alert.conf";
   }
+
+  // Derive the legacy (non-MBMS-r14) SIB1 from the fully-populated MBMS-r14 SIB1 above, for use
+  // when cell.mbms_dedicated is false (rrc::generate_sibs() picks whichever applies). Not
+  // separately configured -- see make_sib1_legacy()'s own comment for why. Must run last: the
+  // PLMN list (and everything else in sib1) is filled in incrementally through this whole
+  // function, most recently from enb.conf's mcc/mnc a few dozen lines up -- running this
+  // earlier once captured an empty plmn_id_list, which fails legacy SIB1's SIZE(1..6)
+  // constraint at encode time ("1 <= 0 <= 6" pack error) since sib.conf.mbsfn itself carries
+  // no PLMN data at all.
+  make_sib1_legacy(*sib1, &rrc_cfg_->sib1_legacy);
 
   return 0;
 }
