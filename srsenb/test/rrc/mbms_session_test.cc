@@ -78,7 +78,11 @@ int test_mbms_session_start_stop()
   tmgi.serviced_id[1] = 0xab;
   tmgi.serviced_id[2] = 0xcd;
 
-  rrc.mbms_session_start("901:56:00abcd", tmgi, 7, true);
+  // The TEID is M3AP's TNL-Information value, carried for embms.[pmchN.]session_teids-based PMCH
+  // assignment. This configuration sets no session_teids, so every session lands on PMCH0
+  // (resolve_pmch_sessions()'s case 2) whatever the TEID is; it is asserted below because it is
+  // not an over-the-air field and nothing else would notice it being dropped on the way through.
+  rrc.mbms_session_start("901:56:00abcd", tmgi, 7, true, 0xcccc);
   // configure_mbsfn_sibs() defers the actual phy->configure_mbsfn() call via defer_task(), which lands on the
   // internal task queue -- run_pending_tasks() drains that non-blockingly; run_next_task() would instead block
   // waiting on the (here, unused) external task queue.
@@ -93,6 +97,7 @@ int test_mbms_session_start_stop()
   TESTASSERT(info.tmgi.plmn_id_type == srsran::tmgi_t::plmn_id_type_t::explicit_value);
   TESTASSERT(info.tmgi.serviced_id[1] == 0xab);
   TESTASSERT(info.tmgi.serviced_id[2] == 0xcd);
+  TESTASSERT(info.teid == 0xcccc);
 
   // Stop must remove the session -- pack_mcch()/configure_mbsfn_sibs() fall back to the pre-existing
   // static/fabricated behavior again (nof_mbms_sessions from static cfg, defaulting to 1 fabricated session).
