@@ -1179,12 +1179,15 @@ void mac::write_mcch(const srsran::sib2_mbms_t* sib2_,
    * get_mch_sched uses the correct PRB count after a runtime reconfigure_embms(). */
   if (!cell_config.empty()) {
     const uint8_t bw = (sib13_->nof_mbsfn_area_info > 0) ? sib13_->mbsfn_area_info_list[0].pmch_bandwidth : 0;
-    /* bw comes from the (possibly just-reconfigured) OTA pmch_bandwidth value,
-     * which reload_embms_config()'s SIGHUP path does not range-check against
-     * nof_prb; clamp here too so a live reconfigure can't push mbsfn_prb past
-     * nof_prb and overflow the PMCH PRB-sized buffers (see srsran_cell_isvalid). */
-    cell_config[0].cell.mbsfn_prb =
-        (bw > 0 && bw <= cell_config[0].cell.nof_prb) ? bw : cell_config[0].cell.nof_prb;
+    /* bw comes from the (possibly just-reconfigured) OTA pmch_bandwidth value. No
+     * "bw <= nof_prb" clamp here: srsran_cell_isvalid() (phy_common.c) explicitly no
+     * longer requires mbsfn_prb <= nof_prb -- every downlink buffer/FFT plan reachable
+     * from the MBSFN/PMCH path is sized/strided from max(nof_prb, mbsfn_prb), so a wider
+     * PMCH no longer overflows them. This comment used to cite that function as
+     * justification for clamping here, but the function's own restriction had already
+     * been lifted -- this clamp was stale, not still-needed defense. pmch_bandwidth=25
+     * is unreachable here regardless (rrc.cc's own validation only allows {0,30,35,40}). */
+    cell_config[0].cell.mbsfn_prb = bw > 0 ? bw : cell_config[0].cell.nof_prb;
   }
 
   /* Buffer the new MCCH config (both encoded payload and mcch struct) into

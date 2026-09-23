@@ -96,6 +96,29 @@ public:
     }
     return ret;
   }
+
+  /* max(nof_prb, mbsfn_prb): the eNB's own TX RF sample rate (txrx.cc) and per-subframe
+   * TX buffer sample count (sf_worker.cc) both need this width, not the plain carrier
+   * nof_prb above, or a wideband (FeMBMS extended-coverage) pmch_bandwidth's extra
+   * spectrum is never physically transmitted - confirmed live via raw IQ dumps on the
+   * RX side. Downlink-only: uplink (PUSCH/PUCCH/PRACH) has no "extended coverage"
+   * concept in the spec (TS 36.211 6.10.2's N_RB^DL->N_RB^PMCH substitution is scoped
+   * to downlink-only clauses), so RX sample rate must stay at get_nof_prb()'s plain,
+   * narrow value - see rf_zmq_imp.c's per-direction rx/tx rate split, which is what
+   * makes it safe for only this (TX) side to use the wider value. NR carriers have no
+   * MBSFN/PMCH concept, so this is nof_prb for those (matching get_nof_prb() above). */
+  uint32_t get_tx_nof_prb(uint32_t cc_idx)
+  {
+    uint32_t ret = get_nof_prb(cc_idx);
+
+    if (cc_idx < cell_list_lte.size()) {
+      uint32_t mbsfn_prb = cell_list_lte[cc_idx].cell.mbsfn_prb;
+      if (mbsfn_prb > ret) {
+        ret = mbsfn_prb;
+      }
+    }
+    return ret;
+  }
   uint32_t get_nof_ports(uint32_t cc_idx)
   {
     uint32_t ret = 0;
@@ -333,6 +356,25 @@ private:
   bool                    have_mtch_stop   = false;
   pthread_mutex_t         mtch_mutex       = {};
   pthread_cond_t          mtch_cvar        = {};
+  /* Confirmed real race (2026-07-14, mirrors the identical bug found and
+   * fixed in rt-mbms-modem's Phy::_mcch): mbsfn is written wholesale
+   * (configure_mbsfn(): `mbsfn = *cfg;`) from the RRC stack thread whenever
+   * MCCH content is (re)decoded, while is_mch_subframe()/is_mcch_subframe()
+   * read it from the PHY worker thread pool (multiple concurrent workers,
+   * [PHY0]/[PHY1]/... in logs) once per subframe -- no synchronization
+   * existed. Live evidence: srsran_configure_pmch()'s own TI_DIAG_CFGPMCH
+   * diagnostic showed pdsch_cfg.grant.tb[0].tbs alternating between
+   * inconsistent values (137/501 one run, 1096/4008 another) with every
+   * other input (nof_prb, mbsfn_prb, scs) held constant -- only mbsfn_mcs
+   * (read from this racy struct) could explain that. This produces a real
+   * TX/RX transport-block-size mismatch: RX (using its own, now race-free,
+   * consistently-correct mcs=9/tbs=4008) expects far more coded data than TX
+   * actually transmitted whenever TX's read caught a torn/stale mbsfn_mcs,
+   * which would show up as intact reference signals (unaffected) alongside
+   * essentially-empty data REs (confirmed via a bit-exact TX/RX capture
+   * this same investigation) -- consistent with the near-total PMCH CRC
+   * failure this whole investigation has been chasing. Guards mbsfn. */
+  mutable std::mutex      mbsfn_mutex;
   srsran::phy_cfg_mbsfn_t mbsfn            = {};
   bool                    sib13_configured = false;
   bool                    mcch_configured  = false;
@@ -344,7 +386,10 @@ private:
   mutable std::mutex       last_mtch_start_mutex;
   srsran::rf_buffer_t     tx_buffer        = {};
   bool                    is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti);
-  bool                    is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti);
+  bool                    is_mcch_subframe(srsran_mbsfn_cfg_t*            cfg,
+                                            uint32_t                      phy_tti,
+                                            const srsran::phy_cfg_mbsfn_t& mbsfn_snapshot,
+                                            const uint8_t                 mcch_table_snapshot[10]);
 
   /* Shared, per-cell (not per-worker) cache of each PMCH time-interleaving
    * slot's raw TB payload, for srsran_pmch_encode()'s re-encode-from-cache

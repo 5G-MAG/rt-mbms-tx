@@ -815,9 +815,25 @@ uint32_t srsran_ra_dl_grant_nof_re(const srsran_cell_t* cell, srsran_dl_sf_cfg_t
 
   /* Iterate over the full carrier bandwidth so centered or non-contiguous PRB
    * allocations (e.g. PMCH extended BW) are counted correctly. Non-allocated
-   * PRBs have prb_idx[s][j]=false and contribute 0 RE. */
+   * PRBs have prb_idx[s][j]=false and contribute 0 RE.
+   *
+   * Bound must be max(cell->nof_prb, grant->nof_prb), not cell->nof_prb alone:
+   * srsran_configure_pmch() sets grant.nof_prb = mbsfn_prb when it's wider than
+   * the carrier (extended-coverage PMCH), and populates prb_idx[i][j]=true for
+   * the full grant.nof_prb width -- but this loop never visited j >=
+   * cell->nof_prb, so those already-true entries were silently never counted.
+   * Confirmed live: MCCH at cell.nof_prb=25/mbsfn_prb=40 encoded only 3000 of
+   * its true 4800 RE (nof_bits/TBS undersized to match), leaving the eNB's own
+   * sf_symbols buffer's remaining 1800 RE at stale/leftover content for that
+   * PRB range while pilots (written separately, unconditionally full-width by
+   * put_refs()) stayed correct -- exactly the near-zero tail (EVM ~60%) seen
+   * on the RX side, since RX's own nof_re (correctly 4800) came from a
+   * different cell struct that main.cpp had already widened to nof_prb=40 for
+   * MbsfnFrameProcessor specifically (see that file's set_cell() call), not
+   * from this function being correct. */
+  uint32_t max_prb_ = SRSRAN_MAX(cell->nof_prb, grant->nof_prb);
   for (s = 0; s < nof_slots; s++) {
-    for (j = 0; j < cell->nof_prb; j++) {
+    for (j = 0; j < max_prb_; j++) {
       if (grant->prb_idx[s][j]) {
         nof_re += ra_re_x_prb(cell, sf, s, j);
       }

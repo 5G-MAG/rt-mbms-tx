@@ -21,6 +21,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "srsenb/hdr/phy/txrx.h"
 #include "srsran/common/threads.h"
 #include "srsran/phy/channel/channel.h"
@@ -197,7 +198,10 @@ uint32_t phy_common::get_last_mtch_start(uint8_t pmch_idx) const
 
 void phy_common::configure_mbsfn(srsran::phy_cfg_mbsfn_t* cfg)
 {
-  mbsfn            = *cfg;
+  {
+    std::lock_guard<std::mutex> lock(mbsfn_mutex);
+    mbsfn = *cfg;
+  }
   sib13_configured = true;
   mcch_configured  = true;
 
@@ -297,6 +301,12 @@ void phy_common::build_mch_table()
 
 void phy_common::build_mcch_table()
 {
+  /* mcch_table is read (unprotected, until this fix) by is_mcch_subframe()
+   * from the PHY worker thread pool, once per subframe -- same class of race
+   * as mbsfn_mutex guards for the mbsfn struct itself (see that member's doc
+   * comment). Lock the whole zero-then-fill sequence so a concurrent reader
+   * never observes a torn/all-zero-then-partially-filled intermediate state. */
+  std::lock_guard<std::mutex> lock(mbsfn_mutex);
   ZERO_OBJECT(mcch_table);
 
   if (mbsfn.mbsfn_area_info.mcch_cfg.sf_alloc_info_is_r16) {
@@ -312,7 +322,10 @@ void phy_common::build_mcch_table()
   }
 }
 
-bool phy_common::is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
+bool phy_common::is_mcch_subframe(srsran_mbsfn_cfg_t*           cfg,
+                                   uint32_t                      phy_tti,
+                                   const srsran::phy_cfg_mbsfn_t& mbsfn_snapshot,
+                                   const uint8_t                 mcch_table_snapshot[10])
 {
   uint32_t sfn; // System Frame Number
   uint8_t  sf;  // Subframe
@@ -323,12 +336,17 @@ bool phy_common::is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
   sf  = phy_tti % 10;
 
   if (sib13_configured) {
-    // mbsfn_area_info_r9_s* area_info = &mbsfn.mbsfn_area_info;
-    srsran::mbsfn_area_info_t* area_info = &mbsfn.mbsfn_area_info;
+    // mbsfn_area_info_r9_s* area_info = &mbsfn_snapshot.mbsfn_area_info;
+    const srsran::mbsfn_area_info_t* area_info = &mbsfn_snapshot.mbsfn_area_info;
     offset                               = area_info->mcch_cfg.mcch_offset;
     period                               = enum_to_number(area_info->mcch_cfg.mcch_repeat_period);
 
-    if ((sfn % period == offset) && mcch_table[sf] > 0) {
+    if (getenv("PMCH_TI_DIAG")) {
+      fprintf(stderr, "TI_DIAG_ISMCCH tti=%u sfn=%u sf=%u period=%u offset=%u mcch_table[sf]=%u match=%d\n",
+              phy_tti, sfn, sf, period, offset, mcch_table_snapshot[sf],
+              (int)((sfn % period == offset) && mcch_table_snapshot[sf] > 0));
+    }
+    if ((sfn % period == offset) && mcch_table_snapshot[sf] > 0) {
       cfg->mbsfn_area_id = area_info->mbsfn_area_id;
       /* MCCH in an MBMS-dedicated cell is never carried on a subframe with a real
        * PDCCH/non-MBSFN control region: every subcarrier_spacing_t value this
@@ -411,6 +429,18 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
   // at all rather than being read directly like nof_prb.
   const cell_cas_muting_cfg_t cas_cfg = get_cell_cas_muting_cfg();
 
+  // Single locked snapshot of mbsfn for this whole call -- see mbsfn_mutex's
+  // doc comment for the confirmed cross-thread race this closes (RRC thread
+  // writes mbsfn wholesale on every MCCH decode; this function runs on the
+  // PHY worker thread pool, once per subframe).
+  srsran::phy_cfg_mbsfn_t mbsfn_snapshot;
+  uint8_t                 mcch_table_snapshot[10];
+  {
+    std::lock_guard<std::mutex> lock(mbsfn_mutex);
+    mbsfn_snapshot = mbsfn;
+    std::memcpy(mcch_table_snapshot, mcch_table, sizeof(mcch_table_snapshot));
+  }
+
   // Set some defaults
   cfg->mbsfn_area_id           = 0;
   cfg->non_mbsfn_region_length = 1;
@@ -466,7 +496,7 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
    * mcch_repeat_period, as here, is a multiple of the fixed CAS period, so the
    * collision was permanent, not occasional). MCCH is transmitted instead of the
    * "additional non-MBSFN" content it would otherwise occupy that subframe with. */
-  if (is_mcch_subframe(cfg, phy_tti)) {
+  if (is_mcch_subframe(cfg, phy_tti, mbsfn_snapshot, mcch_table_snapshot)) {
     return true;
   }
 
@@ -500,8 +530,8 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
     }
   }
 
-  srsran::mbsfn_sf_cfg_t*    subfr_cnfg = &mbsfn.mbsfn_subfr_cnfg;
-  srsran::mbsfn_area_info_t* area_info  = &mbsfn.mbsfn_area_info;
+  srsran::mbsfn_sf_cfg_t*    subfr_cnfg = &mbsfn_snapshot.mbsfn_subfr_cnfg;
+  srsran::mbsfn_area_info_t* area_info  = &mbsfn_snapshot.mbsfn_area_info;
   switch (area_info->subcarrier_spacing) {
     case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_1dot25:
       cfg->subcarrier_spacing       = SRSRAN_SCS_1KHZ25;
@@ -568,8 +598,8 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
 //      while (!have_mtch_stop) {
 //        pthread_cond_wait(&mtch_cvar, &mtch_mutex);
 //      }
-      for (uint32_t i = 0; i < mbsfn.mcch.nof_pmch_info; i++) {
-        unsigned fn_in_scheduling_period =  sfn % enum_to_number(mbsfn.mcch.pmch_info_list[i].mch_sched_period);
+      for (uint32_t i = 0; i < mbsfn_snapshot.mcch.nof_pmch_info; i++) {
+        unsigned fn_in_scheduling_period =  sfn % enum_to_number(mbsfn_snapshot.mcch.pmch_info_list[i].mch_sched_period);
         /* Count true CAS frames elapsed before fn_in_scheduling_period.
          * Spec CR 0577: k_cas active CAS frames per 16*n_cas-frame period.
          * Without muting: one CAS per 4 frames → fn_in/4. */
@@ -589,7 +619,7 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
          * Use the actual sfn to compute which radio frame within this scheduling
          * period first carries an MCCH — handles both mcch_rp < sched_period (multiple
          * MCCHs per period) and mcch_rp > sched_period (some periods have none). */
-        uint32_t sched_period    = enum_to_number(mbsfn.mcch.pmch_info_list[i].mch_sched_period);
+        uint32_t sched_period    = enum_to_number(mbsfn_snapshot.mcch.pmch_info_list[i].mch_sched_period);
         uint32_t mcch_rp         = enum_to_number(area_info->mcch_cfg.mcch_repeat_period);
         uint32_t mcch_off        = area_info->mcch_cfg.mcch_offset;
         uint32_t sfn_base        = sfn - fn_in_scheduling_period; /* start SFN of this period */
@@ -597,7 +627,7 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
         uint32_t first_mcch_m    = (mcch_off + mcch_rp - sfn_base_mod) % mcch_rp;
         /* Find the MCCH subframe number within its radio frame (first sf where mcch_table[sf]>0). */
         uint8_t mcch_sf_in_frame = 1u;
-        for (uint8_t s = 0; s < 10u; s++) { if (mcch_table[s]) { mcch_sf_in_frame = s; break; } }
+        for (uint8_t s = 0; s < 10u; s++) { if (mcch_table_snapshot[s]) { mcch_sf_in_frame = s; break; } }
         uint32_t nof_mcch_passed = 0;
         for (uint32_t m = first_mcch_m; m < sched_period; m += mcch_rp) {
           if (m < fn_in_scheduling_period ||
@@ -620,26 +650,32 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
           nof_additional_passed = (nof_true_cas + (anchor_act ? 1u : 0u)) * (uint32_t)add_non;
         }
         int sf_idx = (int)(fn_in_scheduling_period * 10u + sf) - (int)nof_true_cas - (int)nof_mcch_passed - (int)nof_additional_passed;
+        if (getenv("CAS_MUTE_DIAG")) {
+          fprintf(stderr, "CAS_MUTE_DIAG_TX tti=%u sfn=%u sf=%u fn_in=%u nof_true_cas=%u sf_idx=%d "
+                          "nof_mcch_passed=%u nof_additional_passed=%u cas_muting=%d k_cas=%u n_cas=%u\n",
+                  phy_tti, sfn, sf, fn_in_scheduling_period, nof_true_cas, sf_idx, nof_mcch_passed,
+                  nof_additional_passed, (int)cas_cfg.cas_muting, (unsigned)cas_cfg.k_cas, (unsigned)cas_cfg.n_cas);
+        }
         /* Guard: sf_idx must be >= pmch_start to avoid uint32_t wraparound on subtraction.
          * For i=0, pmch_start=1 (MCCH occupies sf_idx=0); sf_idx=0 here means the
          * subframe is at the MCCH position but was not caught by is_mcch_subframe()
          * (e.g. sf=0, which never appears in the MCCH table). Skip it. */
-        uint32_t pmch_start      = (i == 0) ? 1u : (uint32_t)(mbsfn.mcch.pmch_info_list[i - 1].sf_alloc_end + 1);
-        if (sf_idx >= (int)pmch_start && (uint32_t)sf_idx <= mbsfn.mcch.pmch_info_list[i].sf_alloc_end) {
+        uint32_t pmch_start      = (i == 0) ? 1u : (uint32_t)(mbsfn_snapshot.mcch.pmch_info_list[i - 1].sf_alloc_end + 1);
+        if (sf_idx >= (int)pmch_start && (uint32_t)sf_idx <= mbsfn_snapshot.mcch.pmch_info_list[i].sf_alloc_end) {
           /* MCCH is only on area 0, sf=mcch_sf_in_frame, fn_in=mcch_off; is_mcch_subframe()
            * catches it first and returns early, so this arm is dead code for that subframe.
            * Areas i>0 have no MCCH — every subframe including their first is data. */
-          cfg->mbsfn_mcs = mbsfn.mcch.pmch_info_list[i].data_mcs;
+          cfg->mbsfn_mcs = mbsfn_snapshot.mcch.pmch_info_list[i].data_mcs;
           DEBUG("SFN %d SF %d: MCS %d", sfn, sf, cfg->mbsfn_mcs);
-          cfg->use_mcs_table2      = mbsfn.mcch.pmch_info_list[i].use_mcs_table2;
-          cfg->time_interleaving_n = mbsfn.mcch.pmch_info_list[i].time_interleaving_n;
-          cfg->time_interleaving_m = mbsfn.mcch.pmch_info_list[i].time_interleaving_m;
-          cfg->n_soft_ref_category     = mbsfn.mcch.pmch_info_list[i].n_soft_ref_category;
-          cfg->scaling_factor_beta_num = mbsfn.mcch.pmch_info_list[i].scaling_factor_beta_num;
-          cfg->scaling_factor_beta_den = mbsfn.mcch.pmch_info_list[i].scaling_factor_beta_den;
-          cfg->cyclic_shift        = mbsfn.mcch.pmch_info_list[i].cyclic_shift;
-          cfg->cyclic_shift_alpha  = mbsfn.mcch.pmch_info_list[i].cyclic_shift_alpha;
-          cfg->freq_interleaving   = mbsfn.mcch.pmch_info_list[i].freq_interleaving;
+          cfg->use_mcs_table2      = mbsfn_snapshot.mcch.pmch_info_list[i].use_mcs_table2;
+          cfg->time_interleaving_n = mbsfn_snapshot.mcch.pmch_info_list[i].time_interleaving_n;
+          cfg->time_interleaving_m = mbsfn_snapshot.mcch.pmch_info_list[i].time_interleaving_m;
+          cfg->n_soft_ref_category     = mbsfn_snapshot.mcch.pmch_info_list[i].n_soft_ref_category;
+          cfg->scaling_factor_beta_num = mbsfn_snapshot.mcch.pmch_info_list[i].scaling_factor_beta_num;
+          cfg->scaling_factor_beta_den = mbsfn_snapshot.mcch.pmch_info_list[i].scaling_factor_beta_den;
+          cfg->cyclic_shift        = mbsfn_snapshot.mcch.pmch_info_list[i].cyclic_shift;
+          cfg->cyclic_shift_alpha  = mbsfn_snapshot.mcch.pmch_info_list[i].cyclic_shift_alpha;
+          cfg->freq_interleaving   = mbsfn_snapshot.mcch.pmch_info_list[i].freq_interleaving;
           cfg->mch_subframe_idx    = (uint32_t)sf_idx - pmch_start;
           cfg->pmch_idx            = (uint8_t)i;
           cfg->enable = true;
@@ -655,8 +691,8 @@ bool phy_common::is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
           uint32_t last_mtch_start_sf = get_last_mtch_start((uint8_t)i);
           if (last_mtch_start_sf > 0 && cfg->mch_subframe_idx >= last_mtch_start_sf) {
             cfg->mch_subframe_idx -= last_mtch_start_sf;
-            uint8_t n_last = mbsfn.mcch.pmch_info_list[i].time_interleaving_n_last_mtch;
-            uint8_t m_last = mbsfn.mcch.pmch_info_list[i].time_interleaving_m_last_mtch;
+            uint8_t n_last = mbsfn_snapshot.mcch.pmch_info_list[i].time_interleaving_n_last_mtch;
+            uint8_t m_last = mbsfn_snapshot.mcch.pmch_info_list[i].time_interleaving_m_last_mtch;
             if (n_last > 0) {
               /* n1 (n_last==1) means "no time interleaving for this session" --
                * represented the same way the main N field represents "disabled"

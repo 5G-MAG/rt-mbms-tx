@@ -28,8 +28,39 @@
 #include "srsran/interfaces/enb_s1ap_interfaces.h"
 #include "srsue/hdr/stack/upper/gw.h"
 #include <string>
+#include <vector>
 
 namespace srsenb {
+
+/* Per-PMCH config for a PMCH *beyond* the first (PMCH0, which stays governed
+ * by embms_args_t's own flat fields below, unchanged, for backward
+ * compatibility). Added for TS 36.300 §15.3.3 compliance: PMCH0 always
+ * carries MCCH and must never have time interleaving configured on it; a
+ * time-interleaved MTCH session needs a *separate* PMCH, described by one of
+ * these. Only the fields that are genuinely per-PMCH are here - area-wide
+ * settings (cas_muting, k_cas/n_cas, m1u_*, additional_non_mbsfn_subframes,
+ * etc.) stay on embms_args_t and apply to the whole MBSFN area regardless of
+ * how many PMCHs it has. */
+typedef struct {
+  uint16_t    mcs                          = 9;
+  uint8_t     pmch_bandwidth               = 0;
+  uint8_t     cyclic_shift_alpha           = 0;
+  bool        freq_interleaving            = false;
+  uint8_t     time_interleaving_n          = 0;
+  uint8_t     time_interleaving_m          = 0;
+  uint8_t     time_interleaving_n_last_mtch = 0;
+  uint8_t     time_interleaving_m_last_mtch = 0;
+  uint16_t    n_soft_ref_category          = 4;
+  std::string scaling_factor_beta;
+  bool        use_mcs_table2               = false;
+  uint8_t     mch_sched_period_rf          = 64;
+  uint8_t     nof_mbms_sessions            = 1;
+  bool        pmch_time_separation_sl2     = false;
+  std::string pmch_subcarrier_spacing;
+  /* This PMCH's own session TEIDs, same format/semantics as embms_args_t::session_teids
+   * but scoped to just this PMCH's sessions. */
+  std::string session_teids;
+} pmch_cfg_t;
 
 typedef struct {
   bool        enable;
@@ -92,6 +123,12 @@ typedef struct {
    * config -- this eNB has no M2/M3AP to learn the mapping dynamically. See gtpu.h's
    * m1u_handler. */
   std::string session_teids;
+  /* Extra PMCHs beyond PMCH0 (empty = today's exact single-PMCH behavior).
+   * See pmch_cfg_t above. PMCH0 is always the one carrying MCCH (TS 36.331:
+   * "E-UTRAN configures mch-SchedulingPeriod of the (P)MCH listed first in
+   * PMCH-InfoList to be smaller than or equal to mcch-RepetitionPeriod") -
+   * that's not configurable and is enforced in rrc.cc's reconfigure_embms(). */
+  std::vector<pmch_cfg_t> extra_pmch;
 } embms_args_t;
 
 typedef struct {
@@ -157,7 +194,8 @@ public:
                                    uint8_t            mch_sched_period_rf,
                                    uint8_t            nof_mbms_sessions,
                                    bool               time_separation_sl2,
-                                   const std::string& subcarrier_spacing) {}
+                                   const std::string& subcarrier_spacing,
+                                   const std::vector<pmch_cfg_t>& extra_pmch = {}) {}
 
   virtual void reload_sib12(bool activate) {}
 };

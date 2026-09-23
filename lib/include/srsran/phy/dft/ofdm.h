@@ -78,6 +78,18 @@ typedef struct SRSRAN_API {
   uint32_t          nof_re;
   uint32_t          slot_sz;
   uint32_t          sf_sz;
+  /* Real per-subframe sample count ofdm_tx_slot_mbsfn()/ofdm_tx_sf() actually write for
+   * this object's current cfg (see ofdm_init_mbsfn_()'s computation, mirroring
+   * ofdm_tx_slot_mbsfn()'s own total_syms*(symbol_sz+cp_len) formula exactly). NOT the
+   * same as sf_sz for any FeMBMS reduced SCS (7.5/2.5/1.25/0.37 kHz): sf_sz=symbol_sz*15
+   * is only an accurate byte count for 15 kHz's 14-symbols-per-subframe structure - for
+   * reduced SCS (1 to 3 symbols per subframe) it drastically overestimates the real
+   * written length (confirmed: 12x for 1.25 kHz), which is unsafe to use for anything
+   * that scales/copies "the whole subframe" (e.g. srsran_enb_dl_gen_signal()'s
+   * post-IFFT normalization) since the true output can be far shorter than the
+   * generously-oversized tmp/shift_buffer/window_offset_buffer scratch allocations that
+   * ARE sized by sf_sz. */
+  uint32_t          mbsfn_sf_len;
   cf_t*             tmp; // for removing zero padding
   bool              mbsfn_subframe;
   uint32_t          mbsfn_guard_len;
@@ -121,7 +133,6 @@ srsran_ofdm_rx_init(srsran_ofdm_t* q, srsran_cp_t cp_type, cf_t* in_buffer, cf_t
 
 SRSRAN_API int srsran_ofdm_tx_set_prb(srsran_ofdm_t* q, srsran_cp_t cp, uint32_t nof_prb);
 SRSRAN_API int srsran_ofdm_tx_set_prb_scs(srsran_ofdm_t* q, srsran_cp_t cp, uint32_t nof_prb, srsran_scs_t scs);
-
 
 SRSRAN_API int srsran_ofdm_rx_set_prb(srsran_ofdm_t* q, srsran_cp_t cp, uint32_t nof_prb);
 

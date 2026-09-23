@@ -25,6 +25,7 @@
 #include <srsran/phy/utils/vector.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <zmq.h>
 
 int rf_zmq_tx_open(rf_zmq_tx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* sock_args)
@@ -49,6 +50,38 @@ int rf_zmq_tx_open(rf_zmq_tx_t* q, rf_zmq_opts_t opts, void* zmq_ctx, char* sock
     q->sample_format = opts.sample_format;
     q->frequency_mhz = opts.frequency_mhz;
     q->sample_offset = opts.sample_offset;
+
+    /* ZMQ_PUB's default send high-water-mark is 1000 messages: if a
+     * subscriber (the modem's zmqrx bridge) ever falls behind by more than
+     * that many queued messages - even briefly, e.g. a scheduling hiccup -
+     * ZMQ silently DROPS the backlog rather than blocking this publisher.
+     * A bounded-but-larger HWM absorbs that kind of transient stall without
+     * the silent drop.
+     *
+     * Deliberately NOT unlimited (0): the live-measured ~91%-of-nominal raw
+     * throughput ceiling on this ZMQ loopback rig turns out to be a
+     * PERSISTENT, chronic deficit, not just an occasional stall - live
+     * memory-growth risk analysis (2026-07-18) showed that with HWM=0 this
+     * queue would grow roughly unboundedly for as long as the deficit
+     * persists, since no finite buffer can absorb a SUSTAINED rate mismatch,
+     * only a transient one. That's harmless at a decimated (ratio>1)
+     * receive rate (the consumer's actual need is below what's delivered
+     * even with the deficit, so the queue doesn't grow there at all) but a
+     * real, unbounded-memory-growth risk at ratio=1 (a signalled
+     * pmch-Bandwidth-r17 wideband PMCH needing the full native rate, where
+     * the deficit is never absorbed and an unlimited HWM just delays,
+     * rather than prevents, eventual exhaustion). A large bounded value
+     * keeps the transient-stall protection this was originally added for
+     * while capping the worst case; it doesn't fix the ratio=1 throughput
+     * deficit itself (still open, see SIB13_MBSFN_TEST_RESULTS.md), which
+     * needs a real throughput fix, not more buffering. */
+    if (opts.socket_type == ZMQ_PUB) {
+      int sndhwm = 50000;
+      if (zmq_setsockopt(q->sock, ZMQ_SNDHWM, &sndhwm, sizeof(sndhwm)) == -1) {
+        fprintf(stderr, "Error: setting send HWM on tx socket\n");
+        goto clean_exit;
+      }
+    }
 
     rf_zmq_info(q->id, "Binding transmitter: %s\n", sock_args);
 
@@ -162,6 +195,30 @@ static int _rf_zmq_tx_baseband(rf_zmq_tx_t* q, cf_t* buffer, uint32_t nsamples)
   // Increment sample counter
   q->nsamples += nsamples;
   n = nsamples;
+
+  /* TX_SEND_RATE_DIAG: directly measure the actual TX send rate (samples/sec
+   * actually pushed to zmq_send()), decoupled from the RX-side pacing loop
+   * measured separately -- part of the n_prb=25 1.25kHz FeMBMS throughput-
+   * shortfall investigation (RX side sees only ~20% of nominal raw
+   * throughput; CPU confirmed idle). See fembms-mbsfn-cfo-investigation
+   * memory. Logs once per ~1s of accumulated samples at base rate. */
+  if (getenv("TX_SEND_RATE_DIAG")) {
+    static uint64_t total_samples    = 0;
+    static struct timespec last_log  = {0, 0};
+    total_samples += nsamples;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (last_log.tv_sec == 0) {
+      last_log = now;
+    }
+    double elapsed = (now.tv_sec - last_log.tv_sec) + (now.tv_nsec - last_log.tv_nsec) / 1e9;
+    if (elapsed >= 1.0) {
+      fprintf(stderr, "TX_SEND_RATE_DIAG samples_per_sec=%.0f total_samples=%llu elapsed=%.3f\n",
+              total_samples / elapsed, (unsigned long long)total_samples, elapsed);
+      total_samples = 0;
+      last_log      = now;
+    }
+  }
 
 clean_exit:
   return n;

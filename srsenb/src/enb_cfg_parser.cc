@@ -1425,11 +1425,14 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
   rrc_cfg_->mbms_mcs                   = args_->stack.embms.mcs;
   {
     uint8_t bw = args_->stack.embms.pmch_bandwidth;
-    static const uint8_t valid_bw[] = {0, 25, 30, 35, 40};
+    // pmch-Bandwidth-r17 is ENUMERATED{n40,n35,n30,spare1} (TS 36.331 §6.3.7) -- no n25 value
+    // exists, since this field signals extended coverage wider than the base cell, not an
+    // equal-or-narrower one. See the matching comment in rrc::reconfigure_embms().
+    static const uint8_t valid_bw[] = {0, 30, 35, 40};
     bool bw_ok = false;
     for (uint8_t v : valid_bw) { if (bw == v) { bw_ok = true; break; } }
     if (!bw_ok) {
-      ERROR("embms.pmch_bandwidth %d is not valid (must be 0, 25, 30, 35, or 40 PRBs) — setting to 0", bw);
+      ERROR("embms.pmch_bandwidth %d is not valid (must be 0, 30, 35, or 40 PRBs) — setting to 0", bw);
       bw = 0;
     }
     rrc_cfg_->pmch_bandwidth = bw;

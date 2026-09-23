@@ -279,7 +279,8 @@ void enb::set_embms_config(const embms_args_t& embms_cfg)
                                      embms_cfg.mch_sched_period_rf,
                                      embms_cfg.nof_mbms_sessions,
                                      embms_cfg.pmch_time_separation_sl2,
-                                     embms_cfg.pmch_subcarrier_spacing);
+                                     embms_cfg.pmch_subcarrier_spacing,
+                                     embms_cfg.extra_pmch);
   }
 }
 

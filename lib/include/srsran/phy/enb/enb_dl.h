@@ -38,6 +38,7 @@
 #include "srsran/phy/ch_estimation/refsignal_dl.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/dft/ofdm.h"
+#include "srsran/phy/resampling/resampler.h"
 #include "srsran/phy/phch/dci.h"
 #include "srsran/phy/phch/pbch.h"
 #include "srsran/phy/phch/pcfich.h"
@@ -68,6 +69,17 @@ typedef struct SRSRAN_API {
   cf_t*         out_buffer[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft_mbsfn;
+
+  /* CAS/PBCH/PSS/SSS ifft[] stays permanently at its own native, narrow symbol_sz
+   * (exactly like a standard, non-FeMBMS LTE cell) regardless of mbsfn_prb - it
+   * writes into its own cas_buffer[] here, then cas_upsampler[] bridges that
+   * narrow-rate output up to the wire's (possibly wider, to carry a wideband
+   * pmch_bandwidth) rate into the shared out_buffer[] ifft_mbsfn also targets.
+   * Replaces an earlier approach that widened ifft[]'s own symbol_sz directly -
+   * abandoned after a full day of unresolved corruption; see
+   * SIB13_MBSFN_TEST_RESULTS.md and this session's plan file. */
+  cf_t*                  cas_buffer[SRSRAN_MAX_PORTS];
+  srsran_resampler_fft_t cas_upsampler[SRSRAN_MAX_PORTS];
 
   srsran_pbch_t   pbch;
   srsran_pcfich_t pcfich;

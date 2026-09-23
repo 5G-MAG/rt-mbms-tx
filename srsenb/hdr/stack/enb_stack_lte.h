@@ -160,19 +160,21 @@ public:
                            uint8_t            mch_sched_period_rf,
                            uint8_t            nof_mbms_sessions,
                            bool               time_separation_sl2,
-                           const std::string& subcarrier_spacing) override
+                           const std::string& subcarrier_spacing,
+                           const std::vector<pmch_cfg_t>& extra_pmch = {}) override
   {
     std::string scs_copy = subcarrier_spacing;
+    std::vector<pmch_cfg_t> extra_pmch_copy = extra_pmch;
     enb_task_queue.push([this, pmch_bandwidth, mcs, time_interleaving_n, time_interleaving_m,
                          time_interleaving_n_last_mtch, time_interleaving_m_last_mtch,
                          cyclic_shift_alpha, freq_interleaving, use_mcs_table2,
                          cas_muting, k_cas, n_cas, mch_sched_period_rf, nof_mbms_sessions,
-                         time_separation_sl2, scs_copy]() {
+                         time_separation_sl2, scs_copy, extra_pmch_copy]() {
       rrc.reconfigure_embms(pmch_bandwidth, mcs, time_interleaving_n, time_interleaving_m,
                             time_interleaving_n_last_mtch, time_interleaving_m_last_mtch,
                             cyclic_shift_alpha, freq_interleaving, use_mcs_table2,
                             cas_muting, k_cas, n_cas, mch_sched_period_rf, nof_mbms_sessions,
-                            time_separation_sl2, scs_copy);
+                            time_separation_sl2, scs_copy, extra_pmch_copy);
     });
   }
 

@@ -1014,24 +1014,46 @@ void rrc::reconfigure_embms(uint8_t            pmch_bandwidth,
                             uint8_t            mch_sched_period_rf,
                             uint8_t            nof_mbms_sessions,
                             bool               time_separation_sl2,
-                            const std::string& subcarrier_spacing)
+                            const std::string& subcarrier_spacing,
+                            const std::vector<pmch_cfg_t>& extra_pmch)
 {
+  // TODO(multi-PMCH, in progress): extra_pmch is threaded through the full
+  // call chain (embms_args_t -> reload_embms_config -> here) and ready to use,
+  // but genuinely building/OTA-encoding PMCH1+ from it (pack_mcch() below is
+  // still hardwired to this function's single flat cfg fields, not a list)
+  // is not yet implemented. Accepting and ignoring it for now is a deliberate,
+  // safe checkpoint: PMCH0's existing behavior is completely unchanged below.
+  (void)extra_pmch;
   /* reload_embms_config()'s SIGHUP path re-parses embms.* from the config file
    * directly into this call, bypassing the startup-only range checks in
    * enb_cfg_parser.cc's set_derived_args()/parse_cell_cfg() — re-apply the
    * same legal-value checks here so a bad live edit can't reach OTA SIB13/MCCH
    * signaling or PHY buffer sizing unvalidated. */
-  if (pmch_bandwidth != 0 && pmch_bandwidth != 25 && pmch_bandwidth != 30 && pmch_bandwidth != 35 &&
-      pmch_bandwidth != 40) {
-    logger.warning("reconfigure_embms: pmch_bandwidth=%u is not valid (must be 0, 25, 30, 35, or 40) — setting to 0",
+  /* pmch-Bandwidth-r17 (TS 36.331 §6.3.7) is ENUMERATED{n40,n35,n30,spare1} -- there is no
+   * n25 value in the spec, because this field signals *extended* PMCH coverage wider than
+   * the base cell, not an equal-or-narrower one. 25 used to be accepted here as if it were
+   * a fourth legal value, but rrc::configure_mbsfn_sibs()'s packer switch (which only has
+   * cases for 30/35/40) correctly has no case for it, so it was silently never signalled
+   * over the air -- a config accepted as "valid" that could never actually take effect. */
+  if (pmch_bandwidth != 0 && pmch_bandwidth != 30 && pmch_bandwidth != 35 && pmch_bandwidth != 40) {
+    logger.warning("reconfigure_embms: pmch_bandwidth=%u is not valid (must be 0, 30, 35, or 40 -- "
+                   "pmch-Bandwidth-r17 only signals extended coverage wider than the base cell) — setting to 0",
                    pmch_bandwidth);
     pmch_bandwidth = 0;
   }
-  if (pmch_bandwidth > cfg.cell.nof_prb) {
-    logger.warning("reconfigure_embms: pmch_bandwidth=%u exceeds cell nof_prb=%u — clamping to %u",
-                   pmch_bandwidth, cfg.cell.nof_prb, cfg.cell.nof_prb);
-    pmch_bandwidth = (uint8_t)cfg.cell.nof_prb;
-  }
+  /* No ">cfg.cell.nof_prb" clamp here. History: this clamp was removed once (2026-07-15),
+   * which correctly made pmch_bandwidth=30 signal over the air, but functional decode broke
+   * (BLER 1.0) -- traced at the time to mac::write_mcch()'s separate mbsfn_prb clamp still
+   * blocking the wider value from reaching MAC/PHY, and the clamp here was restored out of
+   * (mistaken) caution, concluding wideband PMCH wasn't implemented at the PHY level at all.
+   * That conclusion was wrong: srsran_cell_isvalid() (phy_common.c) and every downstream
+   * buffer (enb_dl.c, pmch.c, chest_dl.c, refsignal_dl.c) already correctly size/stride from
+   * max(nof_prb, mbsfn_prb) on the TX side. The actual bug was narrower and has been fixed:
+   * rt-mbms-modem's copy of pmch.c (a separate copy of this shared library) was missing the
+   * matching stride fix in its own PMCH RE mapping, corrupting every symbol beyond the first
+   * once mbsfn_prb genuinely exceeded nof_prb -- see that file's pmch_cp fix. mac.cc's clamp
+   * has also been relaxed to match. pmch_bandwidth=25 is unreachable here regardless (the
+   * validation above only allows {0,30,35,40}). */
   if (time_interleaving_n > 1) {
     static const uint8_t valid_n[] = {2, 4, 8, 16};
     bool                 n_ok      = false;
@@ -1821,22 +1843,52 @@ void rrc::configure_mbsfn_sibs()
   uint32_t add_non = (uint32_t)cfg.cell.additional_non_mbms_frames;
   pmch_item->sf_alloc_end = (uint32_t)(sched_period_rf * 10u - nof_cas * (1u + add_non) - 1u);
   /* TS 36.211 §6.5.3: M_TimePMCH must divide the PMCH data subframe count (sf_alloc_end,
-   * since pmch_start=1 for pmch[0]).  Clamp M down to the largest divisor <= configured M. */
+   * since pmch_start=1 for pmch[0]). pmch-TimeInterleavingM-r19 (TS 36.331 PMCH-TFI-Config-r19)
+   * is ENUMERATED{sf4,sf8,sf16,sf32} -- only these 4 discrete values are representable over
+   * the air. This used to clamp M by searching ALL integers down from the configured value,
+   * which for this rig's baseline sf_alloc_end (623 = 7x89, no divisor in {4,8,16,32} at any
+   * legal mch_sched_period_rf -- confirmed by direct computation) always landed on some
+   * unrepresentable value (1, 7, ...); pack_mcch()'s OTA-signalling switch has no case for
+   * those and silently fell through to "default: sf4" regardless, so every configured M
+   * decoded as 4 no matter what was actually requested or actually clamped to. Search only
+   * the legal enum values here instead, largest-first, capped at the configured M -- and if
+   * none divide evenly (as with this rig's current baseline), disable time interleaving
+   * outright rather than silently misrepresenting an infeasible M as feasible. */
   if (cfg.pmch_time_interleaving_n > 1 && cfg.pmch_time_interleaving_m > 1) {
-    uint32_t data_sfs = pmch_item->sf_alloc_end; // pmch_start=1, data sfs: 1..sf_alloc_end
-    uint8_t  m        = cfg.pmch_time_interleaving_m;
-    if (data_sfs % m != 0) {
-      while (m > 1 && data_sfs % m != 0) { m--; }
-      logger.warning("time_interleaving_m=%d does not divide sf_alloc_end=%d; clamping to %d",
-                     cfg.pmch_time_interleaving_m, data_sfs, m);
+    uint32_t             data_sfs  = pmch_item->sf_alloc_end; // pmch_start=1, data sfs: 1..sf_alloc_end
+    static const uint8_t legal_m[] = {32, 16, 8, 4};
+    uint8_t              m         = 0;
+    for (uint8_t candidate : legal_m) {
+      if (candidate <= cfg.pmch_time_interleaving_m && data_sfs % candidate == 0) {
+        m = candidate;
+        break;
+      }
+    }
+    if (m == 0) {
+      logger.warning("time_interleaving_m=%d: none of the legal values (4,8,16,32) divide "
+                     "sf_alloc_end=%d -- pmch-TimeInterleavingM-r19 cannot signal any other "
+                     "value, so time interleaving is not usable with this scheduling period; "
+                     "disabling",
+                     cfg.pmch_time_interleaving_m, data_sfs);
+      cfg.pmch_time_interleaving_n = 0;
+      cfg.pmch_time_interleaving_m = 0;
+    } else {
+      if (m != cfg.pmch_time_interleaving_m) {
+        logger.warning("time_interleaving_m=%d does not divide sf_alloc_end=%d; clamping to %d",
+                       cfg.pmch_time_interleaving_m, data_sfs, m);
+      }
       cfg.pmch_time_interleaving_m = m;
     }
     pmch_item->time_interleaving_m = cfg.pmch_time_interleaving_m;
   }
   /* pack_mcch() below reads cfg.pmch_time_interleaving_m to build the OTA v1900
    * extension IE — it must run after the divisor-clamp above, or the eNB would
-   * broadcast an M value different from the one it actually uses for TX timing. */
-  pack_mcch();
+   * broadcast an M value different from the one it actually uses for TX timing.
+   * Pass the already-clamped mbms_mcs (computed above) rather than letting pack_mcch()
+   * recompute it independently from cfg.mbms_mcs — see pack_mcch()'s own comment for
+   * why two independent copies of the same clamp used to be a real, if usually latent,
+   * divergence risk between the internal (mcch_t) and OTA (ASN.1 mcch) representations. */
+  pack_mcch(mbms_mcs);
   using SP = srsran::pmch_info_t::mch_sched_period_t;
   switch (sched_period_rf) {
     case 4:   pmch_item->mch_sched_period = SP::rf4;   break;
@@ -1894,12 +1946,22 @@ void rrc::configure_mbsfn_sibs()
   // reconfigure_embms() changes pmch_bandwidth). Skip during init: generate_sibs()
   // hasn't been called yet, so cell_common_list is null.
   if (cell_common_list != nullptr) {
+    // Bump systemInfoValueTag (TS 36.331 §5.2.1.2) the same way regenerate_si() does for
+    // ETWS: this is the only signal a spec-compliant UE uses to know SI content changed
+    // and it should re-acquire SIB13, rather than keep using an already-cached copy.
+    // Previously only regenerate_si() (ETWS-only) bumped this; a live embms reconfigure
+    // rebuilt the broadcast SIB13 bytes without ever telling receivers to re-read them.
+    cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
+    if (!cfg.sib_tag_state_file.empty()) {
+      FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
+      if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
+    }
     generate_sibs();
     update_mac_sib_cfg();
   }
 }
 
-int rrc::pack_mcch()
+int rrc::pack_mcch(uint16_t mbms_mcs)
 {
   mcch.msg.set_c1();
   mbsfn_area_cfg_r9_s& area_cfg_r9      = mcch.msg.c1().mbsfn_area_cfg_r9();
@@ -1963,28 +2025,11 @@ int rrc::pack_mcch()
     }
   }
 
-  uint16_t mbms_mcs = cfg.mbms_mcs;
-  if (mbms_mcs > 26) {
-    mbms_mcs = 26; // ETSI TS 103 720 Table 11.3.1-1/-2 (Physical layer capacity for
-                   // LTE-based 5G Broadcast, all supported numerologies, full
-                   // QPSK/16QAM/64QAM/256QAM range): both tables list MCS 0-26 only,
-                   // never 27/28, across both the published V1.2.1 and the current
-                   // draft. MCS 27/28 exist in the generic TS 36.213 clause 11.1 PMCH
-                   // MCS tables (Table 7.1.7.1-1/1A, Table 11.1-1/11.1-2) but are
-                   // outside the range this 5G Broadcast profile actually defines/uses.
-    logger.warning("PMCH data MCS too high, setting it to 26");
-  }
-  if (cfg.pmch_subcarrier_spacing.empty() || cfg.pmch_subcarrier_spacing == "khz15") {
-    uint32_t nof_prb_pmch = cfg.cell.mbsfn_prb ? cfg.cell.mbsfn_prb : cfg.cell.nof_prb;
-    uint16_t feasible_mcs = clamp_pmch_mcs_to_feasible(mbms_mcs, nof_prb_pmch, cfg.pmch_use_mcs_table2);
-    if (feasible_mcs < mbms_mcs) {
-      logger.error("Configured PMCH MCS=%d is infeasible for %d PRB (code rate > 1, every "
-                    "subframe would fail CRC); clamping to MCS=%d",
-                    mbms_mcs, nof_prb_pmch, feasible_mcs);
-      mbms_mcs = feasible_mcs;
-    }
-  }
-
+  // mbms_mcs is a parameter now: configure_mbsfn_sibs() already computes the fully-clamped
+  // (>26 and per-PRB-feasibility) value for mcch_t's internal pmch_item before calling this
+  // function, and this ASN.1-facing pmch_item must broadcast that exact same value -- not an
+  // independently recomputed one -- or a receiver could be told a different MCS than the one
+  // the eNB actually schedules/transmits with.
   logger.debug("PMCH data MCS=%d", mbms_mcs);
   pmch_item->pmch_cfg_r9.data_mcs_r9         = mbms_mcs;
   using SP_r9 = pmch_cfg_r9_s::mch_sched_period_r9_e_;

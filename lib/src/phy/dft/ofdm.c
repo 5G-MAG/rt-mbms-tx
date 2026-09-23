@@ -113,6 +113,22 @@ static int ofdm_init_mbsfn_(srsran_ofdm_t* q, srsran_ofdm_cfg_t* cfg, srsran_dft
   q->slot_sz           = (uint32_t)SRSRAN_SLOT_LEN(q->cfg.symbol_sz);
   q->sf_sz             = (uint32_t)SRSRAN_SF_LEN(q->cfg.symbol_sz);
 
+  /* mbsfn_sf_len: the real per-subframe sample count for THIS numerology, mirroring
+   * ofdm_tx_slot_mbsfn()'s own total_syms*(symbol_sz+cp_len) computation exactly (see
+   * that function and srsran_ofdm_t's doc comment on this field for why sf_sz alone is
+   * unsafe to use here for reduced SCS). 15 kHz's combined ofdm_tx_slot_mbsfn()+
+   * ofdm_tx_slot(q,1) output is well approximated by the existing sf_sz convention
+   * (14 symbols/subframe, unchanged, not part of this fix). */
+  if (q->cfg.subcarrier_spacing != SRSRAN_SCS_15KHZ) {
+    uint32_t mbsfn_total_syms = q->nof_symbols_mbsfn * SRSRAN_MBSFN_NOF_SLOTS(q->cfg.subcarrier_spacing);
+    uint32_t mbsfn_cp_len     = SRSRAN_SCS_IS_370HZ(q->cfg.subcarrier_spacing)
+                                    ? (q->cfg.symbol_sz / 9U)
+                                    : (uint32_t)SRSRAN_CP_LEN_EXT(q->cfg.symbol_sz);
+    q->mbsfn_sf_len = mbsfn_total_syms * (q->cfg.symbol_sz + mbsfn_cp_len);
+  } else {
+    q->mbsfn_sf_len = q->sf_sz;
+  }
+
   // Plan MBSFN
   if (q->fft_plan.size) {
     // Replan if it was initialised previously

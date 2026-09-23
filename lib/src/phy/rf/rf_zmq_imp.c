@@ -38,9 +38,15 @@ typedef struct {
   uint32_t         nof_channels;
 
   // RF State
-  uint32_t srate; // radio rate configured by upper layers
+  // Note: srate/decim_factor are split per-direction (rx_*/tx_*) rather than shared, since
+  // this driver already uses independent transmitter[]/receiver[] sockets and this rig is
+  // FDD (separate DL/UL frequencies) - a shared pair meant whichever of set_rx_srate()/
+  // set_tx_srate() was called last silently overwrote the other direction's rate.
+  uint32_t rx_srate; // radio rx rate configured by upper layers
+  uint32_t tx_srate; // radio tx rate configured by upper layers
   uint32_t base_srate;
-  uint32_t decim_factor; // decimation factor between base_srate used on transport on radio's rate
+  uint32_t rx_decim_factor; // decimation factor between base_srate used on transport on radio's rx rate
+  uint32_t tx_decim_factor; // decimation factor between base_srate used on transport on radio's tx rate
   double   rx_gain;
   double   tx_gain;
   uint32_t tx_freq_mhz[SRSRAN_MAX_CHANNELS];
@@ -66,7 +72,7 @@ typedef struct {
   pthread_mutex_t rx_gain_mutex;
 } rf_zmq_handler_t;
 
-void update_rates(rf_zmq_handler_t* handler, double srate);
+void update_rates(rf_zmq_handler_t* handler, double srate, bool is_tx);
 
 /*
  * Static Atributes
@@ -294,7 +300,9 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
       goto clean_exit;
     }
 
-    update_rates(handler, 1.92e6);
+    // Default init for both directions; txrx.cc sets the real (possibly asymmetric) rates later.
+    update_rates(handler, 1.92e6, false);
+    update_rates(handler, 1.92e6, true);
 
     //  Create ZMQ context
     handler->context = zmq_ctx_new();
@@ -434,24 +442,30 @@ int rf_zmq_close(void* h)
   return SRSRAN_SUCCESS;
 }
 
-void update_rates(rf_zmq_handler_t* handler, double srate)
+void update_rates(rf_zmq_handler_t* handler, double srate, bool is_tx)
 {
   pthread_mutex_lock(&handler->decim_mutex);
   if (handler) {
     // Decimation must be full integer
     if (((uint64_t)handler->base_srate % (uint64_t)srate) == 0) {
-      handler->srate        = (uint32_t)srate;
-      handler->decim_factor = handler->base_srate / handler->srate;
+      if (is_tx) {
+        handler->tx_srate        = (uint32_t)srate;
+        handler->tx_decim_factor = handler->base_srate / handler->tx_srate;
+      } else {
+        handler->rx_srate        = (uint32_t)srate;
+        handler->rx_decim_factor = handler->base_srate / handler->rx_srate;
+      }
     } else {
       fprintf(stderr,
               "Error: couldn't update sample rate. %.2f is not divisible by %.2f\n",
               srate / 1e6,
               handler->base_srate / 1e6);
     }
-    printf("Current sample rate is %.2f MHz with a base rate of %.2f MHz (x%d decimation)\n",
-           handler->srate / 1e6,
+    printf("Current %s sample rate is %.2f MHz with a base rate of %.2f MHz (x%d decimation)\n",
+           is_tx ? "tx" : "rx",
+           (is_tx ? handler->tx_srate : handler->rx_srate) / 1e6,
            handler->base_srate / 1e6,
-           handler->decim_factor);
+           is_tx ? handler->tx_decim_factor : handler->rx_decim_factor);
   }
   pthread_mutex_unlock(&handler->decim_mutex);
 }
@@ -461,8 +475,8 @@ double rf_zmq_set_rx_srate(void* h, double srate)
   double ret = 0.0;
   if (h) {
     rf_zmq_handler_t* handler = (rf_zmq_handler_t*)h;
-    update_rates(handler, srate);
-    ret = handler->srate;
+    update_rates(handler, srate, false);
+    ret = handler->rx_srate;
   }
   return ret;
 }
@@ -472,7 +486,7 @@ double rf_zmq_set_tx_srate(void* h, double srate)
   double ret = 0.0;
   if (h) {
     rf_zmq_handler_t* handler = (rf_zmq_handler_t*)h;
-    update_rates(handler, srate);
+    update_rates(handler, srate, true);
     ret = srate;
   }
   return ret;
@@ -670,7 +684,7 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
 
     // Protect the access to decim_factor since is a shared variable
     pthread_mutex_lock(&handler->decim_mutex);
-    uint32_t decim_factor = handler->decim_factor;
+    uint32_t decim_factor = handler->rx_decim_factor;
     pthread_mutex_unlock(&handler->decim_mutex);
 
     uint32_t nbytes            = NSAMPLES2NBYTES(nsamples * decim_factor);
@@ -710,7 +724,24 @@ int rf_zmq_recv_with_time_multi(void* h, void** data, uint32_t nsamples, bool bl
     rf_zmq_info(handler->id, " - next tx time: %d + %.3f\n", ts_tx.full_secs, ts_tx.frac_secs);
 
     // Leave time for the Tx to transmit
-    usleep((1000000UL * nsamples_baserate) / handler->base_srate);
+    unsigned long rx_sleep_us = (1000000UL * nsamples_baserate) / handler->base_srate;
+    /* TX_PACING_DIAG: measure what this self-imposed real-time pacing sleep
+     * actually computes to, live -- part of the n_prb=25 1.25kHz FeMBMS
+     * throughput-shortfall investigation (raw ZMQ input measured at only
+     * ~20% of nominal on the RX side; CPU confirmed idle via pidstat, so
+     * looking for a TX-side pacing/timing issue instead of a compute
+     * bottleneck). See fembms-mbsfn-cfo-investigation memory. */
+    if (getenv("TX_PACING_DIAG")) {
+      static unsigned long call_count = 0;
+      call_count++;
+      if (call_count % 200 == 1) {
+        fprintf(stderr,
+                "TX_PACING_DIAG call=%lu nsamples=%u decim_factor=%u nsamples_baserate=%u base_srate=%u "
+                "rx_sleep_us=%lu\n",
+                call_count, nsamples, decim_factor, nsamples_baserate, handler->base_srate, rx_sleep_us);
+      }
+    }
+    usleep(rx_sleep_us);
 
     // check for tx gap if we're also transmitting on this radio
     for (int i = 0; i < handler->nof_channels; i++) {
@@ -890,7 +921,7 @@ int rf_zmq_send_timed_multi(void*  h,
 
     // Protect the access to decim_factor since is a shared variable
     pthread_mutex_lock(&handler->decim_mutex);
-    uint32_t decim_factor = handler->decim_factor;
+    uint32_t decim_factor = handler->tx_decim_factor;
     pthread_mutex_unlock(&handler->decim_mutex);
 
     uint32_t nbytes            = NSAMPLES2NBYTES(nsamples);

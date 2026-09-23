@@ -155,8 +155,12 @@ void sf_worker::work_imp()
   srsran_dl_sf_cfg_t dl_sf = {};
 
   // Get Transmission buffers
+  // get_tx_nof_prb(), not get_nof_prb(): a wideband (FeMBMS extended-coverage)
+  // pmch_bandwidth's extra spectrum is already written into signal_buffer_tx
+  // (cc_worker.cc sizes/plans for it) but was silently dropped here every
+  // subframe because this declared sample count never grew to match it.
   srsran::rf_buffer_t tx_buffer = {};
-  tx_buffer.set_nof_samples(SRSRAN_SF_LEN_PRB(phy->get_nof_prb(0)));
+  tx_buffer.set_nof_samples(SRSRAN_SF_LEN_PRB(phy->get_tx_nof_prb(0)));
 
   if (!running) {
     phy->worker_end(context, true, tx_buffer);

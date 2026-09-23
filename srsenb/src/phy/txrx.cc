@@ -91,12 +91,34 @@ void txrx::run_thread()
   srsran::rf_buffer_t    buffer    = {};
   srsran::rf_timestamp_t timestamp = {};
   int      samp_rate_hz = srsran_sampling_freq_hz_scs(worker_com->get_nof_prb(0), worker_com->params.mbsfn_scs);
+  if (samp_rate_hz <= SRSRAN_SUCCESS) {
+    logger.error("Invalid RX sample rate for nof_prb=%d, scs=%d - aborting RX/TX thread",
+                 worker_com->get_nof_prb(0), (int)worker_com->params.mbsfn_scs);
+    return;
+  }
   float    samp_rate    = (float)samp_rate_hz;
   uint32_t sf_len       = (uint32_t)(samp_rate_hz / 1000);
 
+  /* TX rate uses get_tx_nof_prb() (max(nof_prb, mbsfn_prb)): the eNB's own TX chain
+   * must physically widen for a wideband (FeMBMS extended-coverage) pmch_bandwidth,
+   * or that extra spectrum is never actually transmitted. RX stays at the plain,
+   * narrow get_nof_prb() rate above - uplink (PUSCH/PUCCH/PRACH) has no "extended
+   * coverage" concept at all (TS 36.211 6.10.2's substitution is downlink-clause-only),
+   * so widening RX too would be both unnecessary and unsafe for enb_ul.c/
+   * prach_worker.cc, which have no widening path. This relies on rf_zmq_imp.c's
+   * per-direction rx/tx rate split (see that file) - without it, set_tx_srate()
+   * below would silently overwrite the RX rate just set via set_rx_srate(). */
+  int tx_samp_rate_hz = srsran_sampling_freq_hz_scs(worker_com->get_tx_nof_prb(0), worker_com->params.mbsfn_scs);
+  if (tx_samp_rate_hz <= SRSRAN_SUCCESS) {
+    logger.error("Invalid TX sample rate for tx_nof_prb=%d, scs=%d - aborting RX/TX thread",
+                 worker_com->get_tx_nof_prb(0), (int)worker_com->params.mbsfn_scs);
+    return;
+  }
+  float tx_samp_rate = (float)tx_samp_rate_hz;
+
   // Configure radio
   radio_h->set_rx_srate(samp_rate);
-  radio_h->set_tx_srate(samp_rate);
+  radio_h->set_tx_srate(tx_samp_rate);
 
   // Set Tx/Rx frequencies
   for (uint32_t cc_idx = 0; cc_idx < worker_com->get_nof_carriers(); cc_idx++) {
@@ -117,7 +139,8 @@ void txrx::run_thread()
     ul_channel->set_srate(static_cast<uint32_t>(samp_rate));
   }
 
-  logger.info("Starting RX/TX thread nof_prb=%d, sf_len=%d", worker_com->get_nof_prb(0), sf_len);
+  logger.info("Starting RX/TX thread nof_prb=%d, sf_len=%d, rx_srate=%.2fMHz, tx_srate=%.2fMHz",
+              worker_com->get_nof_prb(0), sf_len, samp_rate / 1e6f, tx_samp_rate / 1e6f);
 
   // Set TTI so that first TX is at tti=0
   tti = TTI_SUB(0, FDD_HARQ_DELAY_UL_MS + 1);

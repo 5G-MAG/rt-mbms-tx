@@ -119,11 +119,30 @@ struct rrc_tester : public rrc_dummy {
     return std::count(next_erabs_failed_to_modify.begin(), next_erabs_failed_to_modify.end(), erab_id) == 0;
   }
   void release_ue(uint16_t rnti) override { last_released_rnti = rnti; }
-  void write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies) override {}
-  void kill_warning(const asn1::s1ap::kill_request_ies_container& ies) override {}
+  void write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies) override
+  {
+    write_replace_warning_called = true;
+    last_pws_msg_id               = ies.msg_id.value.to_number();
+    last_pws_serial_num           = ies.serial_num.value.to_number();
+  }
+  void kill_warning(const asn1::s1ap::kill_request_ies_container& ies) override
+  {
+    kill_warning_called = true;
+    last_pws_msg_id     = ies.msg_id.value.to_number();
+    last_pws_serial_num = ies.serial_num.value.to_number();
+  }
 
   uint16_t              last_released_rnti = SRSRAN_INVALID_RNTI;
   std::vector<uint16_t> next_erabs_failed_to_modify, last_erabs_modified;
+
+  // PWS (Public Warning System) call tracking -- these two calls are non-UE-associated
+  // and must keep working even after the eNB stops serving any unicast UE, since Write
+  // Replace Warning / Kill requests arrive over the same S1 Setup / SCTP association
+  // regardless of whether any UE is ever attached.
+  bool     write_replace_warning_called = false;
+  bool     kill_warning_called          = false;
+  uint16_t last_pws_msg_id              = 0;
+  uint16_t last_pws_serial_num          = 0;
 };
 
 void run_s1_setup(s1ap& s1ap_obj, mme_dummy& mme)
@@ -326,6 +345,107 @@ void test_s1ap_erab_setup(test_event event)
   TESTASSERT(erab_item.erab_id == 5);
 }
 
+// Regression baseline for the PWS (Public Warning System) path: WriteReplaceWarningRequest
+// and KillRequest are non-UE-associated (TS 36.413 SS8.9/SS8.10) and must keep round-tripping
+// end to end -- request parsed, dispatched to RRC, and a matching Response sent back --
+// with no RRC connection, no UE context, and no unicast machinery involved at all. Any future
+// refactor that trims s1ap.cc down to a PWS-only build must keep this test passing unchanged.
+void test_s1ap_pws()
+{
+  srsran::task_scheduler task_sched;
+  srslog::basic_logger&  logger = srslog::fetch_basic_logger("S1AP");
+  dummy_socket_manager   rx_sockets;
+  s1ap                   s1ap_obj(&task_sched, logger, &rx_sockets);
+  rrc_tester             rrc;
+  asn1::s1ap::s1ap_pdu_c s1ap_pdu;
+
+  const char*    mme_addr_str = "127.0.0.1";
+  const uint32_t MME_PORT     = 36412; // srsenb::s1ap::MME_PORT is a hardcoded constant, not configurable via args
+  mme_dummy      mme(mme_addr_str, MME_PORT);
+
+  s1ap_args_t args   = {};
+  args.cell_id       = 0x01;
+  args.enb_id        = 0x19B;
+  args.mcc           = 907;
+  args.mnc           = 70;
+  args.s1c_bind_addr = "127.0.0.101";
+  args.tac           = 7;
+  args.gtp_bind_addr = "127.0.0.101";
+  args.mme_addr      = mme_addr_str;
+  args.enb_name      = "srsenb01";
+
+  TESTASSERT(s1ap_obj.init(args, &rrc) == SRSRAN_SUCCESS);
+
+  // PWS must work off the same S1 Setup / SCTP association as everything else -- there is
+  // no separate PWS-only handshake, so this step stays a hard prerequisite even in a build
+  // that has deleted every unicast UE-context procedure.
+  run_s1_setup(s1ap_obj, mme);
+
+  // --- WriteReplaceWarningRequest -> WriteReplaceWarningResponse, no UE context involved ---
+  {
+    asn1::s1ap::s1ap_pdu_c wrw_pdu;
+    wrw_pdu.set_init_msg().load_info_obj(ASN1_S1AP_ID_WRITE_REPLACE_WARNING);
+    auto& ies = wrw_pdu.init_msg().value.write_replace_warning_request().protocol_ies;
+    ies.msg_id.value.from_number(0x1112);
+    ies.serial_num.value.from_number(0x3344);
+
+    srsran::unique_byte_buffer_t sdu = srsran::make_byte_buffer();
+    asn1::bit_ref                bref(sdu->msg, sdu->get_tailroom());
+    TESTASSERT(wrw_pdu.pack(bref) == SRSRAN_SUCCESS);
+    sdu->N_bytes = bref.distance_bytes();
+
+    sockaddr_in     mme_addr = {};
+    sctp_sndrcvinfo rcvinfo  = {};
+    int             flags    = 0;
+    TESTASSERT(s1ap_obj.handle_mme_rx_msg(std::move(sdu), mme_addr, rcvinfo, flags));
+    TESTASSERT(rrc.write_replace_warning_called);
+    TESTASSERT(rrc.last_pws_msg_id == 0x1112);
+    TESTASSERT(rrc.last_pws_serial_num == 0x3344);
+
+    srsran::unique_byte_buffer_t resp = mme.read_msg();
+    TESTASSERT(resp->N_bytes > 0);
+    asn1::cbit_ref cbref(resp->msg, resp->N_bytes);
+    TESTASSERT(s1ap_pdu.unpack(cbref) == asn1::SRSASN_SUCCESS);
+    TESTASSERT(s1ap_pdu.type().value == asn1::s1ap::s1ap_pdu_c::types_opts::successful_outcome);
+    TESTASSERT(s1ap_pdu.successful_outcome().proc_code == ASN1_S1AP_ID_WRITE_REPLACE_WARNING);
+    auto& resp_ies = s1ap_pdu.successful_outcome().value.write_replace_warning_resp().protocol_ies;
+    TESTASSERT(resp_ies.msg_id.value.to_number() == 0x1112);
+    TESTASSERT(resp_ies.serial_num.value.to_number() == 0x3344);
+  }
+
+  // --- KillRequest -> KillResponse, same story ---
+  {
+    asn1::s1ap::s1ap_pdu_c kill_pdu;
+    kill_pdu.set_init_msg().load_info_obj(ASN1_S1AP_ID_KILL);
+    auto& ies = kill_pdu.init_msg().value.kill_request().protocol_ies;
+    ies.msg_id.value.from_number(0x5566);
+    ies.serial_num.value.from_number(0x7788);
+
+    srsran::unique_byte_buffer_t sdu = srsran::make_byte_buffer();
+    asn1::bit_ref                bref(sdu->msg, sdu->get_tailroom());
+    TESTASSERT(kill_pdu.pack(bref) == SRSRAN_SUCCESS);
+    sdu->N_bytes = bref.distance_bytes();
+
+    sockaddr_in     mme_addr = {};
+    sctp_sndrcvinfo rcvinfo  = {};
+    int             flags    = 0;
+    TESTASSERT(s1ap_obj.handle_mme_rx_msg(std::move(sdu), mme_addr, rcvinfo, flags));
+    TESTASSERT(rrc.kill_warning_called);
+    TESTASSERT(rrc.last_pws_msg_id == 0x5566);
+    TESTASSERT(rrc.last_pws_serial_num == 0x7788);
+
+    srsran::unique_byte_buffer_t resp = mme.read_msg();
+    TESTASSERT(resp->N_bytes > 0);
+    asn1::cbit_ref cbref(resp->msg, resp->N_bytes);
+    TESTASSERT(s1ap_pdu.unpack(cbref) == asn1::SRSASN_SUCCESS);
+    TESTASSERT(s1ap_pdu.type().value == asn1::s1ap::s1ap_pdu_c::types_opts::successful_outcome);
+    TESTASSERT(s1ap_pdu.successful_outcome().proc_code == ASN1_S1AP_ID_KILL);
+    auto& resp_ies = s1ap_pdu.successful_outcome().value.kill_resp().protocol_ies;
+    TESTASSERT(resp_ies.msg_id.value.to_number() == 0x5566);
+    TESTASSERT(resp_ies.serial_num.value.to_number() == 0x7788);
+  }
+}
+
 int main(int argc, char** argv)
 {
   // Setup logging.
@@ -340,4 +460,5 @@ int main(int argc, char** argv)
   test_s1ap_erab_setup(test_event::wrong_erabid_mod);
   test_s1ap_erab_setup(test_event::wrong_mme_s1ap_id);
   test_s1ap_erab_setup(test_event::repeated_erabid_mod);
+  test_s1ap_pws();
 }

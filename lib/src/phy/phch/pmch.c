@@ -21,6 +21,7 @@
 
 #include <assert.h>
 #include <complex.h>
+#include <errno.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -45,6 +46,11 @@
  * only ever writes a handful of files. */
 static bool pmch_re_dump_enabled(uint32_t tti)
 {
+  if (getenv("PMCH_RE_DUMP_ENABLED_DIAG")) {
+    fprintf(stderr, "PMCH_RE_DUMP_ENABLED_DIAG called tti=%u PMCH_RE_DUMP=%s PMCH_RE_DUMP_TTI=%s\n", tti,
+            getenv("PMCH_RE_DUMP") ? getenv("PMCH_RE_DUMP") : "(null)",
+            getenv("PMCH_RE_DUMP_TTI") ? getenv("PMCH_RE_DUMP_TTI") : "(null)");
+  }
   if (!getenv("PMCH_RE_DUMP")) {
     return false;
   }
@@ -64,9 +70,15 @@ static bool pmch_re_dump_enabled(uint32_t tti)
     unsigned t  = 0;
     bool     ok = (fscanf(f, "%u", &t) == 1);
     fclose(f);
+    if (getenv("PMCH_RE_DUMP_ENABLED_DIAG")) {
+      fprintf(stderr, "PMCH_RE_DUMP_ENABLED_DIAG dynfile tti=%u fopen_ok=1 fscanf_ok=%d parsed_t=%u match=%d\n", tti,
+              ok, t, ok && t == tti);
+    }
     if (ok && t == tti) {
       return true;
     }
+  } else if (getenv("PMCH_RE_DUMP_ENABLED_DIAG")) {
+    fprintf(stderr, "PMCH_RE_DUMP_ENABLED_DIAG dynfile tti=%u fopen_ok=0 (errno=%d)\n", tti, errno);
   }
   /* Subframe-modulo mode: /tmp/pmch_dump_sfmod holds K -> match tti%10==K.
    * Used to continuously dump every sf-K subframe's TX bits: filenames wrap
@@ -503,7 +515,7 @@ static void pmch_cp_sl4_prb(cf_t** in_ptr, cf_t** out_ptr, uint32_t stagger, boo
   }
 }
 
-static int pmch_cp(srsran_pmch_t* q, cf_t* input, cf_t* output, uint32_t lstart_grant, bool put, srsran_scs_t scs, uint32_t tti)
+static int pmch_cp(srsran_pmch_t* q, cf_t* input, cf_t* output, uint32_t lstart_grant, bool put, srsran_scs_t scs, uint32_t tti, uint32_t prb_count)
 {
   uint32_t s, n, l, lp, lstart, lend, nof_refs;
   cf_t *   in_ptr = input, *out_ptr = output;
@@ -518,8 +530,14 @@ static int pmch_cp(srsran_pmch_t* q, cf_t* input, cf_t* output, uint32_t lstart_
   }
 #endif
   nof_refs = srsran_refsignal_mbsfn_rs_per_symbol(scs);
-  // Use mbsfn_prb as the RE allocation width; fall back to nof_prb if unset.
-  uint32_t prb_count = q->cell.mbsfn_prb > 0 ? q->cell.mbsfn_prb : q->cell.nof_prb;
+  /* prb_count is the caller's explicit value (cfg->pdsch_cfg.grant.nof_prb), which
+   * srsran_configure_pmch() sets to mbsfn_prb (if set) for MCCH and MTCH alike -- MCCH is
+   * just another logical channel multiplexed onto the same MCH/PMCH (TS 36.300 §15.3.3),
+   * so it uses the same width as the rest of that PMCH, not a narrower one. Recomputing
+   * prb_count independently here (instead of using the value already agreed with the
+   * caller) risked drifting from cfg->pdsch_cfg.grant.nof_re, which is derived from that
+   * same caller-side value -- causing srsran_pmch_decode's own consistency check to fail
+   * -- see the matching fix in rt-mbms-modem's copy of this file. */
   for (s = 0; s < SRSRAN_MBSFN_NOF_SLOTS(scs); s++) {
     for (l = 0; l < SRSRAN_MBSFN_NOF_SYMBOLS(scs); l++) {
       for (n = 0; n < prb_count; n++) {
@@ -585,9 +603,9 @@ static int pmch_cp(srsran_pmch_t* q, cf_t* input, cf_t* output, uint32_t lstart_
  *
  * 36.211 10.3 section 6.3.5
  */
-static int pmch_put(srsran_pmch_t* q, cf_t* symbols, cf_t* sf_symbols, srsran_scs_t scs, uint32_t lstart, uint32_t tti)
+static int pmch_put(srsran_pmch_t* q, cf_t* symbols, cf_t* sf_symbols, srsran_scs_t scs, uint32_t lstart, uint32_t tti, uint32_t prb_count)
 {
-  return pmch_cp(q, symbols, sf_symbols, lstart, true, scs, tti);
+  return pmch_cp(q, symbols, sf_symbols, lstart, true, scs, tti, prb_count);
 }
 
 /**
@@ -597,9 +615,9 @@ static int pmch_put(srsran_pmch_t* q, cf_t* symbols, cf_t* sf_symbols, srsran_sc
  *
  * 36.211 10.3 section 6.3.5
  */
-static int pmch_get(srsran_pmch_t* q, cf_t* sf_symbols, cf_t* symbols, uint32_t lstart, srsran_scs_t scs, uint32_t tti)
+static int pmch_get(srsran_pmch_t* q, cf_t* sf_symbols, cf_t* symbols, uint32_t lstart, srsran_scs_t scs, uint32_t tti, uint32_t prb_count)
 {
-  return pmch_cp(q, sf_symbols, symbols, lstart, false, scs, tti);
+  return pmch_cp(q, sf_symbols, symbols, lstart, false, scs, tti, prb_count);
 }
 
 int srsran_pmch_init(srsran_pmch_t* q, uint32_t max_prb, uint32_t nof_rx_antennas)
@@ -814,7 +832,8 @@ int srsran_pmch_decode(srsran_pmch_t*         q,
                          : SRSRAN_NOF_CTRL_SYMBOLS(q->cell, sf->cfi);
     for (int j = 0; j < q->nof_rx_antennas; j++) {
       /* extract symbols */
-      n = pmch_get(q, sf_symbols[j], q->symbols[j], lstart, sf->subcarrier_spacing, sf->tti);
+      n = pmch_get(q, sf_symbols[j], q->symbols[j], lstart, sf->subcarrier_spacing, sf->tti,
+                   cfg->pdsch_cfg.grant.nof_prb);
       if (n != cfg->pdsch_cfg.grant.nof_re) {
         ERROR("PMCH 1 extract symbols error expecting %d symbols but got %d, lstart %d",
               cfg->pdsch_cfg.grant.nof_re,
@@ -839,7 +858,8 @@ int srsran_pmch_decode(srsran_pmch_t*         q,
           }
           fprintf(stderr, "[PMCH_RE_DUMP] DIAG fullce tti=%u dump_n=%u\n", sf->tti, dump_n);
         }
-        n = pmch_get(q, channel->ce[i][j], q->ce[i][j], lstart, sf->subcarrier_spacing, sf->tti);
+        n = pmch_get(q, channel->ce[i][j], q->ce[i][j], lstart, sf->subcarrier_spacing, sf->tti,
+                     cfg->pdsch_cfg.grant.nof_prb);
         if (n != cfg->pdsch_cfg.grant.nof_re) {
           ERROR("PMCH 2 extract chest error expecting %d symbols but got %d", cfg->pdsch_cfg.grant.nof_re, n);
           return SRSRAN_ERROR;
@@ -1090,9 +1110,11 @@ void srsran_configure_pmch(srsran_pmch_cfg_t* pmch_cfg, srsran_cell_t* cell, srs
   }
   if (getenv("PMCH_TI_DIAG")) {
     fprintf(stderr,
-            "TI_DIAG_CFGPMCH cell.nof_prb=%u cell.mbsfn_prb=%u grant.nof_prb=%u enable=%d scs=%d tbs=%d\n",
+            "TI_DIAG_CFGPMCH cell.nof_prb=%u cell.mbsfn_prb=%u grant.nof_prb=%u enable=%d scs=%d tbs=%d is_mcch=%d "
+            "mbsfn_mcs=%d nof_re=%d ti_n=%d\n",
             cell->nof_prb, cell->mbsfn_prb, pmch_cfg->pdsch_cfg.grant.nof_prb, (int)mbsfn_cfg->enable,
-            (int)mbsfn_cfg->subcarrier_spacing, pmch_cfg->pdsch_cfg.grant.tb[0].tbs);
+            (int)mbsfn_cfg->subcarrier_spacing, pmch_cfg->pdsch_cfg.grant.tb[0].tbs, (int)mbsfn_cfg->is_mcch,
+            (int)mbsfn_cfg->mbsfn_mcs, pmch_cfg->pdsch_cfg.grant.nof_re, (int)mbsfn_cfg->time_interleaving_n);
   }
 }
 
@@ -1105,18 +1127,34 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
 {
   int i;
   int ret = SRSRAN_ERROR_INVALID_INPUTS;
+  if (getenv("PMCH_ENCODE_ENTRY_DIAG")) {
+    fprintf(stderr,
+            "PMCH_ENCODE_ENTRY_DIAG tti=%u q_null=%d cfg_null=%d tbs=%d nof_re=%d max_re=%d\n",
+            sf ? sf->tti : 0xFFFFFFFF, q == NULL, cfg == NULL, cfg ? cfg->pdsch_cfg.grant.tb[0].tbs : -1,
+            cfg ? cfg->pdsch_cfg.grant.nof_re : -1, q ? q->max_re : -1);
+  }
   if (q != NULL && cfg != NULL) {
     for (i = 0; i < q->cell.nof_ports; i++) {
       if (sf_symbols[i] == NULL) {
+        if (getenv("PMCH_ENCODE_ENTRY_DIAG")) {
+          fprintf(stderr, "PMCH_ENCODE_ENTRY_DIAG tti=%u EARLY_RETURN sf_symbols[%d]==NULL\n", sf->tti, i);
+        }
         return SRSRAN_ERROR_INVALID_INPUTS;
       }
     }
 
     if (cfg->pdsch_cfg.grant.tb[0].tbs == 0) {
+      if (getenv("PMCH_ENCODE_ENTRY_DIAG")) {
+        fprintf(stderr, "PMCH_ENCODE_ENTRY_DIAG tti=%u EARLY_RETURN tbs==0\n", sf->tti);
+      }
       return SRSRAN_ERROR_INVALID_INPUTS;
     }
 
     if (cfg->pdsch_cfg.grant.nof_re > q->max_re) {
+      if (getenv("PMCH_ENCODE_ENTRY_DIAG")) {
+        fprintf(stderr, "PMCH_ENCODE_ENTRY_DIAG tti=%u EARLY_RETURN nof_re(%d)>max_re(%d)\n", sf->tti,
+                cfg->pdsch_cfg.grant.nof_re, q->max_re);
+      }
       ERROR("Error too many RE per subframe (%d). PMCH configured for %d RE (%d PRB)",
             cfg->pdsch_cfg.grant.nof_re,
             q->max_re,
@@ -1313,7 +1351,8 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
      * Standard 15 kHz MBSFN uses sf->cfi control symbols. */
     uint32_t lstart = (sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) ? 0u : SRSRAN_NOF_CTRL_SYMBOLS(q->cell, sf->cfi);
     for (i = 0; i < q->cell.nof_ports; i++) {
-      pmch_put(q, q->symbols[i], sf_symbols[i], sf->subcarrier_spacing, lstart, sf->tti);
+      pmch_put(q, q->symbols[i], sf_symbols[i], sf->subcarrier_spacing, lstart, sf->tti,
+               cfg->pdsch_cfg.grant.nof_prb);
     }
 
     /* PMCH_RE_DUMP: dump q->symbols[0] -- TX's own compacted, data-only modulated
