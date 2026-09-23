@@ -222,7 +222,11 @@ enable = false
 # eMBMS configuration options
 #
 # enable:               Enable MBMS transmission in the eNB
-# m1u_multiaddr:        Multicast address the M1-U socket will register to
+# m1u_multiaddr:        Multicast address the M1-U socket will register to. This is a plain
+#                       GTP-U/IP-multicast interface, agnostic to where the sender runs -- it
+#                       works identically whether MBMS-GW is co-located or on a separate host,
+#                       as long as this matches MBMS-GW's own m1u_multi_addr. MBMS-GW now ships
+#                       from its own standalone repo, rt-mbms-gw; see its mbms-gw.conf.example.
 # m1u_if_addr:          Address of the interface the M1-U interface will listen to for multicast packets
 # mcs:                  Modulation and Coding scheme for MBMS traffic
 #
@@ -232,6 +236,23 @@ enable = false
 #m1u_multiaddr = 239.255.0.1
 #m1u_if_addr = 127.0.1.201
 #mcs = 20
+
+#####################################################################
+# M3AP options (MME <-> MCE/eNB MBMS session control, TS 36.444). This
+# eNB acts as its own distributed MCE (TS 23.246 clause 5.9.1).
+#
+# mme_addr:              IP address of MME for M3 connection
+# mme_m3_port:           M3 port on the MME (IANA-registered default for
+#                        m3ap/SCTP; TS 36.444 itself does not mandate a port)
+# m3c_bind_addr:         Local IP address to bind for M3AP connection
+# mbms_service_area_id:  MBMS Service Area Identity this eNB serves
+#                        (TS 23.003 clause 15.3)
+#####################################################################
+[m3ap]
+#mme_addr = 127.0.1.100
+#mme_m3_port = 36444
+#m3c_bind_addr = 192.168.3.1
+#mbms_service_area_id = 1
 
 
 

@@ -48,10 +48,11 @@ rrc::ue::ue(rrc* outer_rrc, uint16_t rnti_, const sched_interface::ue_cfg_t& sch
   parent(outer_rrc),
   rnti(rnti_),
   phy_rrc_dedicated_list(sched_ue_cfg.supported_cc_list.size()),
-  ue_cell_list(parent->cfg, *outer_rrc->cell_res_list, *outer_rrc->cell_common_list),
+  cell_common_list_keepalive(outer_rrc->cell_common_list),
+  ue_cell_list(parent->cfg, *outer_rrc->cell_res_list, *cell_common_list_keepalive),
   bearer_list(rnti_, parent->cfg, outer_rrc->gtpu),
   ue_security_cfg(parent->cfg),
-  mac_ctrl(rnti, ue_cell_list, bearer_list, parent->cfg, parent->mac, *parent->cell_common_list, sched_ue_cfg)
+  mac_ctrl(rnti, ue_cell_list, bearer_list, parent->cfg, parent->mac, *cell_common_list_keepalive, sched_ue_cfg)
 {}
 
 rrc::ue::~ue() {}

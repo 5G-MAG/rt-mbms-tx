@@ -34,6 +34,16 @@ static const int dl_mcs_tbs_idx_table2[28] = {0,  2,  4,  6,  8,  10, 11, 12, 13
 static const int ul_mcs_tbs_idx_table[29] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 10, 11, 12, 13,
                                              14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 25, 26};
 
+/* TS 36.213 Rel-19 Table 11.1-1: for SL4 without 256QAM.
+ * QPSK MCS 0-10, 16QAM MCS 11-20, 64QAM MCS 21-28.
+ * I_TBS repeats at the QPSK->16QAM boundary (MCS 11 = 10) and the 16QAM->64QAM boundary (MCS 21 = 19).
+ * MCS 29-31 are reserved; MCS 28 is the last valid entry (I_TBS=26). */
+static const int pmch_mcs_tbs_idx_table1[29] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
+                                                 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+                                                 19, 20, 21, 22, 23, 24, 25, 26};
+/* Table 11.1-2 (SL4/SL2 with 256QAM) and Table 7.1.7.1-1A (non-SL4 with 256QAM)
+ * share the same I_TBS lookup: dl_mcs_tbs_idx_table2. */
+
 /* Transport Block Size from 3GPP TS 36.213 v12.13.0 table 7.1.7.2.1-1 */
 static const int tbs_table[SRSRAN_RA_NOF_TBS_IDX][110] = {
     /* The matrix below is automatically generated from ETSI TS 136 213 V12.13.0 (2019-03) */

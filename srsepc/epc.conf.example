@@ -76,6 +76,32 @@ max_paging_queue = 100
 enable   = false
 filename = /tmp/epc.pcap
 
+#####################################################################
+# Sm interface (MME <-> MBMS-GW session control, TS 23.246 / TS 29.274)
+#
+# sm_bind_addr: Sm interface bind address
+# sm_bind_port: Sm interface bind port -- MUST stay 2123 for spec-compliant
+#               interop (TS 29.274 sec 4.2.1.1); a dedicated section rather
+#               than new [mme] keys, to keep interface-specific config
+#               namespaced consistently with the MBMS-GW side.
+#####################################################################
+[mme_sm]
+sm_bind_addr = 0.0.0.0
+sm_bind_port = 2123
+
+#####################################################################
+# M3AP interface (MME <-> MCE/eNB, MBMS session control, TS 36.444)
+#
+# m3_bind_addr: M3AP interface bind address
+# m3_bind_port: M3AP interface bind port. TS 36.444 itself does not specify
+#               an SCTP port number for M3, but 36444 is IANA-registered to
+#               "m3ap"/SCTP (verified against the IANA Service Name and Port
+#               Number Registry, registered 2011-02-07).
+#####################################################################
+[mme_m3]
+m3_bind_addr = 0.0.0.0
+m3_bind_port = 36444
+
 ####################################################################
 # Log configuration
 #

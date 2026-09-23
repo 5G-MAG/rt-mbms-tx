@@ -92,9 +92,10 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("enb.tm",                 bpo::value<uint32_t>(&args->enb.transmission_mode)->default_value(1),    "Transmission mode (1-8)")
     ("enb.p_a",                bpo::value<float>(&args->enb.p_a)->default_value(0.0f),                  "Power allocation rho_a (-6, -4.77, -3, -1.77, 0, 1, 2, 3)")
 
-    ("enb_files.sib_config", bpo::value<string>(&args->enb_files.sib_config)->default_value("sib.conf"), "SIB configuration files")
-    ("enb_files.rr_config",  bpo::value<string>(&args->enb_files.rr_config)->default_value("rr.conf"),   "RR configuration files")
-    ("enb_files.rb_config", bpo::value<string>(&args->enb_files.rb_config)->default_value("rb.conf"), "SRB/DRB configuration files")
+    ("enb_files.sib_config",     bpo::value<string>(&args->enb_files.sib_config)->default_value("sib.conf"),         "SIB configuration files")
+    ("enb_files.rr_config",      bpo::value<string>(&args->enb_files.rr_config)->default_value("rr.conf"),           "RR configuration files")
+    ("enb_files.rb_config",      bpo::value<string>(&args->enb_files.rb_config)->default_value("rb.conf"),           "SRB/DRB configuration files")
+    ("enb_files.sib12_alert",    bpo::value<string>(&args->enb_files.sib12_alert_file)->default_value(""),           "SIB12 emergency alert config (default: <sib_config_dir>/sib12_alert.conf)")
 
     ("rf.dl_earfcn",      bpo::value<uint32_t>(&args->enb.dl_earfcn)->default_value(0),   "Force Downlink EARFCN for single cell")
     ("rf.srate",          bpo::value<double>(&args->rf.srate_hz)->default_value(0.0),     "Force Tx and Rx sampling rate in Hz")
@@ -113,6 +114,9 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("rf.time_adv_nsamples", bpo::value<string>(&args->rf.time_adv_nsamples)->default_value("auto"), "Transmission time advance")
 
     ("gui.enable",        bpo::value<bool>(&args->gui.enable)->default_value(false),          "Enable GUI plots")
+
+    ("control.enable",      bpo::value<bool>(&args->control.enable)->default_value(false), "Enable local Unix-domain control socket for live eMBMS reconfiguration")
+    ("control.socket_path", bpo::value<string>(&args->control.socket_path)->default_value("/tmp/srsenb_control.sock"), "Path of the control socket")
 
     /* Log section */
     ("log.rf_level",     bpo::value<string>(&args->rf.log_level),         "RF log level")
@@ -257,12 +261,51 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("expert.ts1_reloc_overall_timeout", bpo::value<uint32_t>(&args->stack.s1ap.ts1_reloc_overall_timeout)->default_value(10000), "S1AP TS 36.413 TS1RelocOverall Expiry Timeout value in milliseconds.")
     ("expert.rlf_min_ul_snr_estim", bpo::value<int>(&args->stack.mac.rlf_min_ul_snr_estim)->default_value(-2), "SNR threshold in dB below which the eNB is notified with rlf ko.")
 
+    // M3AP section (MME <-> MCE/eNB MBMS session control, TS 36.444). This eNB acts as its own distributed
+    // MCE (TS 23.246 clause 5.9.1), so mme_addr/port here is the same MME that terminates M3AP, reached over
+    // a separate SCTP association from S1AP's.
+    ("m3ap.mme_addr", bpo::value<string>(&args->stack.m3ap.mme_addr)->default_value("127.0.0.1"), "IP address of MME for M3 connection")
+    ("m3ap.mme_m3_port", bpo::value<uint16_t>(&args->stack.m3ap.mme_m3_port)->default_value(36444), "M3 port on the MME (IANA-registered default for m3ap/SCTP; TS 36.444 itself does not mandate a port, see project notes)")
+    ("m3ap.m3c_bind_addr", bpo::value<string>(&args->stack.m3ap.m3c_bind_addr)->default_value("192.168.3.1"), "Local IP address to bind for M3AP connection")
+    ("m3ap.m3c_bind_port", bpo::value<uint16_t>(&args->stack.m3ap.m3c_bind_port)->default_value(0), "Source port for M3AP connection (0 means any)")
+    ("m3ap.mbms_service_area_id", bpo::value<uint16_t>()->default_value(1)->notifier([args](uint16_t v) { args->stack.m3ap.mbms_service_area_ids = {v}; }), "MBMS Service Area Identity this eNB serves (TS 23.003 clause 15.3), sent in M3 Setup Request's MBMS Service Area List")
+
     // eMBMS section
     ("embms.enable", bpo::value<bool>(&args->stack.embms.enable)->default_value(false), "Enables MBMS in the eNB")
     ("embms.mbms_dedicated", bpo::value<bool>(&args->stack.embms.mbms_dedicated)->default_value(false), "Enables FeMBMS dedicated mode")
     ("embms.m1u_multiaddr", bpo::value<string>(&args->stack.embms.m1u_multiaddr)->default_value("239.255.0.1"), "M1-U Multicast address the eNB joins.")
     ("embms.m1u_if_addr", bpo::value<string>(&args->stack.embms.m1u_if_addr)->default_value("127.0.1.201"), "IP address of the interface the eNB will listen for M1-U traffic.")
     ("embms.mcs", bpo::value<uint16_t>(&args->stack.embms.mcs)->default_value(20), "Modulation and Coding scheme of MBMS traffic.")
+    ("embms.cas_muting", bpo::value<bool>(&args->stack.embms.cas_muting)->default_value(false), "Enable Rel-19 CAS muting: suppress PSS/SSS/PBCH in muted frames (TS 36.211 §6.6.4/6.11.1.2/6.11.2.2).")
+    // NOTE: these embms.* fields are uint8_t in embms_args_t, but boost::program_options
+    // must never bind bpo::value<uint8_t>/<int8_t> directly to them: uint8_t is a
+    // char-sized type, and boost::program_options (via lexical_cast) parses char-sized
+    // targets by taking the string's *first character code*, not its numeric value --
+    // e.g. a config value of "2" silently becomes 50 ('2' in ASCII), "0" becomes 48, and
+    // any 2+ digit value (e.g. "25") throws a bpo::error and aborts startup. This was
+    // never caught before because these options only ever ran through default_value()
+    // (set natively in-memory, no string parsing involved) until real config-file/CLI
+    // values were exercised for the first time. Fix: parse into a wider integer type and
+    // narrow-cast into the real field via a notifier, which still runs synchronously
+    // inside the bpo::notify(vm) call below.
+    ("embms.k_cas", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.k_cas = static_cast<uint8_t>(v); }), "CAS muting KCAS parameter (4..63): number of active-CAS frames per 16*NCAS-frame period (TS 36.211 §6.11.1.2, CR 0577).")
+    ("embms.n_cas", bpo::value<uint16_t>()->default_value(2)->notifier([args](uint16_t v) { args->stack.embms.n_cas = static_cast<uint8_t>(v); }), "CAS muting NCAS parameter (2, 4, 8, or 16): muting period spans 16*NCAS radio frames (TS 36.211 §6.11.1.2).")
+    ("embms.pmch_bandwidth", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.pmch_bandwidth = static_cast<uint8_t>(v); }), "Rel-17 PMCH bandwidth in PRBs (0=off, 30/35/40, overrides cell bandwidth for MBSFN, TS 36.331 pmch-Bandwidth-r17).")
+    ("embms.cyclic_shift_alpha", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.cyclic_shift_alpha = static_cast<uint8_t>(v); }), "Rel-19 PMCH cyclic shift alpha (0=disabled, 1/2/3 = alpha1/alpha2/alpha3, TS 36.211 §6.5.1).")
+    ("embms.freq_interleaving", bpo::value<bool>(&args->stack.embms.freq_interleaving)->default_value(false), "Enable Rel-19 PMCH frequency-domain interleaving (TS 36.211 §6.5.2).")
+    ("embms.time_interleaving_n", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.time_interleaving_n = static_cast<uint8_t>(v); }), "Rel-19 PMCH time interleaving NTimePMCH (0=disabled, 2/4/8/16, TS 36.213 §11.1).")
+    ("embms.time_interleaving_m", bpo::value<uint16_t>()->default_value(4)->notifier([args](uint16_t v) { args->stack.embms.time_interleaving_m = static_cast<uint8_t>(v); }), "Rel-19 PMCH time interleaving MTimePMCH in subframes (4/8/16/32, TS 36.211 §6.5.3). Must be >= N.")
+    ("embms.time_interleaving_n_last_mtch", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.time_interleaving_n_last_mtch = static_cast<uint8_t>(v); }), "Rel-19 PMCH-TimeInterleavingN-LastMTCH (TS 36.331 CR5168r3): override N for the last of nof_mbms_sessions MTCH sessions (0=absent/inherit main N, 1=n1/disabled for last session only, or 2/4/8/16).")
+    ("embms.time_interleaving_m_last_mtch", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.time_interleaving_m_last_mtch = static_cast<uint8_t>(v); }), "Rel-19 PMCH-TimeInterleavingM-LastMTCH: override M for the last MTCH session (0=absent/inherit main M, or 4/8/16/32).")
+    ("embms.n_soft_ref_category", bpo::value<uint16_t>(&args->stack.embms.n_soft_ref_category)->default_value(4), "PMCH-SoftBufferSizeParameters-r19 pmch-TimeInterleavingRefUECategoryDL-r19: reference UE DL category (TS 36.306 Table 4.1-1) used to compute the N_cb soft-buffer cap (TS 36.212 §5.1.4.1.2). Only signalled when time_interleaving_n > 1.")
+    ("embms.scaling_factor_beta", bpo::value<string>(&args->stack.embms.scaling_factor_beta)->default_value("one"), "PMCH-SoftBufferSizeParameters-r19 pmch-TimeInterleavingScalingFactorBeta-r19: one32nd/one5th/one3rd/three8th/five12th/onehalf/five8th/two3rd/five6th/one. Only signalled when time_interleaving_n > 1.")
+    ("embms.use_mcs_table2", bpo::value<bool>(&args->stack.embms.use_mcs_table2)->default_value(false), "Use TS 36.213 Table 11.1-2 (256QAM) for PMCH MCS instead of Table 11.1-1.")
+    ("embms.mch_sched_period_rf", bpo::value<uint16_t>()->default_value(64)->notifier([args](uint16_t v) { args->stack.embms.mch_sched_period_rf = static_cast<uint8_t>(v); }), "PMCH scheduling period in radio frames (4/8/16/32/64, TS 36.331 mch-SchedulingPeriod-r9).")
+    ("embms.nof_mbms_sessions", bpo::value<uint16_t>()->default_value(1)->notifier([args](uint16_t v) { args->stack.embms.nof_mbms_sessions = static_cast<uint8_t>(v); }), "Number of MBMS sessions (MTCH bearers) in the PMCH (1-8).")
+    ("embms.time_separation_sl2", bpo::value<bool>(&args->stack.embms.pmch_time_separation_sl2)->default_value(false), "0.37 kHz time separation: false=SL4 (default), true=SL2 (TS 36.211 §4.1 timeSeparation-r16).")
+    ("embms.subcarrier_spacing", bpo::value<string>(&args->stack.embms.pmch_subcarrier_spacing)->default_value(""), "Override PMCH subcarrier spacing in SIB13 r16 extension: khz1dot25/khz2dot5/khz7dot5/khz0dot37. Required for 2.5 kHz and 0.37 kHz (not expressible via r9 SCS enum). Empty = derive from sib.conf subcarrier_spacing.")
+    ("embms.additional_non_mbsfn_subframes", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.additional_non_mbsfn_subframes = static_cast<uint8_t>(v); }), "MIB-MBMS additionalNonMBSFNSubframes-r14 (0..3): number of SFs after SF0 in active CAS frames reserved as non-MBSFN (TS 36.331 §6.7.4.1).")
+    ("embms.session_teids", bpo::value<string>(&args->stack.embms.session_teids)->default_value(""), "Comma-separated per-session GTP-U TEIDs for M1-U demux (e.g. \"0xAAAAAAAA,0xAAAAAAAB\"), index i -> LCID i+1. Empty (default) = legacy single-bearer behavior. Must match the MBMS-GW's own per-session C-TEID config.")
 
     // NR section
     ("scheduler.nr_pdsch_mcs", bpo::value<int>(&args->nr_stack.mac.sched_cfg.fixed_dl_mcs)->default_value(28), "Fixed NR DL MCS (-1 for dynamic).")
@@ -322,6 +365,7 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     }
   }
 
+  args->enb_files.config_file = config_file;
   cout << "Reading configuration file " << config_file << "..." << endl;
   ifstream conf(config_file.c_str(), ios::in);
   if (conf.fail()) {
@@ -570,6 +614,18 @@ static void signal_handler()
   running = false;
 }
 
+static std::atomic<bool> do_embms_reload   = {false};
+static std::atomic<bool> do_sib12_activate = {false};
+static std::atomic<bool> do_sib12_cancel   = {false};
+
+static void sighup_handler()
+{
+  do_embms_reload.store(true);
+}
+
+static void sigusr1_handler(int) { do_sib12_activate.store(true); }
+static void sigusr2_handler(int) { do_sib12_cancel.store(true); }
+
 int main(int argc, char* argv[])
 {
   srsran_register_signal_handler(signal_handler);
@@ -636,6 +692,17 @@ int main(int argc, char* argv[])
     enb->stop();
     return SRSRAN_ERROR;
   }
+  srsran_register_sighup_handler(sighup_handler);
+  {
+    struct sigaction sa = {};
+    sa.sa_handler = sigusr1_handler;
+    sigaction(SIGUSR1, &sa, nullptr);
+  }
+  {
+    struct sigaction sa = {};
+    sa.sa_handler = sigusr2_handler;
+    sigaction(SIGUSR2, &sa, nullptr);
+  }
 
   // Set metrics
   metricshub.init(enb.get(), args.general.metrics_period_secs);
@@ -664,6 +731,15 @@ int main(int argc, char* argv[])
   int cnt    = 0;
   int ts_cnt = 0;
   while (running) {
+    if (do_embms_reload.exchange(false)) {
+      enb->reload_embms_config();
+    }
+    if (do_sib12_activate.exchange(false)) {
+      enb->reload_sib12(true);
+    }
+    if (do_sib12_cancel.exchange(false)) {
+      enb->reload_sib12(false);
+    }
     if (args.general.print_buffer_state) {
       cnt++;
       if (cnt == 1000) {

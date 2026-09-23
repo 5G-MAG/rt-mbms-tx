@@ -1089,8 +1089,10 @@ struct mbsfn_area_info_r16_s {
   };
 
   struct subcarrier_spacing_mbms_r16_opts {
+    // kHz15-v1710 (the plain-LTE-numerology option, TS 36.331 v17.1.0+): occupies the
+    // slot that earlier spec versions left as a reserved spare value.
     enum options { khz_7dot5, khz_2dot5, khz_1dot25, khz0dot37,
-      spare4, spare3, spare2, spare1, nulltype } value;
+      khz15, spare3, spare2, spare1, nulltype } value;
     typedef float number_type;
 
     std::string to_string() const;
@@ -1109,7 +1111,7 @@ struct mbsfn_area_info_r16_s {
   };
   typedef enumerated<time_separation_r16_opts> time_separation_r16_e_;
 
-  struct pmch_bandwidth_v16xy_opts {
+  struct pmch_bandwidth_r17_opts {
     enum options { n30, n35, n40, spare1, nulltype } value;
     typedef uint8_t number_type;
 
@@ -1117,7 +1119,7 @@ struct mbsfn_area_info_r16_s {
     uint8_t       to_number() const;
     std::string to_number_string() const;
   };
-  typedef enumerated<pmch_bandwidth_v16xy_opts> pmch_bandwidth_v16xy_e_;
+  typedef enumerated<pmch_bandwidth_r17_opts> pmch_bandwidth_r17_e_;
 
   // member variables
   bool                           ext              = false;
@@ -1127,11 +1129,11 @@ struct mbsfn_area_info_r16_s {
   subcarrier_spacing_mbms_r16_e_ subcarrier_spacing_mbms_r16;
   bool                           time_separation_r16_present = false;
   time_separation_r16_e_         time_separation_r16;
-  bool                           pmch_bandwidth_v16xy_present = false;
-  pmch_bandwidth_v16xy_e_        pmch_bandwidth_v16xy;
+  bool                           pmch_bandwidth_r17_present = false;
+  pmch_bandwidth_r17_e_          pmch_bandwidth_r17;
 
   // sequence methods
-  // SRSASN_CODE pack(bit_ref& bref) const; // not implemented
+  SRSASN_CODE pack(bit_ref& bref) const;
   SRSASN_CODE unpack(cbit_ref& bref);
   void        to_json(json_writer& j) const;
 };
@@ -1542,6 +1544,35 @@ using mbms_sai_inter_freq_list_v1140_l = dyn_array<mbms_sai_inter_freq_v1140_s>;
 using mbsfn_area_info_list_r9_l = dyn_array<mbsfn_area_info_r9_s>;
 
 using mbsfn_area_info_list_r16_l = dyn_array<mbsfn_area_info_r16_s>;
+
+// MBMS-ROM-FreqInfo-r16 — channel descriptor for Receive-Only Mode receivers (TS 36.331 §6.3.7)
+struct mbms_rom_info_r16_s {
+  struct subcarrier_spacing_r16_opts {
+    enum options { khz15, khz7dot5, khz1dot25, nulltype } value;
+    typedef float number_type;
+    const char* to_string() const;
+    float       to_number() const;
+    const char* to_number_string() const;
+  };
+  typedef enumerated<subcarrier_spacing_r16_opts> subcarrier_spacing_r16_e_;
+  struct bw_r16_opts {
+    enum options { n6, n15, n25, n50, n75, n100, nulltype } value;
+    typedef uint8_t number_type;
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<bw_r16_opts> bw_r16_e_;
+
+  bool                      subcarrier_spacing_r16_present = false;
+  uint32_t                  rom_freq_r16                   = 0;
+  subcarrier_spacing_r16_e_ subcarrier_spacing_r16;
+  bw_r16_e_                 bw_r16;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+using mbms_rom_info_list_r16_l = dyn_array<mbms_rom_info_r16_s>;
 
 // MeasIdleConfigSIB-r15 ::= SEQUENCE
 struct meas_idle_cfg_sib_r15_s {
@@ -2061,8 +2092,11 @@ struct sib_type13_r9_s {
   // group 0
   copy_ptr<mbms_notif_cfg_v1430_s> notif_cfg_v1430;
 
-  bool                      mbsfn_area_info_list_r16_present = false;
+  bool                       mbsfn_area_info_list_r16_present = false;
   mbsfn_area_info_list_r16_l mbsfn_area_info_list_r16;
+  // group 1 (continued)
+  bool                       mbms_rom_info_list_r16_present = false;
+  mbms_rom_info_list_r16_l   mbms_rom_info_list_r16;
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;
@@ -3960,7 +3994,14 @@ using sib_map_info_mbms_r14_l = bounded_array<sib_type_mbms_r14_e, 31>;
 // SchedulingInfo-MBMS-r14 ::= SEQUENCE
 struct sched_info_mbms_r14_s {
   struct si_periodicity_r14_opts {
-    enum options { rf16, rf32, rf64, rf128, rf256, rf512, nulltype } value;
+    /* Base Rel-14 values (0-5) followed by Rel-19 extended periods (6-14).
+     * New values are appended to preserve backward compatibility of existing
+     * encoded SIBs (TS 36.331 §6.3.7 Rel-19). */
+    enum options {
+      rf16, rf32, rf64, rf128, rf256, rf512,
+      rf7, rf14, rf28, rf53, rf56, rf108, rf112, rf212, rf424,
+      nulltype
+    } value;
     typedef uint16_t number_type;
 
     const char* to_string() const;
@@ -4007,6 +4048,29 @@ using plmn_id_list_mbms_r14_l = dyn_array<plmn_id_s>;
 using sched_info_list_mbms_r14_l = dyn_array<sched_info_mbms_r14_s>;
 
 // SystemInformationBlockType1-MBMS-r14 ::= SEQUENCE
+// SystemInformationBlockType1-MBMS-v1900 (Rel-19 CAS muting extension)
+struct sib_type1_mbms_v1900_s {
+  struct n_cas_r19_opts {
+    enum options { n2, n4, n8, n16, nulltype } value;
+    typedef uint8_t number_type;
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<n_cas_r19_opts> n_cas_r19_e_;
+
+  struct cas_muting_cfg_r19_s_ {
+    uint8_t      k_cas_r19 = 0;
+    n_cas_r19_e_ n_cas_r19;
+  };
+
+  bool                  cas_muting_cfg_r19_present = false;
+  cas_muting_cfg_r19_s_ cas_muting_cfg_r19;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
 struct sib_type1_mbms_r14_s {
   struct cell_access_related_info_r14_s_ {
     plmn_id_list_mbms_r14_l plmn_id_list_r14;
@@ -4029,7 +4093,10 @@ struct sib_type1_mbms_r14_s {
   bool                                 sib_type13_r14_present                    = false;
   bool                                 cell_access_related_info_list_r14_present = false;
   bool                                 non_crit_ext_present                      = false;
+  bool                                 q_rx_lev_min_offset_r14_present           = false;
   cell_access_related_info_r14_s_      cell_access_related_info_r14;
+  int8_t                               q_rx_lev_min_r14        = -60; /* Q-RxLevMin: -70..-22 dBm (TS 36.331 §6.2.2) */
+  uint8_t                              q_rx_lev_min_offset_r14 = 1;   /* INTEGER(1..8); only used if present */
   uint16_t                             freq_band_ind_r14 = 1;
   multi_band_info_list_r11_l           multi_band_info_list_r14;
   sched_info_list_mbms_r14_l           sched_info_list_mbms_r14;
@@ -4039,6 +4106,7 @@ struct sib_type1_mbms_r14_s {
   pdsch_cfg_common_s                   pdsch_cfg_common_r14;
   sib_type13_r9_s                      sib_type13_r14;
   cell_access_related_info_list_r14_l_ cell_access_related_info_list_r14;
+  sib_type1_mbms_v1900_s               non_crit_ext;  // v1900 extension
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;

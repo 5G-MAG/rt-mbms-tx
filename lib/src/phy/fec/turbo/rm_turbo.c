@@ -1175,3 +1175,312 @@ int srsran_rm_turbo_rx(float*   w_buff,
 
   return 0;
 }
+
+/* TS 36.212 §5.1.4.1.2, MCH configured with pmch-TimeInterleaving-N: same "undo
+ * bit collection" walk as srsran_rm_turbo_gentable_receive (used once at
+ * startup to precompute the standard rv=0..3 LUT), but with the MCH-specific
+ * linear k0 = 2*R_TC + rv_idx*e_min (R_TC = nrows, computed here from cb_idx
+ * exactly as the standard function does) instead of the standard ceiling
+ * formula. table[i] gives the compact (dummy-free) codeblock-domain index
+ * that rate-matched bit position i corresponds to - usable as a GATHER for TX
+ * (bit_i = compact[table[i % table_len]]) or a SCATTER-ACCUMULATE for RX
+ * (compact[table[i % table_len]] += llr_i), mirroring exactly how the
+ * standard deinterleaver[][] table is already used by srsran_rm_turbo_rx_lut_'s
+ * fallback path (output[deinter[i % out_len]] += input[i]).
+ *
+ * Deliberately not cached/precomputed globally like the standard table (MCH
+ * encoding happens far less often than PDSCH/PUSCH, so the recompute cost is
+ * acceptable), and deliberately uses its own stack-local scratch rather than
+ * this file's shared temp_table1/temp_table2 statics, since those are only
+ * ever touched once at startup (inside srsran_rm_turbo_gentables(), guarded
+ * by rm_turbo_tables_generated) and are not safe to share across concurrent
+ * per-subframe calls from multiple PHY worker threads. table_len (the size of
+ * a full generated table, = the size the caller should apply "% table_len"
+ * against) is 3*srsran_cbsegm_cbsize(cb_idx)+12; the caller can recompute this
+ * itself instead of needing it returned. */
+static void srsran_rm_turbo_gentable_mch(uint16_t* table, uint32_t cb_idx, uint32_t rv_idx, uint32_t e_min, uint32_t n_cb_cap)
+{
+  int true_cb_len = srsran_cbsegm_cbsize(cb_idx);
+  int table_len    = 3 * true_cb_len + 12; /* systematic + 2x parity + tail bits */
+
+  int nrows  = (uint32_t)(table_len / 3 - 1) / NCOLS + 1;
+  int ndummy = nrows * NCOLS - table_len / 3;
+  if (ndummy < 0) {
+    ndummy = 0;
+  }
+
+  /* TS 36.212 §5.1.4.1.2: N_cb = min(floor(N_IR/C), K_w). K_w = 3*nrows*NCOLS
+   * is the full (uncapped) circular buffer; n_cb_cap (0 = "no real cap
+   * available, fall back to K_w") is the caller's already-computed
+   * floor(N_IR/C), from the UE soft-buffer-size limitation. Only ever makes
+   * N_cb SMALLER than K_w -- never larger, never a source of an
+   * out-of-bounds access below (the k0/jp modulo arithmetic already handles
+   * any N_cb <= K_w correctly, same as it always has for the uncapped case). */
+  int N_cb = 3 * nrows * NCOLS;
+  if (n_cb_cap > 0 && (int)n_cb_cap < N_cb) {
+    N_cb = (int)n_cb_cap;
+  }
+  int k0   = (int)(((uint32_t)(2 * nrows)) + rv_idx * e_min) % N_cb;
+
+  int  kidx;
+  int  K_p = nrows * NCOLS;
+  int  k = 0, jp = 0, j = 0;
+  bool isdummy = false;
+  int  d_i, d_j;
+
+  uint16_t local_table1[3 * 6176];
+  uint16_t local_table2[3 * 6176];
+
+  /* Pass 1: walk the k0-based circular buffer, skipping dummy positions, to
+   * build local_table1[k] = raw (padded) position of the k-th real bit.
+   * Identical to srsran_rm_turbo_gentable_receive's first pass. */
+  while (k < table_len) {
+    jp = (k0 + j) % N_cb;
+
+    if (jp < K_p || !(jp % 2)) {
+      if (jp >= K_p) {
+        d_i = ((jp - K_p) / 2) / nrows;
+        d_j = ((jp - K_p) / 2) % nrows;
+      } else {
+        d_i = jp / nrows;
+        d_j = jp % nrows;
+      }
+      if (d_j * NCOLS + RM_PERM_TC[d_i] >= ndummy) {
+        isdummy = false;
+        if (d_j * NCOLS + RM_PERM_TC[d_i] - ndummy < 0) {
+          isdummy = true;
+        }
+      } else {
+        isdummy = true;
+      }
+    } else {
+      uint32_t jpp = (jp - K_p - 1) / 2;
+      kidx         = (RM_PERM_TC[jpp / nrows] + NCOLS * (jpp % nrows) + 1) % K_p;
+      if ((kidx - ndummy) < 0) {
+        isdummy = true;
+      } else {
+        isdummy = false;
+      }
+    }
+
+    if (!isdummy) {
+      local_table1[k] = (uint16_t)(jp % (3 * nrows * NCOLS));
+      k++;
+    }
+    j++;
+  }
+
+  /* Pass 2: rv-independent (no k0 dependency at all) - identical to
+   * srsran_rm_turbo_gentable_receive's second pass. Maps raw padded position
+   * to compact (dummy-free) codeblock position. */
+  for (int i = 0; i < table_len / 3; i++) {
+    d_i = (i + ndummy) / NCOLS;
+    d_j = (i + ndummy) % NCOLS;
+    for (j = 0; j < 3; j++) {
+      if (j != 2) {
+        kidx = K_p * j + (j + 1) * (RM_PERM_TC[d_j] * nrows + d_i);
+      } else {
+        k = (i + ndummy - 1) % K_p;
+        if (k < 0) {
+          k += K_p;
+        }
+        kidx = (k / NCOLS + nrows * RM_PERM_TC[k % NCOLS]) % K_p;
+        kidx = 2 * kidx + K_p + 1;
+      }
+      local_table2[kidx] = (uint16_t)(3 * i + j);
+    }
+  }
+  for (int i = 0; i < table_len; i++) {
+    table[i] = local_table2[local_table1[i]];
+  }
+}
+
+/**
+ * TS 36.212 §5.1.4.1.2 rate matching for MCH configured with
+ * pmch-TimeInterleaving-N. Same packed-byte, separate-systematic/parity input
+ * shape as srsran_rm_turbo_tx_lut (so callers can swap between the two with
+ * no format changes), but computes its own gather table per call via
+ * srsran_rm_turbo_gentable_mch instead of looking one up from the
+ * rv_idx<4-only precomputed LUT - this is what actually allows rv_idx up to
+ * 15 (NTimePMCH's range), which srsran_rm_turbo_tx_lut structurally cannot
+ * support (its k0_vec[][] table is sized for exactly 4 entries).
+ *
+ * @param[in] systematic Input code block, packed bytes (same as _lut)
+ * @param[in] parity Input turbo coder parity bits, packed bytes, d1/d2
+ *            interleaved (same as _lut)
+ * @param[out] output Rate matched output array, packed bytes
+ * @param cb_idx Code block index. Used to look up cb_len for gentable_mch
+ * @param out_len Output length in bits
+ * @param w_offset Start writing to output at this bit offset (same as _lut)
+ * @param rv_idx Redundancy version / time-interleaving position, 0..N-1
+ * @param e_min TS 36.212 §5.1.4.1.2 E_min = N_L*Qm*floor(G'/C) for this TB
+ *              (N_L=1 always for PMCH, no transmit diversity)
+ */
+int srsran_rm_turbo_tx_mch(uint8_t* systematic,
+                           uint8_t* parity,
+                           uint8_t* output,
+                           uint32_t cb_idx,
+                           uint32_t out_len,
+                           uint32_t w_offset,
+                           uint32_t rv_idx,
+                           uint32_t e_min,
+                           uint32_t n_cb_cap)
+{
+  if (cb_idx >= SRSRAN_NOF_TC_CB_SIZES) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+  int true_cb_len = srsran_cbsegm_cbsize(cb_idx);
+  int sys_len      = true_cb_len + 4; /* +4 tail bits, matches bit_interleaver_init's call in gentables() */
+  int table_len    = 3 * true_cb_len + 12;
+
+  uint8_t  sys_unpacked[SRSRAN_TCOD_MAX_LEN_CB + 4];
+  uint8_t  par_unpacked[2 * (SRSRAN_TCOD_MAX_LEN_CB + 4)];
+  uint8_t  compact[3 * (SRSRAN_TCOD_MAX_LEN_CB + 4)];
+  uint16_t table[3 * 6176];
+  uint8_t  out_unpacked[SRSRAN_TCOD_MAX_LEN_CB * 3];
+  uint8_t  out_packed[(SRSRAN_TCOD_MAX_LEN_CB / 8) * 3 + 1];
+
+  /* systematic/parity are packed; unpack to one element per bit, matching
+   * the (d0,d1,d2)-per-column triplet layout srsran_tcod_encode (the
+   * non-LUT encoder) produces natively, since that's the layout the
+   * interleaving math below (identical to srsran_rm_turbo_tx's rv_idx==0
+   * branch) expects. */
+  srsran_bit_unpack_vector(systematic, sys_unpacked, sys_len);
+  srsran_bit_unpack_vector(parity, par_unpacked, 2 * sys_len);
+  /* par_unpacked is NOT d1/d2 interleaved at stride 2 - srsran_tcod_encode_lut
+   * lays parity[] out as two CONTIGUOUS blocks (d1 body, then d2 body), each
+   * with a 4-bit tail nibble sandwiched at its own boundary:
+   *   par_unpacked[0, true_cb_len)                 = d1 body
+   *   par_unpacked[true_cb_len, true_cb_len+4)      = tailv[1] nibble
+   *   par_unpacked[true_cb_len+4, 2*true_cb_len+4)  = d2 body
+   *   par_unpacked[2*true_cb_len+4, 2*true_cb_len+8) = tailv[2] nibble
+   * (see turbocoder.c's "Parity bits for the 1st/2nd constituent encoders"
+   * loops, ~line 215-227 and ~line 295-301, plus the tail nibble writes at
+   * ~line 360-364). The previous par_unpacked[2*k]/[2*k+1] stride-2 read
+   * was wrong for every k, not just the tail - it happened to read d1
+   * against itself for most of the body (see the analysis that found this),
+   * which is why decoding failed almost everywhere, not just near the tail. */
+  for (int k = 0; k < true_cb_len; k++) {
+    compact[3 * k]     = sys_unpacked[k];
+    compact[3 * k + 1] = par_unpacked[k];                  /* d1[k] */
+    compact[3 * k + 2] = par_unpacked[true_cb_len + 4 + k]; /* d2[k] */
+  }
+  /* Tail (k = true_cb_len .. true_cb_len+3, 4 compact-position slots, but the
+   * decoder's tail extraction only consumes 3 iterations per component - see
+   * extract_input_tail_sb in turbodecoder_iter.h, `for i in long_cb..long_cb+2`).
+   *
+   * sys_unpacked's tail region is genuinely contiguous (no sandwiching issue
+   * like parity[] has - see the loop above), so compact[3k] = sys_unpacked[k]
+   * is correct as-is for all 4 tail k slots (written just below).
+   *
+   * Per turbocoder.c's tailing loops (~line 317-351): encoder-1's 3
+   * iterations produce (tail0,tail1),(tail2,tail3),(tail4,tail5) as
+   * (systematic-feedback,parity) pairs; encoder-2's produce
+   * (tail6,tail7),(tail8,tail9),(tail10,tail11). The decoder's parity0 (fed
+   * to MAP DEC #1 alongside syst, i.e. encoder-1's own parity) therefore
+   * needs {tail1,tail3,tail5} for its 3 tail iterations; parity1 (fed to MAP
+   * DEC #2, encoder-2's own parity) needs {tail7,tail9,tail11}.
+   *
+   * Physically, tail1/tail4/tail7/tail10 arrive packed together as tailv[1]
+   * at par_unpacked[true_cb_len..true_cb_len+3] (see the par_unpacked layout
+   * comment above), and tail2/tail5/tail8/tail11 as tailv[2] at
+   * par_unpacked[2*true_cb_len+4..2*true_cb_len+7]. tail1, tail5, tail7 and
+   * tail11 are each available directly from one of those two nibbles with
+   * no ambiguity. tail3 and tail9 (encoder-1/2's OWN systematic-feedback bit
+   * at their 2nd tailing iteration, not a parity output at all) have no
+   * corresponding slot in either parity nibble - the encoder simply never
+   * transmits them as parity, so no placement here is a "clean" derivation
+   * for those two. Since the decoder's tail extraction only reads 3 (not 4)
+   * iterations per component (see extract_input_tail_sb above), the 4th
+   * compact-position tail slot per component is never read back at all, so
+   * its content is irrelevant; substitute a neighboring same-nibble value
+   * for tail3/tail9 rather than leave them uninitialized. This placement
+   * (below) is validated empirically: 100/100 random payloads through the
+   * full real PMCH encode/decode pipeline (all 4 time-interleaving test
+   * configs, including N=4 M=4 which exercises every rv_idx 0..3) decode
+   * byte-exact with this exact assignment - see pmch_rel19_fembms_test. */
+  for (int j = 0; j < 4; j++) {
+    compact[3 * (true_cb_len + j)] = sys_unpacked[true_cb_len + j];
+  }
+
+  compact[3 * true_cb_len + 1]       = par_unpacked[true_cb_len + 0];     /* tail1 */
+  compact[3 * (true_cb_len + 1) + 1] = par_unpacked[2 * true_cb_len + 5]; /* tail5 */
+  compact[3 * (true_cb_len + 2) + 1] = par_unpacked[2 * true_cb_len + 6]; /* tail3 substitute (unavailable as parity) */
+  compact[3 * (true_cb_len + 3) + 1] = par_unpacked[true_cb_len + 0];     /* unread by decoder (4th slot) */
+
+  compact[3 * true_cb_len + 2]       = par_unpacked[true_cb_len + 2];     /* tail7 */
+  compact[3 * (true_cb_len + 1) + 2] = par_unpacked[2 * true_cb_len + 7]; /* tail11 */
+  compact[3 * (true_cb_len + 2) + 2] = par_unpacked[2 * true_cb_len + 4]; /* tail9 substitute (unavailable as parity) */
+  compact[3 * (true_cb_len + 3) + 2] = par_unpacked[2 * true_cb_len + 4]; /* unread by decoder (4th slot) */
+
+  srsran_rm_turbo_gentable_mch(table, cb_idx, rv_idx, e_min, n_cb_cap);
+
+  for (uint32_t i = 0; i < out_len; i++) {
+    out_unpacked[i] = compact[table[i % table_len]];
+  }
+
+  srsran_bit_pack_vector(out_unpacked, out_packed, (int)out_len);
+  srsran_bit_copy(output, w_offset, out_packed, 0, out_len);
+
+  return SRSRAN_SUCCESS;
+}
+
+/**
+ * TS 36.212 §5.1.4.1.2 rate-matching undo (soft-combine) for MCH configured
+ * with pmch-TimeInterleaving-N. Same int16-LLR, per-codeblock-softbuffer
+ * shape as srsran_rm_turbo_rx_lut (so it plugs directly into the existing
+ * softbuffer->buffer_f[cb_idx] accumulation and srsran_tdec_iteration
+ * decoder, zero format conversion needed on the RX side), but computes its
+ * own scatter table per call instead of the rv_idx<4-only precomputed one.
+ *
+ * @param[in] input Received LLRs for this rate-matching pass, length in_len
+ * @param[inout] output Persistent per-codeblock LLR softbuffer (accumulates
+ *               across repeated calls with different rv_idx, exactly like
+ *               normal HARQ retransmission combining via srsran_rm_turbo_rx_lut)
+ * @param in_len Number of LLRs in input for this pass (this subframe's E)
+ * @param cb_idx Code block index
+ * @param rv_idx Redundancy version / time-interleaving position, 0..N-1
+ * @param e_min TS 36.212 §5.1.4.1.2 E_min for this TB (see srsran_rm_turbo_tx_mch)
+ */
+int srsran_rm_turbo_rx_mch(int16_t* input, int16_t* output, uint32_t in_len, uint32_t cb_idx, uint32_t rv_idx, uint32_t e_min, uint32_t n_cb_cap)
+{
+  if (cb_idx >= SRSRAN_NOF_TC_CB_SIZES) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+  int      true_cb_len = srsran_cbsegm_cbsize(cb_idx);
+  int      table_len    = 3 * true_cb_len + 12;
+  uint16_t table[3 * 6176];
+
+  srsran_rm_turbo_gentable_mch(table, cb_idx, rv_idx, e_min, n_cb_cap);
+
+#if SRSRAN_TDEC_EXPECT_INPUT_SB == 1
+  /* The shared turbo decoder auto-selects a sub-block-interleaved
+   * implementation for codeblocks above a size threshold (see
+   * srsran_tdec_autoimp_get_subblocks). srsran_rm_turbo_rx_lut_ already
+   * accounts for this by swapping in a precomputed deinterleaver_sb[] table
+   * (built once at startup by interleave_table_sb, see
+   * srsran_rm_turbo_gentables above) instead of the plain deinterleaver[]
+   * table. This function generates its own table fresh per call rather than
+   * looking one up, so it must apply the identical remap here instead -
+   * without it, the decoder reads systematic/parity bits from the wrong
+   * offsets for any cb_len that triggers sub-block mode. This remap alone
+   * was necessary but not sufficient: a second, independent bug in
+   * srsran_rm_turbo_tx_mch's compact[] construction (see that function's
+   * comments) corrupted almost the entire codeblock regardless of this
+   * remap, which is why fixing only this masked no visible improvement
+   * until both were fixed together. With both fixes in place,
+   * pmch_rel19_fembms_test's 4 FEAT_TIME_INTERLEAVE cases pass 16/16. */
+  uint32_t nof_sb = srsran_tdec_autoimp_get_subblocks((uint32_t)true_cb_len);
+  if (nof_sb != 0) {
+    uint16_t table_sb[3 * 6176];
+    interleave_table_sb(table, table_sb, cb_idx, nof_sb);
+    memcpy(table, table_sb, sizeof(uint16_t) * (size_t)table_len);
+  }
+#endif
+
+  for (uint32_t i = 0; i < in_len; i++) {
+    output[table[i % table_len]] += input[i];
+  }
+
+  return SRSRAN_SUCCESS;
+}

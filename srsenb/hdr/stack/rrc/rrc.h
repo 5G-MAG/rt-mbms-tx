@@ -34,10 +34,14 @@
 #include "srsran/common/stack_procedure.h"
 #include "srsran/common/task_scheduler.h"
 #include "srsran/common/timeout.h"
+#include "srsran/interfaces/enb_m3ap_interfaces.h"
 #include "srsran/interfaces/enb_rrc_interfaces.h"
 #include "srsran/interfaces/enb_x2_interfaces.h"
+#include "srsran/interfaces/rrc_interface_types.h"
 #include "srsran/srslog/srslog.h"
+#include <atomic>
 #include <map>
+#include <pthread.h>
 
 namespace srsenb {
 
@@ -61,6 +65,7 @@ class rrc final : public rrc_interface_pdcp,
                   public rrc_interface_mac,
                   public rrc_interface_rlc,
                   public rrc_interface_s1ap,
+                  public rrc_interface_m3ap,
                   public rrc_eutra_interface_rrc_nr
 {
 public:
@@ -87,6 +92,38 @@ public:
   void stop();
   void get_metrics(rrc_metrics_t& m);
   void tti_clock();
+
+  void reconfigure_embms(uint8_t            pmch_bandwidth,
+                         uint16_t           mcs,
+                         uint8_t            time_interleaving_n,
+                         uint8_t            time_interleaving_m,
+                         uint8_t            time_interleaving_n_last_mtch,
+                         uint8_t            time_interleaving_m_last_mtch,
+                         uint8_t            cyclic_shift_alpha,
+                         bool               freq_interleaving,
+                         bool               use_mcs_table2,
+                         bool               cas_muting,
+                         uint8_t            k_cas,
+                         uint8_t            n_cas,
+                         uint8_t            mch_sched_period_rf,
+                         uint8_t            nof_mbms_sessions,
+                         bool               time_separation_sl2,
+                         const std::string& subcarrier_spacing);
+  void reload_sib12(bool activate);
+  // Live-reconfigures q-RxLevMin-r14 (TS 36.331 §6.2.2, SIB1-MBMS cellSelectionInfo-r14),
+  // previously only settable via config file + restart. Range -70..-22 dBm; out-of-range
+  // values are clamped with a warning, mirroring reconfigure_embms()'s own validation style.
+  void set_q_rx_lev_min(int8_t value);
+
+  // Real per-session MBMS state, driven by M3AP (srsenb/hdr/stack/m3ap/m3ap.h) instead of the
+  // static nof_mbms_sessions/fabricated-TMGI loop reconfigure_embms()/pack_mcch() otherwise fall
+  // back to. tmgi_key mirrors the MME's own "mcc:mnc:serviceid"-style string key so log lines and
+  // any future cross-referencing line up on both ends of M3 -- this class has no need to parse it.
+  void mbms_session_start(const std::string&    tmgi_key,
+                          const srsran::tmgi_t& tmgi,
+                          uint8_t               session_id,
+                          bool                  session_id_present) override;
+  void mbms_session_stop(const std::string& tmgi_key) override;
 
   // rrc_interface_mac
   int      add_user(uint16_t rnti, const sched_interface::ue_cfg_t& init_ue_cfg) override;
@@ -125,6 +162,8 @@ public:
   bool     release_erabs(uint32_t rnti) override;
   int      release_erab(uint16_t rnti, uint16_t erab_id) override;
   void     add_paging_id(uint32_t ueid, const asn1::s1ap::ue_paging_id_c& ue_paging_id) override;
+  void     write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies) override;
+  void     kill_warning(const asn1::s1ap::kill_request_ies_container& ies) override;
   void     ho_preparation_complete(uint16_t                     rnti,
                                    rrc::ho_prep_result          result,
                                    const asn1::s1ap::ho_cmd_s&  msg,
@@ -188,7 +227,13 @@ private:
   srslog::basic_logger&     logger;
 
   // derived params
-  std::unique_ptr<enb_cell_common_list> cell_common_list;
+  // cell_common_list is rebuilt (not just mutated) by generate_sibs() on the stack thread,
+  // while read_pdu_bcch_dlsch() dereferences it from PHY worker threads -- guard both sides.
+  // shared_ptr (not unique_ptr): each rrc::ue keeps its own copy (see rrc_ue.h's
+  // cell_common_list_keepalive) so a UE constructed against one generation of this list
+  // doesn't dangle when a later generate_sibs() call replaces it with a new one.
+  mutable pthread_rwlock_t              cell_common_list_rwlock = {};
+  std::shared_ptr<enb_cell_common_list> cell_common_list;
 
   // state
   std::unique_ptr<freq_res_common_list>    cell_res_list;
@@ -202,6 +247,8 @@ private:
   int      pack_mcch();
 
   void config_mac();
+  void fill_sib_lens(uint32_t ccidx, sched_interface::cell_cfg_sib_t (&sibs)[sched_interface::MAX_SIBS]) const;
+  void update_mac_sib_cfg();
   void parse_ul_dcch(ue& ue, uint32_t lcid, srsran::unique_byte_buffer_t pdu);
   void parse_ul_ccch(ue& ue, srsran::unique_byte_buffer_t pdu);
   void send_rrc_connection_reject(uint16_t rnti);
@@ -232,10 +279,24 @@ private:
   srsran::dyn_blocking_queue<rrc_pdu> rx_pdu_queue;
 
   asn1::rrc::mcch_msg_s  mcch;
+  // TMGI-keyed real MBMS session state (see mbms_session_start/stop above). Empty means "no M3AP session has
+  // ever been established" -- configure_mbsfn_sibs()/pack_mcch() then fall back to their pre-existing
+  // static-config/fabricated-TMGI behavior, so a deployment with no MME/M3AP connection at all is unaffected.
+  std::map<std::string, srsran::pmch_info_t::mbms_session_info_t> mbms_sessions;
   bool                   enable_mbms     = false;
   rrc_cfg_t              cfg             = {};
   uint32_t               nof_si_messages = 0;
   asn1::rrc::sib_type7_s sib7;
+
+  std::atomic<bool>     etws_paging_active_{false};
+  std::atomic<uint32_t> etws_paging_count_{0};
+  bool                  sib12_sched_added_ = false;
+
+  // Shared by reload_sib12() (the existing file+SIGUSR1 path) and write_replace_warning()/
+  // kill_warning() (the new S1AP path) -- both ultimately just install or clear a SIB12,
+  // they only differ in where the sib_type12_r9_s comes from.
+  void install_sib12(const asn1::rrc::sib_type12_r9_s& sib12_data);
+  void clear_sib12();
 
   void rem_user_thread(uint16_t rnti);
 };

@@ -210,6 +210,12 @@ private:
   uint32_t consecutive_kos_dl = 0;
   uint32_t consecutive_kos_ul = 0;
 
+  // Keeps this UE's generation of the eNB cell-common list alive for the UE's whole lifetime,
+  // even after a later generate_sibs() call replaces rrc::cell_common_list with a new one --
+  // ue_cell_list and mac_ctrl below hold long-lived references/pointers into this object, not
+  // just a same-callstack read, so they need it to outlive rrc::cell_common_list's own pointer.
+  // Must stay declared before ue_cell_list/mac_ctrl: member init order follows declaration order.
+  std::shared_ptr<enb_cell_common_list> cell_common_list_keepalive;
   ue_cell_ded_list     ue_cell_list;
   bearer_cfg_handler   bearer_list;
   security_cfg_handler ue_security_cfg;

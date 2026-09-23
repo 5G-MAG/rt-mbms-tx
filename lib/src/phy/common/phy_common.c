@@ -58,8 +58,23 @@ bool srsran_nofprb_isvalid(uint32_t nof_prb)
 
 bool srsran_cell_isvalid(srsran_cell_t* cell)
 {
+  /* mbsfn_prb (the PMCH-dedicated bandwidth) is a sub-allocation within the
+   * carrier and can never legitimately exceed nof_prb; 0 means "use the full
+   * carrier" (see the mbsfn_prb ? mbsfn_prb : nof_prb convention used
+   * throughout the MBSFN/PMCH code) and is always valid. Without this check,
+   * a cell with mbsfn_prb > nof_prb passes validation but later causes
+   * srsran_pmch_set_cell() to compute max_re from the oversized mbsfn_prb
+   * while PMCH's time-interleaving buffers stay sized from nof_prb at init
+   * time, overflowing them. */
+  /* cas_muting's active/muted-frame gate (enb_dl.c put_sync/put_mib, phy_common.cc,
+   * sched_carrier.cc) computes sfn % (16*n_cas); an n_cas of 0 (e.g. a bzero'd or
+   * default-constructed cell struct with cas_muting left true) is a division by zero
+   * (SIGFPE) on the first CAS-candidate subframe, not merely a logic error, so it must
+   * be rejected here rather than left to each caller to remember to check. */
+  bool n_cas_ok = !cell->cas_muting || cell->n_cas == 2 || cell->n_cas == 4 || cell->n_cas == 8 ||
+                  cell->n_cas == 16;
   return srsran_cellid_isvalid(cell->id) && srsran_portid_isvalid(cell->nof_ports) &&
-         srsran_nofprb_isvalid(cell->nof_prb);
+         srsran_nofprb_isvalid(cell->nof_prb) && cell->mbsfn_prb <= cell->nof_prb && n_cas_ok;
 }
 
 void srsran_cell_fprint(FILE* stream, srsran_cell_t* cell, uint32_t sfn)
@@ -340,6 +355,17 @@ int srsran_sampling_freq_hz(uint32_t nof_prb)
   }
 }
 
+int srsran_sampling_freq_hz_scs(uint32_t nof_prb, srsran_scs_t scs)
+{
+  if (SRSRAN_SCS_IS_370HZ(scs)) {
+    /* CR 0548: Fs = Nu × SCS = Nu × (15000 × 2/81) Hz (exact integer). */
+    int nu = srsran_symbol_sz_scs(nof_prb, scs);
+    if (nu <= 0) return SRSRAN_ERROR;
+    return (int)((long long)nu * 30000 / 81);
+  }
+  return srsran_sampling_freq_hz(nof_prb);
+}
+
 int srsran_symbol_sz_power2(uint32_t nof_prb)
 {
   if (nof_prb <= 6) {
@@ -381,7 +407,7 @@ int srsran_symbol_sz_scs(uint32_t nof_prb, srsran_scs_t subcarrier_spacing)
     } else if (nof_prb <= 75) {
       return 18432;
     } else if (nof_prb <= 110) {
-      return 24567;
+      return 24576;
     } else {
       return SRSRAN_ERROR;
     }
@@ -398,6 +424,43 @@ int srsran_symbol_sz_scs(uint32_t nof_prb, srsran_scs_t subcarrier_spacing)
       return 3072;
     } else if (nof_prb <= 110) {
       return 4096;
+    } else {
+      return SRSRAN_ERROR;
+    }
+  } else if (SRSRAN_SCS_IS_370HZ(subcarrier_spacing)) {
+    /* TS 36.211 Table 6.12-1 as corrected by CR 0548: Fs = Nu × (15000×2/81) Hz.
+     * NscRB = 486; max supported nof_prb is 75 (75×486=36450).
+     * CP = Nu/9 (not Nu/4 as for other MBSFN SCS); see ofdm.c.
+     * SL2 and SL4 variants share the same numerology.
+     * Use srsran_sampling_freq_hz_scs() for the SDR sample rate. */
+    if (nof_prb <= 6) {
+      return 10368;  /* 2^7 * 3^4; Fs = 3.84 MHz */
+    } else if (nof_prb <= 15) {
+      return 20736;  /* 2^8 * 3^4; Fs = 7.68 MHz */
+    } else if (nof_prb <= 25) {
+      return 31104;  /* 2^6 * 3^5; Fs = 11.52 MHz */
+    } else if (nof_prb <= 50) {
+      return 62208;  /* 2^7 * 3^5; Fs = 23.04 MHz */
+    } else if (nof_prb <= 75) {
+      return 82944;  /* 2^10 * 3^4; Fs = 30.72 MHz */
+    } else {
+      return SRSRAN_ERROR;
+    }
+  } else if (subcarrier_spacing == SRSRAN_SCS_2KHZ5) {
+    /* TS 36.211 Table 6.12-1: Nu = 12288 for 2.5 kHz at full bandwidth.
+     * Scale non-standard 15 kHz FFT sizes by factor 6 (ratio of SCS). */
+    if (nof_prb <= 6) {
+      return 768;
+    } else if (nof_prb <= 15) {
+      return 1536;
+    } else if (nof_prb <= 25) {
+      return 2304;
+    } else if (nof_prb <= 50) {
+      return 4608;
+    } else if (nof_prb <= 75) {
+      return 6144;
+    } else if (nof_prb <= 110) {
+      return 9216;
     } else {
       return SRSRAN_ERROR;
     }
@@ -627,7 +690,15 @@ struct lte_band lte_bands[SRSRAN_NOF_LTE_BANDS] = {
     {68, 753, 67536, 132672, 55, SRSRAN_BAND_GEO_AREA_EMEA},
     {69, 2570, 67836, 0, 0, SRSRAN_BAND_GEO_AREA_EMEA},
     {70, 1995, 68336, 132972, 300, SRSRAN_BAND_GEO_AREA_NAR},
-    {71, 0, 68586, 133122, 0, SRSRAN_BAND_GEO_AREA_NAR} // dummy band to bound band 70 earfcn
+    {71, 0, 68586, 133122, 0, SRSRAN_BAND_GEO_AREA_NAR}, // dummy band to bound band 70 earfcn
+    /* TS 36.101 Rel-17 / Rel-18: LTE-based 5G Terrestrial Broadcast bands (SDO = SDL only).
+     * EARFCN_low values per current published TS 36.101 Table 5.4.4-1. */
+    {107, 612, 70706, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}, // 612-652 MHz, Rel-17 (LTE_terr_bcast_bands_part1)
+    {108, 470, 71106, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}, // 470-698 MHz, Rel-18 (LTE_terr_bcast_bands_part2)
+    {0,   0,   73386, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}, // dummy to bound band 108 earfcn range
+    {112, 470, 73486, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}, // 470-608 MHz, Rel-19 (LTE_terr_bcast_Ph2, sub-band of 108)
+    {113, 606, 74866, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}, // 606-698 MHz, Rel-19 (LTE_terr_bcast_Ph2, sub-band of 108)
+    {0,   0,   75786, 0, 0, SRSRAN_BAND_GEO_AREA_ALL}  // dummy to bound band 113 earfcn range
 };
 
 int srsran_str2mimotype(char* mimo_type_str, srsran_tx_scheme_t* type)
@@ -728,6 +799,12 @@ double srsran_band_fd(uint32_t dl_earfcn)
 double srsran_band_fu(uint32_t ul_earfcn)
 {
   uint32_t i = SRSRAN_NOF_LTE_BANDS - 1;
+  /* Broadcast-only bands (e.g. 107/108/112/113) have ul_earfcn_offset=0 and may be
+   * trailing entries in lte_bands[] - skip back past those before bounds-checking,
+   * otherwise this always fails for any real ul_earfcn since 0 is not a valid bound. */
+  while (i > 0 && lte_bands[i].ul_earfcn_offset == 0) {
+    i--;
+  }
   if (ul_earfcn > lte_bands[i].ul_earfcn_offset) {
     ERROR("Invalid UL_EARFCN=%d", ul_earfcn);
     return 0;

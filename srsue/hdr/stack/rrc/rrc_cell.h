@@ -141,10 +141,10 @@ public:
   std::string to_string() const;
 
   bool                  has_mcch = false;
-  asn1::rrc_nr::sib1_s  sib1     = {};
-  asn1::rrc_nr::sib2_s  sib2     = {};
-  asn1::rrc_nr::sib3_s  sib3     = {};
-  asn1::rrc::mcch_msg_s mcch     = {};
+  asn1::rrc_nr::sib1_s  sib1;
+  asn1::rrc_nr::sib2_s  sib2;
+  asn1::rrc_nr::sib3_s  sib3;
+  asn1::rrc::mcch_msg_s mcch;
 };
 
 class meas_cell_eutra : public meas_cell
@@ -181,11 +181,11 @@ public:
   std::string to_string() const;
 
   bool                       has_mcch = false;
-  asn1::rrc::sib_type1_s     sib1     = {};
-  asn1::rrc::sib_type2_s     sib2     = {};
-  asn1::rrc::sib_type3_s     sib3     = {};
-  asn1::rrc::sib_type13_r9_s sib13    = {};
-  asn1::rrc::mcch_msg_s      mcch     = {};
+  asn1::rrc::sib_type1_s     sib1;
+  asn1::rrc::sib_type2_s     sib2;
+  asn1::rrc::sib_type3_s     sib3;
+  asn1::rrc::sib_type13_r9_s sib13;
+  asn1::rrc::mcch_msg_s      mcch;
 
 private:
   bool has_valid_sib13 = false;

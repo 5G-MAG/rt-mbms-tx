@@ -22,6 +22,7 @@
 #include <map>
 #include <unordered_map>
 #include <string.h>
+#include <vector>
 
 #include "srsenb/hdr/common/common_enb.h"
 #include "srsran/adt/bounded_vector.h"
@@ -194,7 +195,7 @@ private:
     m1u_handler(m1u_handler&&)      = delete;
     m1u_handler& operator=(const m1u_handler&) = delete;
     m1u_handler& operator=(m1u_handler&&) = delete;
-    bool         init(std::string m1u_multiaddr_, std::string m1u_if_addr_);
+    bool         init(std::string m1u_multiaddr_, std::string m1u_if_addr_, std::string session_teids_csv_);
     void         handle_rx_packet(srsran::unique_byte_buffer_t pdu, const sockaddr_in& addr);
 
   private:
@@ -203,6 +204,15 @@ private:
     srslog::basic_logger& logger;
     std::string           m1u_multiaddr;
     std::string           m1u_if_addr;
+
+    /* Per-session M1-U TEID demux (embms.session_teids, e.g. "0xAAAAAAAA,0xAAAAAAAB"):
+     * index i (0-based) -> LCID i+1, matching rrc.cc's mbms_session_info_list[s].lc_ch_id
+     * = s+1. Empty (default) preserves the legacy behavior -- every M1-U packet, regardless
+     * of TEID, goes to bearer_counter's fixed LCID -- since without M2/M3AP this eNB has no
+     * dynamic way to learn a real TEID-to-session mapping; this is a static, operator-
+     * configured substitute that must be kept consistent with the MBMS-GW's own per-session
+     * C-TEID config, the same way m1u_multiaddr already must match on both sides. */
+    std::vector<uint32_t> session_teids;
 
     bool initiated      = false;
     int  m1u_sd         = -1;

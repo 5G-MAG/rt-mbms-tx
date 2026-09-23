@@ -29,14 +29,13 @@
 #include "srsran/srsran.h"
 
 srsran_cell_t cell = {
-    6,                 // nof_prb
-    1,                 // nof_ports
-    1,                 // cell_id
-    SRSRAN_CP_NORM,    // cyclic prefix
-    SRSRAN_PHICH_NORM, // PHICH length
-    SRSRAN_PHICH_R_1,  // PHICH resources
-    SRSRAN_FDD,
-
+    .nof_prb         = 6,
+    .nof_ports       = 1,
+    .id              = 1,
+    .cp              = SRSRAN_CP_NORM,
+    .phich_length    = SRSRAN_PHICH_NORM,
+    .phich_resources = SRSRAN_PHICH_R_1,
+    .frame_type      = SRSRAN_FDD,
 };
 
 void usage(char* prog)
@@ -114,7 +113,7 @@ int main(int argc, char** argv)
     bch_payload_tx[i] = (uint8_t)srsran_random_uniform_int_dist(random_gen, 0, 1);
   }
 
-  srsran_pbch_encode(&pbch, bch_payload_tx, sf_symbols, 0);
+  srsran_pbch_encode(&pbch, bch_payload_tx, sf_symbols, 0, 0);
 
   /* combine outputs */
   for (i = 1; i < cell.nof_ports; i++) {

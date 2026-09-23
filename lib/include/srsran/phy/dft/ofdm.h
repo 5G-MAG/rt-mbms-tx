@@ -72,6 +72,7 @@ typedef struct SRSRAN_API {
   srsran_dft_plan_t fft_plan;
   srsran_dft_plan_t fft_plan_sf[2];
   uint32_t          max_prb;
+  uint32_t          max_symbol_sz; /* largest symbol_sz for which tmp/shift buffers were allocated */
   uint32_t          nof_symbols;
   uint32_t          nof_guards;
   uint32_t          nof_re;

@@ -105,6 +105,8 @@ SRSRAN_API int srsran_enb_dl_set_cell(srsran_enb_dl_t* q, srsran_cell_t cell);
 
 SRSRAN_API int srsran_enb_dl_set_mbsfn_subcarrier_spacing(srsran_enb_dl_t* q, srsran_scs_t subcarrier_spacing);
 
+SRSRAN_API int srsran_enb_dl_set_mbsfn_area_id(srsran_enb_dl_t* q, uint16_t mbsfn_area_id);
+
 SRSRAN_API bool srsran_enb_dl_location_is_common_ncce(srsran_enb_dl_t* q, const srsran_dci_location_t* loc);
 
 SRSRAN_API void srsran_enb_dl_put_base(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf);
@@ -118,7 +120,12 @@ SRSRAN_API int srsran_enb_dl_put_pdcch_ul(srsran_enb_dl_t* q, srsran_dci_cfg_t* 
 SRSRAN_API int
 srsran_enb_dl_put_pdsch(srsran_enb_dl_t* q, srsran_pdsch_cfg_t* pdsch, uint8_t* data[SRSRAN_MAX_CODEWORDS]);
 
-SRSRAN_API int srsran_enb_dl_put_pmch(srsran_enb_dl_t* q, srsran_pmch_cfg_t* pmch_cfg, uint8_t* data);
+/* shared_ti_tx_buf: see srsran_pmch_encode()'s doc comment in pmch.h. NULL is
+ * safe (falls back to q->pmch's own per-instance ti_tx_buf[]). */
+SRSRAN_API int srsran_enb_dl_put_pmch(srsran_enb_dl_t* q,
+                                       srsran_pmch_cfg_t* pmch_cfg,
+                                       uint8_t*            data,
+                                       uint8_t**           shared_ti_tx_buf);
 
 SRSRAN_API void srsran_enb_dl_gen_signal(srsran_enb_dl_t* q);
 

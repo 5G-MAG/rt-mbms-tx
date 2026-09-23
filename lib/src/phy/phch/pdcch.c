@@ -36,7 +36,7 @@
 #include "srsran/phy/utils/debug.h"
 #include "srsran/phy/utils/vector.h"
 
-#define PDCCH_NOF_FORMATS 4
+#define PDCCH_NOF_FORMATS 5  /* 0-3: AL1/2/4/8; 4: AL16 for MBMS-dedicated cells (TS 36.211 §6.7) */
 #define PDCCH_FORMAT_NOF_CCE(i) (1 << i)
 #define PDCCH_FORMAT_NOF_REGS(i) ((1 << i) * 9)
 #define PDCCH_FORMAT_NOF_BITS(i) ((1 << i) * 72)
@@ -239,7 +239,7 @@ uint32_t srsran_pdcch_ue_locations_ncce_L(uint32_t               nof_cce,
   int       l; // this must be int because of the for(;;--) loop
   uint32_t  i, k, L, m;
   uint32_t  Yk, ncce;
-  const int nof_candidates[4] = {6, 6, 2, 2};
+  const int nof_candidates[5] = {6, 6, 2, 2, 1};  /* AL1/2/4/8/16 per TS 36.213 §9.1.1 */
 
   // Compute Yk for this subframe
   Yk = rnti;
@@ -248,8 +248,8 @@ uint32_t srsran_pdcch_ue_locations_ncce_L(uint32_t               nof_cce,
   }
 
   k = 0;
-  // All aggregation levels from 1 to 8
-  for (l = 0; l <= 3; l++) {
+  // All aggregation levels from 1 to 16
+  for (l = 0; l <= 4; l++) {
     L = (1 << l);
     if (Ls < 0 || Ls == L) {
       // For all candidates as given in table 9.1.1-1
@@ -308,7 +308,7 @@ uint32_t srsran_pdcch_common_locations_ncce(uint32_t nof_cce, srsran_dci_locatio
   uint32_t i, l, L, k;
 
   k = 0;
-  for (l = 2; l <= 3; l++) {
+  for (l = 2; l <= 4; l++) {  /* AL4/8/16 per TS 36.213 §9.1.1 */
     L = (1 << l);
     for (i = 0; i < SRSRAN_MIN(nof_cce, 16) / (L); i++) {
       // Simplified expression, derived from:

@@ -41,8 +41,37 @@ bc_sched::bc_sched(const sched_cell_params_t& cfg_, srsenb::rrc_interface_mac* r
 
 void bc_sched::dl_sched(sf_sched* tti_sched)
 {
-  current_tti   = tti_sched->get_tti_tx_dl();
-  bc_aggr_level = 2;
+  current_tti = tti_sched->get_tti_tx_dl();
+  /* MBMS-dedicated cells prefer PDCCH Format 4 (AL16, aggr_idx=4) for SIB/paging
+   * robustness; normal cells use AL4 (aggr_idx=2). AL16 needs 16 contiguous CCEs
+   * (1<<4), which a narrow cell only has at a high enough CFI -- e.g. a 25 PRB
+   * cell provides just 4/13/21 CCEs at CFI=1/2/3 respectively (nof_cce_table),
+   * so AL16 is only actually usable at CFI=3. Blindly requesting it regardless
+   * of the cell's *effective* CFI (the semiStaticCFI-MBMS-r16 override when
+   * configured, since that's what's really transmitted on CAS subframes --
+   * see semi_static_cfi's own assignment in enb_cfg_parser.cc for why; otherwise
+   * the scheduler's own max_nof_ctrl_symbols ceiling) makes bc_sched::alloc_sibs
+   * unconditionally fail with no_cch_space forever whenever that CFI doesn't
+   * provide enough CCEs -- SIB1/paging never gets broadcast at all, silently.
+   * Pick the highest aggregation level that actually fits instead. */
+  if (cc_cfg->cfg.cell.mbms_dedicated) {
+    uint32_t effective_cfi = (cc_cfg->cfg.cell.semi_static_cfi != 0) ? cc_cfg->cfg.cell.semi_static_cfi
+                                                                      : cc_cfg->sched_cfg->max_nof_ctrl_symbols;
+    uint32_t ncce_avail = cc_cfg->nof_cce_table[effective_cfi - 1];
+    if (ncce_avail >= 16) {
+      bc_aggr_level = 4;
+    } else if (ncce_avail >= 8) {
+      bc_aggr_level = 3;
+    } else if (ncce_avail >= 4) {
+      bc_aggr_level = 2;
+    } else if (ncce_avail >= 2) {
+      bc_aggr_level = 1;
+    } else {
+      bc_aggr_level = 0;
+    }
+  } else {
+    bc_aggr_level = 2;
+  }
 
   /* Activate/deactivate SI windows */
   update_si_windows(tti_sched);
@@ -107,16 +136,24 @@ void bc_sched::alloc_sibs(sf_sched* tti_sched)
       continue;
     }
 
-    // Check if subframe index is the correct one for SIB transmission
-    uint32_t nof_tx          = (sib_idx > 0) ? SRSRAN_MIN(srsran::ceil_div(cc_cfg->cfg.si_window_ms, 10), 4) : 4;
-    uint32_t n_sf            = (tti_sched->get_tti_tx_dl() - pending_sibs[sib_idx].window_start);
-    bool     sib1_flag       = true;//(sib_idx == 0) and (current_sfn % 4) == 0 and current_sf_idx == 0;
-    bool     other_sibs_flag = false;
-    //(sib_idx > 0) and
-      //                     (n_sf >= (cc_cfg->cfg.si_window_ms / nof_tx) * pending_sibs[sib_idx].n_tx) and
-        //                   current_sf_idx == 9;
-    if (not sib1_flag and not other_sibs_flag) {
-      continue;
+    /* MBMS-dedicated cells: SIBs may only be scheduled in active CAS frames, in
+     * SF0..SF(additionalNonMBSFNSubframes).  CAS period is 4 frames for wide
+     * cells (nof_prb >= 25) and 8 frames for narrow cells (nof_prb < 25).
+     * Muted CAS frames are excluded.
+     * Non-MBMS cells: schedule greedily within the SI window (existing behaviour). */
+    if (cc_cfg->cfg.cell.mbms_dedicated) {
+      uint32_t nof_prb   = cc_cfg->cfg.cell.nof_prb;
+      bool is_cas_sfn    = (nof_prb >= 25u) ? (current_sfn % 4u == 0u) : (current_sfn % 8u == 4u);
+      bool sfn_is_active = is_cas_sfn;
+      if (is_cas_sfn && cc_cfg->cfg.cell.cas_muting) {
+        uint32_t n_cas = (uint32_t)cc_cfg->cfg.cell.n_cas;
+        uint32_t k_cas = (uint32_t)cc_cfg->cfg.cell.k_cas;
+        sfn_is_active  = current_sfn % (16u * n_cas) < 4u * k_cas;
+      }
+      uint32_t max_add_sf = (uint32_t)cc_cfg->cfg.cell.additional_non_mbms_frames;
+      if (!sfn_is_active || current_sf_idx > max_add_sf) {
+        continue;
+      }
     }
 
     // Attempt PDSCH grants with increasing number of RBGs

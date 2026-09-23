@@ -19,6 +19,7 @@
  *
  */
 
+#include <algorithm>
 #include <srsenb/hdr/stack/mac/sched_ue.h>
 #include <string.h>
 
@@ -93,6 +94,18 @@ int sched::cell_cfg(const std::vector<sched_interface::cell_cfg_t>& cell_cfg)
 
   configured = true;
   return 0;
+}
+
+/// Re-pushes only sibs[]'s len/period_rf for an already-configured cell, without touching
+/// PRACH/regs/CCE derivation or recreating the broadcast/RA schedulers (unlike cell_cfg()).
+/// Safe to call frequently, e.g. after a live eMBMS reconfigure rebuilds SIB1.
+void sched::set_sib_lens(uint32_t enb_cc_idx, const sched_interface::cell_cfg_sib_t* sibs)
+{
+  std::lock_guard<std::mutex> lock(sched_mutex);
+  if (enb_cc_idx >= sched_cell_params.size()) {
+    return;
+  }
+  std::copy(sibs, sibs + sched_interface::MAX_SIBS, sched_cell_params[enb_cc_idx].cfg.sibs);
 }
 
 /*******************************************************

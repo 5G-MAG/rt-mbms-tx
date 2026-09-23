@@ -75,16 +75,17 @@ public:
 
   int  get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res) override;
   int  get_ul_sched(uint32_t tti_tx_ul, ul_sched_list_t& ul_sched_res) override;
-  int  get_mch_sched(uint32_t tti, bool is_mcch, dl_sched_list_t& dl_sched_res) override;
+  int  get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res) override;
   void set_sched_dl_tti_mask(uint8_t* tti_mask, uint32_t nof_sfs) override
   {
     scheduler.set_dl_tti_mask(tti_mask, nof_sfs);
   }
-  void build_mch_sched(uint32_t tbs);
+  void build_mch_sched(uint32_t tbs, uint8_t pmch_idx);
 
   /******** Interface from RRC (RRC -> MAC) ****************/
   /* Provides cell configuration including SIB periodicity, etc. */
   int cell_cfg(const std::vector<sched_interface::cell_cfg_t>& cell_cfg) override;
+  void set_sib_lens(uint32_t enb_cc_idx, const sched_interface::cell_cfg_sib_t* sibs) override;
 
   /* Manages UE scheduling context */
   int ue_cfg(uint16_t rnti, const sched_interface::ue_cfg_t* cfg) override;
@@ -143,7 +144,7 @@ private:
   sched                                    scheduler;
   std::vector<sched_interface::cell_cfg_t> cell_config;
 
-  sched_interface::dl_pdu_mch_t mch = {};
+  sched_interface::dl_pdu_mch_t mch_per_pmch[15] = {};
 
   /* Map of active UEs */
   static const uint16_t            FIRST_RNTI = 0x46;
@@ -173,9 +174,17 @@ private:
 
   std::vector<common_buffers_t> common_buffers;
 
-  const static int    mcch_payload_len                      = 3000; // TODO FIND OUT MAX LENGTH
-  int                 current_mcch_length                   = 0;
-  uint8_t             mcch_payload_buffer[mcch_payload_len] = {};
+  const static int    mcch_payload_len                           = 3000; // TODO FIND OUT MAX LENGTH
+  int                 current_mcch_length                        = 0;
+  uint8_t             mcch_payload_buffer[mcch_payload_len]      = {};
+  /* Pending MCCH content waiting for the next modification-period boundary.
+   * Both the encoded payload and the mcch struct (used by build_mch_sched)
+   * are deferred together so MCH scheduling and MCCH content stay in sync. */
+  bool                mcch_content_pending                          = false;
+  bool                mcch_initialized                              = false;
+  int                 pending_mcch_length                           = 0;
+  uint8_t             pending_mcch_payload_buffer[mcch_payload_len] = {};
+  srsran::mcch_msg_t  pending_mcch_struct                           = {};
   srsran::mcch_msg_t  mcch;
   srsran::sib2_mbms_t sib2;
   srsran::sib13_t     sib13;

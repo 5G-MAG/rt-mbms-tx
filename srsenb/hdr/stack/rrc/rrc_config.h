@@ -28,6 +28,7 @@
 #include "srsran/interfaces/enb_rrc_interface_types.h"
 #include "srsran/phy/common/phy_common.h"
 #include <array>
+#include <string>
 
 namespace srsenb {
 
@@ -79,6 +80,26 @@ struct rrc_cfg_t {
   std::map<uint32_t, rrc_cfg_qci_t>                                                       qci_cfg;
   bool                                                                                    enable_mbsfn;
   uint16_t                                                                                mbms_mcs;
+  /* Rel-17 LTE_terr_bcast */
+  uint8_t                                                                                 pmch_bandwidth;           /* 0=off, 30/35/40 PRBs (TS 36.331 pmch-Bandwidth-r17) */
+  /* Rel-19 LTE_terr_bcast_Ph2 */
+  uint8_t                                                                                 pmch_cyclic_shift_alpha;  /* 0=off, 1/2/3 */
+  bool                                                                                    pmch_freq_interleaving;
+  uint8_t                                                                                 pmch_time_interleaving_n; /* 0/1=off, 2/4/8/16 */
+  uint8_t                                                                                 pmch_time_interleaving_m; /* 4/8/16/32 subframes per period */
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): 0=absent/inherit main */
+  uint8_t                                                                                 pmch_time_interleaving_n_last_mtch;
+  uint8_t                                                                                 pmch_time_interleaving_m_last_mtch;
+  /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping). Only
+   * meaningful/signalled when pmch_time_interleaving_n > 1; see rrc.cc's pack_mcch(). */
+  uint8_t                                                                                 pmch_n_soft_ref_category = 4; /* TS 36.306 Table 4.1-1 UE category */
+  uint8_t                                                                                 pmch_scaling_factor_beta_num = 1;
+  uint8_t                                                                                 pmch_scaling_factor_beta_den = 1;
+  bool                                                                                    pmch_use_mcs_table2;
+  uint8_t                                                                                 mch_sched_period_rf;          /* scheduling period in radio frames (default 64) */
+  uint8_t                                                                                 nof_mbms_sessions;            /* number of MTCH sessions (default 1) */
+  bool                                                                                    pmch_time_separation_sl2;     /* false=SL4 (default), true=SL2 (TS 36.211 §4.1) */
+  std::string                                                                             pmch_subcarrier_spacing;      /* "" = derive from r9 SCS; "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" = override */
   uint32_t                                                                                inactivity_timeout_ms;
   std::array<srsran::CIPHERING_ALGORITHM_ID_ENUM, srsran::CIPHERING_ALGORITHM_ID_N_ITEMS> eea_preference_list;
   std::array<srsran::INTEGRITY_ALGORITHM_ID_ENUM, srsran::INTEGRITY_ALGORITHM_ID_N_ITEMS> eia_preference_list;
@@ -92,6 +113,8 @@ struct rrc_cfg_t {
   srb_cfg_t srb1_cfg;
   srb_cfg_t srb2_cfg;
   rrc_endc_cfg_t endc_cfg;
+  std::string    sib12_alert_file;  /* path to sib12_alert.conf for runtime SIGUSR1/SIGUSR2 emergency alerts */
+  std::string    sib_tag_state_file; /* path to persist sys_info_value_tag_r14 across restarts */
 };
 
 constexpr uint32_t UE_PCELL_CC_IDX = 0;

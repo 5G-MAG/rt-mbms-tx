@@ -22,9 +22,26 @@ add_executable(s1ap_asn1_test s1ap_test.cc)
 target_link_libraries(s1ap_asn1_test srsran_common srsran_asn1 s1ap_asn1 ${ATOMIC_LIBS})
 add_test(s1ap_asn1_test s1ap_asn1_test)
 
+add_executable(m3ap_asn1_test m3ap_test.cc)
+target_link_libraries(m3ap_asn1_test srsran_common asn1_utils m3ap_asn1 ${ATOMIC_LIBS})
+add_test(m3ap_asn1_test m3ap_asn1_test)
+
+add_executable(sbc_ap_asn1_test sbc_ap_test.cc)
+target_link_libraries(sbc_ap_asn1_test srsran_common srsran_asn1 sbc_ap_asn1 ${ATOMIC_LIBS})
+add_test(sbc_ap_asn1_test sbc_ap_asn1_test)
+
+add_executable(gtpc_mbms_test gtpc_mbms_test.cc)
+target_link_libraries(gtpc_mbms_test srsran_common srsran_asn1)
+add_test(gtpc_mbms_test gtpc_mbms_test)
+
 add_executable(srsran_asn1_rrc_mcch_test srsran_asn1_rrc_mcch_test.cc)
 target_link_libraries(srsran_asn1_rrc_mcch_test rrc_asn1 srsran_common)
 add_test(srsran_asn1_rrc_mcch_test srsran_asn1_rrc_mcch_test)
+
+# Build-from-scratch MCCH pack/unpack round trip (complements the reference-hex test above)
+add_executable(srsran_asn1_rrc_mcch_build_test srsran_asn1_rrc_mcch_build_test.cc)
+target_link_libraries(srsran_asn1_rrc_mcch_build_test rrc_asn1 srsran_common)
+add_test(srsran_asn1_rrc_mcch_build_test srsran_asn1_rrc_mcch_build_test)
 
 add_executable(srsran_asn1_rrc_meas_test srsran_asn1_rrc_meas_test.cc)
 target_link_libraries(srsran_asn1_rrc_meas_test rrc_asn1 rrc_nr_asn1 srsran_common)

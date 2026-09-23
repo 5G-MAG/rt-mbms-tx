@@ -24,6 +24,8 @@
 #include <fftw3.h>
 #include <math.h>
 #include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -118,20 +120,30 @@ int srsran_dft_plan(srsran_dft_plan_t* plan, const int dft_points, srsran_dft_di
   return 0;
 }
 
+static void allocate(srsran_dft_plan_t* plan, int size_in, int size_out, int len);
+
 int srsran_dft_replan(srsran_dft_plan_t* plan, const int new_dft_points)
 {
-  if (new_dft_points <= plan->init_size) {
+  if (new_dft_points > plan->init_size) {
+    /* allocate() sizes plan->in/out once, permanently, at plan->init_size;
+     * srsran_dft_replan_c/_r only ever rebuild the FFTW plan object itself,
+     * they never reallocate those buffers. Grow them here instead of
+     * refusing the replan outright - nothing in FFTW forbids a larger plan,
+     * this init_size cap is purely this wrapper's own bookkeeping. */
+    fftwf_free(plan->in);
+    fftwf_free(plan->out);
     if (plan->mode == SRSRAN_DFT_COMPLEX) {
-      return srsran_dft_replan_c(plan, new_dft_points);
+      allocate(plan, sizeof(fftwf_complex), sizeof(fftwf_complex), new_dft_points);
     } else {
-      return srsran_dft_replan_r(plan, new_dft_points);
+      allocate(plan, sizeof(float), sizeof(float), new_dft_points);
     }
+    plan->init_size = new_dft_points;
+  }
+
+  if (plan->mode == SRSRAN_DFT_COMPLEX) {
+    return srsran_dft_replan_c(plan, new_dft_points);
   } else {
-    ERROR("DFT: Error calling replan: new_dft_points (%d) must be lower or equal "
-          "dft_size passed initially (%d)\n",
-          new_dft_points,
-          plan->init_size);
-    return -1;
+    return srsran_dft_replan_r(plan, new_dft_points);
   }
 }
 
@@ -372,7 +384,35 @@ void srsran_dft_run_c(srsran_dft_plan_t* plan, const cf_t* in, cf_t* out)
   fftwf_complex* f_out = plan->out;
 
   copy_pre((uint8_t*)plan->in, (uint8_t*)in, sizeof(cf_t), plan->size, plan->forward, plan->mirror, plan->dc);
+
+  /* DIAG (PMCH_RE_DUMP): dump plan->in right after copy_pre (natural-order, ready for
+   * fftwf_execute) and plan->out right after fftwf_execute (raw, before copy_post's
+   * mirror/dc reordering) for the 1.25kHz MBSFN backward (IFFT) transform specifically.
+   * Isolating whether copy_pre or fftwf_execute itself is where TX's IFFT diverges from
+   * an ideal reference computation, given TX's own post-IFFT samples were found not to
+   * match an ideal IFFT of TX's own pre-IFFT grid. */
+  int diag_dump = getenv("PMCH_RE_DUMP") && plan->size == 12288 && !plan->forward;
+  if (diag_dump) {
+    FILE* fp = fopen("/tmp/dft_tx_planin.bin", "wb");
+    if (fp) {
+      fwrite(plan->in, sizeof(cf_t), (size_t)plan->size, fp);
+      fclose(fp);
+    }
+    fprintf(stderr, "[PMCH_RE_DUMP] DIAG dft_run_c pre-execute: size=%d init_size=%d forward=%d mirror=%d dc=%d norm=%d\n",
+            plan->size, plan->init_size, plan->forward, plan->mirror, plan->dc, plan->norm);
+  }
+
   fftwf_execute(plan->p);
+
+  if (diag_dump) {
+    FILE* fp = fopen("/tmp/dft_tx_planout.bin", "wb");
+    if (fp) {
+      fwrite(plan->out, sizeof(cf_t), (size_t)plan->size, fp);
+      fclose(fp);
+    }
+    fprintf(stderr, "[PMCH_RE_DUMP] DIAG dft_run_c post-execute\n");
+  }
+
   if (plan->norm) {
     norm = 1.0 / sqrtf(plan->size);
     srsran_vec_sc_prod_cfc(f_out, norm, f_out, plan->size);

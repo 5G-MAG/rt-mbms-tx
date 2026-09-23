@@ -28,6 +28,8 @@
 #include "srsran/interfaces/enb_pdcp_interfaces.h"
 #include "srsran/support/srsran_assert.h"
 
+#include <algorithm>
+#include <boost/algorithm/string.hpp>
 #include <errno.h>
 #include <linux/ip.h>
 #include <sys/socket.h>
@@ -419,7 +421,7 @@ int gtpu::init(const gtpu_args_t& gtpu_args, pdcp_interface_gtpu* pdcp_)
 
   // Start MCH socket if enabled
   //if (args.embms_enable) {
-    if (not m1u.init(args.embms_m1u_multiaddr, args.embms_m1u_if_addr)) {
+    if (not m1u.init(args.embms_m1u_multiaddr, args.embms_m1u_if_addr, args.embms_session_teids)) {
       return SRSRAN_ERROR;
     }
  // }
@@ -918,11 +920,29 @@ gtpu::m1u_handler::~m1u_handler()
   }
 }
 
-bool gtpu::m1u_handler::init(std::string m1u_multiaddr_, std::string m1u_if_addr_)
+bool gtpu::m1u_handler::init(std::string m1u_multiaddr_, std::string m1u_if_addr_, std::string session_teids_csv_)
 {
   m1u_multiaddr = std::move(m1u_multiaddr_);
   m1u_if_addr   = std::move(m1u_if_addr_);
   pdcp          = parent->pdcp;
+
+  if (not session_teids_csv_.empty()) {
+    std::vector<std::string> teid_strs;
+    boost::split(teid_strs, session_teids_csv_, boost::is_any_of(","));
+    for (const std::string& s : teid_strs) {
+      try {
+        session_teids.push_back(static_cast<uint32_t>(std::stoul(s, nullptr, 0)));
+      } catch (const std::exception& e) {
+        logger.error("Invalid entry in embms.session_teids: '%s' (%s) -- ignoring the whole list, falling back to "
+                     "legacy single-bearer M1-U demux",
+                     s.c_str(),
+                     e.what());
+        session_teids.clear();
+        break;
+      }
+    }
+    logger.info("M1-U TEID demux configured for %zu session(s)", session_teids.size());
+  }
 
   // Set up sink socket
   struct sockaddr_in bindaddr = {};
@@ -958,8 +978,8 @@ bool gtpu::m1u_handler::init(std::string m1u_multiaddr_, std::string m1u_if_addr
     return false;
   }
   if (setsockopt(m1u_sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-    logger.error("Register musticast group for M1-U");
-    logger.error("M1-U infterface IP: %s, M1-U Multicast Address %s", m1u_if_addr.c_str(), m1u_multiaddr.c_str());
+    logger.error("Failed to register multicast group for M1-U");
+    logger.error("M1-U interface IP: %s, M1-U Multicast Address: %s", m1u_if_addr.c_str(), m1u_multiaddr.c_str());
     return false;
   }
   logger.info("M1-U initialized");
@@ -982,8 +1002,22 @@ void gtpu::m1u_handler::handle_rx_packet(srsran::unique_byte_buffer_t pdu, const
   logger.debug("Received %d bytes from M1-U interface", pdu->N_bytes);
 
   gtpu_header_t header;
-  gtpu_read_header(pdu.get(), &header, logger);
-  pdcp->write_sdu(SRSRAN_MRNTI, bearer_counter, std::move(pdu));
+  if (not gtpu_read_header(pdu.get(), &header, logger)) {
+    return;
+  }
+  int lcid = bearer_counter;
+  if (not session_teids.empty()) {
+    auto it = std::find(session_teids.begin(), session_teids.end(), header.teid);
+    if (it != session_teids.end()) {
+      lcid = static_cast<int>(std::distance(session_teids.begin(), it)) + 1;
+    } else {
+      logger.warning("M1-U packet with unrecognized TEID 0x%08x (embms.session_teids configured but no match) -- "
+                     "dropping",
+                     header.teid);
+      return;
+    }
+  }
+  pdcp->write_sdu(SRSRAN_MRNTI, lcid, std::move(pdu));
 }
 
 } // namespace srsenb

@@ -121,7 +121,7 @@ int srsran_refsignal_cs_set_cell(srsran_refsignal_t* q, srsran_cell_t cell)
 void srsran_refsignal_free(srsran_refsignal_t* q)
 {
   for (int p = 0; p < 2; p++) {
-    for (int i = 0; i < SRSRAN_NOF_SF_X_FRAME; i++) {
+    for (int i = 0; i < SRSRAN_MBSFN_NOF_SF_40MS; i++) {
       if (q->pilots[p][i]) {
         free(q->pilots[p][i]);
       }
@@ -319,11 +319,10 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
                                              cf_t*         mbsfn_pilots,
                                              cf_t*         sf_symbols,
                                              srsran_scs_t  scs,
-                                             uint32_t      sf_idx)
+                                             uint32_t      tti)
 {
   uint32_t i, l;
   uint32_t fidx;
-
 
   if (srsran_cell_isvalid(&cell) && srsran_portid_isvalid(port_id) && cs_pilots != NULL && mbsfn_pilots != NULL &&
       sf_symbols != NULL) {
@@ -333,23 +332,65 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
        for (i = 0; i < 2 * cell.nof_prb; i++) {
           sf_symbols[SRSRAN_RE_IDX(cell.nof_prb, 0, fidx)] = cs_pilots[SRSRAN_REFSIGNAL_PILOT_IDX(i, 0, cell)];
           fidx += SRSRAN_NRE / 2; // 1 reference every 6 RE
-       } 
+       }
     }
 
-    for (l = 0; l < srsran_refsignal_mbsfn_nof_symbols(scs); l++) {
-       uint32_t nsymbol = srsran_refsignal_mbsfn_nsymbol(l, scs);
-       if (scs == SRSRAN_SCS_1KHZ25) {
-         fidx    = sf_idx%2==0 ? 0 : 3;
-       } else {
-         fidx    = srsran_refsignal_mbsfn_fidx(l, scs);
-       }
-       for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * cell.nof_prb; i++) {
-         sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, nsymbol, fidx, scs)] =
-          mbsfn_pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, cell, scs)];
-
-         fidx += SRSRAN_NRE_SCS(scs) / srsran_refsignal_mbsfn_rs_per_symbol(scs);
-       }
-
+    /* For extended BW (mbsfn_prb < nof_prb), RS covers only the MBSFN allocation.
+     * pmch_cp writes data linearly from subcarrier 0, so RS must also be left-aligned
+     * (starting at subcarrier 0, not centered) to stay consistent with data placement. */
+    uint32_t act_prb_put = cell.mbsfn_prb ? cell.mbsfn_prb : cell.nof_prb;
+    /* ns must match the slot index used to select mbsfn_pilots (q->mbsfnr_signal.pilots[0][ns]
+     * in the caller, e.g. enb_dl.c's put_refs): 40 ms period, 13 slots of 3 ms, with the first
+     * slot (ns=0) absorbing the extra TTI (0..3) so that 4 + 3*12 = 40. A plain tti/3 does not
+     * have that offset and disagrees with this from tti=3 onward within every period. */
+    uint32_t pos40 = tti % 40u;
+    /* TS 36.211 §6.10.2.2.4: the stagger's "ns" is the ABSOLUTE 3ms slot number
+     * (ns = ns' + 13*nf/4, nf = radio frame number), not the period-local slot
+     * index -- folding in the period count makes the stagger phase advance by
+     * one step every successive 40 ms period (13 mod 4 = 1 for SL4, 13 mod 2 = 1
+     * for SL2) instead of always resetting to phase 0, as clause 6.10.2.2.4
+     * requires. This does NOT apply to which row of the local 13-row pilot
+     * VALUE table gets used elsewhere (that stays period-local, unaffected). */
+    uint32_t ns_37 = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (tti / 40u);
+    if (scs == SRSRAN_SCS_370HZ_SL4) {
+      /* TS 36.211 §6.10.2.2.4 type1: k = 12*m' + stagger, stagger = 3*(ns mod 4).
+       * Pilot spacing 12 does not divide NscRB=486, so per-RB framework is not used.
+       * Must mirror the get_sf SL4 path exactly (same k formula, same base SCS). */
+      uint32_t stagger      = 3 * (ns_37 % 4);
+      uint32_t total_pilots = (SRSRAN_NRE_SCS_370HZ * act_prb_put) / 12;
+      for (i = 0; i < total_pilots; i++) {
+        uint32_t k = 12 * i + stagger;
+        sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, 0, k, SRSRAN_SCS_370HZ)] =
+          mbsfn_pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, 0, cell, scs)];
+      }
+    } else {
+      for (l = 0; l < srsran_refsignal_mbsfn_nof_symbols(scs); l++) {
+         uint32_t nsymbol = srsran_refsignal_mbsfn_nsymbol(l, scs);
+         if (scs == SRSRAN_SCS_1KHZ25) {
+           /* TS 36.211 §6.10.2.2.2 "Mapping to resource elements for 1.25 kHz":
+            *   k = 6m if n_sf mod 2 = 0, k = 6m+3 if n_sf mod 2 = 1
+            * where n_sf is the SUBFRAME NUMBER WITHIN THE RADIO FRAME (0..9,
+            * changes every 1 ms) - NOT the system frame number sfn=tti/10
+            * (changes every 10 ms). Since tti = 10*sfn + n_sf and 10 is even,
+            * n_sf%2 == tti%2. Previously used sfn%2 (wrong clause cited too:
+            * §6.10.2.2.3 is the 2.5 kHz clause, not 1.25 kHz) - this changed
+            * the stagger only once every 10 ms instead of every 1 ms, silently
+            * misaligning the assumed pilot subcarriers from every OTHER
+            * subframe onward relative to what pmch_cp's data mapping and the
+            * chest_dl interpolator expect (see the matching fix there). */
+           fidx    = tti%2==0 ? 0 : 3;
+         } else if (scs == SRSRAN_SCS_370HZ_SL2) {
+           /* TS 36.211 §6.10.2.2.4 type2: stagger = 3*(ns mod 2). */
+           fidx    = 3 * (ns_37 % 2);
+         } else {
+           fidx    = srsran_refsignal_mbsfn_fidx(l, scs);
+         }
+         for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * act_prb_put; i++) {
+           sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, nsymbol, fidx, scs)] =
+            mbsfn_pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, cell, scs)];
+           fidx += SRSRAN_NRE_SCS(scs) / srsran_refsignal_mbsfn_rs_per_symbol(scs);
+         }
+      }
     }
 
     return SRSRAN_SUCCESS;
@@ -360,11 +401,21 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
 
 uint32_t srsran_refsignal_mbsfn_nof_symbols(srsran_scs_t scs)
 {
-  return scs == SRSRAN_SCS_1KHZ25 ? 1 : 3;
+  if (scs == SRSRAN_SCS_2KHZ5) return 2;
+  /* 0.37 kHz variants: l=0 only (one RS symbol per 3 ms slot). Bare 370HZ is
+   * not a valid spec configuration (SL2/SL4 required); treat same as SL4 to
+   * prevent triple-write of symbol 0 and mod-by-zero in gen_seq. */
+  if (SRSRAN_SCS_IS_370HZ(scs)) return 1;
+  if (scs == SRSRAN_SCS_1KHZ25) return 1;
+  if (scs == SRSRAN_SCS_7KHZ5)  return 3; /* TS 36.211 Table 6.10.2.2.1-1: l=0,1,2 */
+  return 3; /* SRSRAN_SCS_15KHZ: TS 36.211 Table 6.10.2.2.1-1 */
 }
 
 uint32_t srsran_refsignal_mbsfn_rs_per_symbol(srsran_scs_t scs)
 {
+  if (scs == SRSRAN_SCS_2KHZ5) return 18;
+  if (scs == SRSRAN_SCS_370HZ_SL2) return 81;
+  if (scs == SRSRAN_SCS_370HZ_SL4) return 41;  /* ceiling; real count = (486*prb)/12 */
   return scs == SRSRAN_SCS_1KHZ25 ? 24 : 6;
 }
 
@@ -378,7 +429,11 @@ uint32_t srsran_symbols_per_mbsfn_subframe(srsran_scs_t scs)
   switch (scs) {
     case SRSRAN_SCS_15KHZ:  return 6;
     case SRSRAN_SCS_7KHZ5:  return 3;
+    case SRSRAN_SCS_2KHZ5:  return 2;
     case SRSRAN_SCS_1KHZ25: return 1;
+    case SRSRAN_SCS_370HZ:
+    case SRSRAN_SCS_370HZ_SL2:
+    case SRSRAN_SCS_370HZ_SL4:   return 1;  /* one 3 ms symbol per 1 ms window (partial) */
     default: return 0;
   }
 }
@@ -405,7 +460,18 @@ inline uint32_t srsran_refsignal_mbsfn_fidx(uint32_t l, srsran_scs_t scs)
         ret = 0;
       }
       break;
+    case SRSRAN_SCS_2KHZ5:
+      ret = (l == 0) ? 0 : 2;
+      break;
     case SRSRAN_SCS_1KHZ25:
+      ret = 0;
+      break;
+    case SRSRAN_SCS_370HZ_SL2:
+    case SRSRAN_SCS_370HZ_SL4:
+      /* Stagger is slot-dependent; computed from sf_idx in get_sf/put_sf. */
+      ret = 0;
+      break;
+    default:
       ret = 0;
       break;
   }
@@ -413,9 +479,15 @@ inline uint32_t srsran_refsignal_mbsfn_fidx(uint32_t l, srsran_scs_t scs)
   return ret;
 }
 
-inline uint32_t srsran_refsignal_mbsfn_offset(uint32_t l, uint32_t s, uint32_t sf, srsran_scs_t scs)
+inline uint32_t srsran_refsignal_mbsfn_offset(uint32_t l, uint32_t s, uint32_t tti, srsran_scs_t scs)
 {
-  uint32_t ret = 0;
+  uint32_t ret    = 0;
+  /* ns must match put_sf/get_sf's ns (40 ms period, 13 slots of 3 ms, first slot
+   * absorbs the extra TTI) — a plain tti/3 disagrees with that from tti=3 onward. */
+  uint32_t pos40  = tti % 40u;
+  /* See put_sf/get_sf's matching comment: "ns" here is the ABSOLUTE 3ms slot
+   * number (TS 36.211 §6.10.2.2.4: ns = ns' + 13*nf/4), not period-local. */
+  uint32_t ns_37  = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (tti / 40u);
 
   switch (scs) {
     case SRSRAN_SCS_15KHZ:
@@ -428,10 +500,29 @@ inline uint32_t srsran_refsignal_mbsfn_offset(uint32_t l, uint32_t s, uint32_t s
         ret = 2;
       }
       break;
+    case SRSRAN_SCS_2KHZ5:
+      ret = (l == 0) ? 0 : 2;
+      break;
     case SRSRAN_SCS_1KHZ25:
-      if (sf%2 != 0) {
+      /* TS 36.211 §6.10.2.2.2 "Mapping to resource elements for 1.25 kHz": stagger
+       * is 3*(n_sf mod 2) where n_sf is the subframe number within the radio frame
+       * (0..9, changes every 1 ms) - not the frame number sfn=tti/10 (changes every
+       * 10 ms; wrong clause was cited too - §6.10.2.2.3 is 2.5 kHz's). tti%2 ==
+       * n_sf%2 since tti = 10*sfn+n_sf and 10 is even. See matching fix in
+       * put_sf/get_sf and chest_dl.c's interpolate_pilots. */
+      if (tti % 2 != 0) {
         ret = 3;
       }
+      break;
+    case SRSRAN_SCS_370HZ_SL2:
+      /* TS 36.211 clause 6.10.2.2.4 type2: stagger = 3*(ns mod 2). */
+      ret = 3 * (ns_37 % 2);
+      break;
+    case SRSRAN_SCS_370HZ_SL4:
+      /* TS 36.211 clause 6.10.2.2.4 type1: stagger = 3*(ns mod 4). */
+      ret = 3 * (ns_37 % 4);
+      break;
+    default:
       break;
   }
   return ret;
@@ -460,7 +551,18 @@ inline uint32_t srsran_refsignal_mbsfn_nsymbol(uint32_t l, srsran_scs_t scs)
         ret = 5;
       }
       break;
+    case SRSRAN_SCS_2KHZ5:
+      ret = l;
+      break;
     case SRSRAN_SCS_1KHZ25:
+      ret = 0;
+      break;
+    case SRSRAN_SCS_370HZ_SL2:
+    case SRSRAN_SCS_370HZ_SL4:
+      /* RS always in l=0 (first/only symbol of the 3 ms slot). */
+      ret = 0;
+      break;
+    default:
       ret = 0;
       break;
   }
@@ -481,22 +583,101 @@ int srsran_refsignal_mbsfn_gen_seq(srsran_refsignal_t* q, srsran_cell_t cell, ui
     goto free_and_exit;
   }
 
-  for (ns = 0; ns < SRSRAN_NOF_SF_X_FRAME; ns++) {
+  /* TS 36.211 §6.10.2.1: RS sequence periods per SCS.
+   * 2.5 kHz (clause 6.10.2.1.3): n_sf = 0..9, 10 ms period (same frame as 7.5/1.25/15 kHz).
+   * 0.37 kHz (clause 6.10.2.1.4): n_s = 0..12, 40 ms period (13 slots of 3 ms each).
+   * Other SCS: standard 10 ms frame period. */
+  uint32_t nof_sf = SRSRAN_NOF_SF_X_FRAME;
+  if (scs == SRSRAN_SCS_370HZ_SL4 || scs == SRSRAN_SCS_370HZ_SL2) {
+    nof_sf = 13;
+  }
+  for (ns = 0; ns < nof_sf; ns++) {
     for (p = 0; p < 2; p++) {
       uint32_t nsymbols = srsran_refsignal_mbsfn_nof_symbols(scs);
       for (l = 0; l < nsymbols; l++) {
         uint32_t lp   = (srsran_refsignal_mbsfn_nsymbol(l, scs)) % srsran_symbols_per_mbsfn_subframe(scs);
         uint32_t slot = (l) ? (ns * 2 + 1) : (ns * 2);
-        c_init        = 512 *
-          (7 * ( ( scs == SRSRAN_SCS_1KHZ25 ? ns : slot ) + 1) + ( scs == SRSRAN_SCS_1KHZ25 ? l : lp ) + 1) *
-          (2 * N_mbsfn_id + 1) + N_mbsfn_id;
+        if (scs == SRSRAN_SCS_2KHZ5 || scs == SRSRAN_SCS_370HZ_SL2 || scs == SRSRAN_SCS_370HZ_SL4) {
+          /* TS 36.211 clauses 6.10.2.1.3 (2.5 kHz) and 6.10.2.1.4 (0.37 kHz):
+           *   cinit = 512*(7*(n+1) + l + 1)*(2*N_ID^MBSFN + 1) + N_ID^MBSFN
+           * Same structure as 7.5 kHz (clause 6.10.2.1.2); only the time index differs.
+           * For 2.5 kHz: n = n_sf (0..9, subframe index within 10 ms frame).
+           * For 0.37 kHz: n = n_s (0..12, 3 ms slot index within 40 ms period).
+           * Note: prior code used 297*(n+1)+l+12N(N+1)+N which is a misread of the OOXML
+           * math (2^9 superscript adjacent to the factor 7 renders as "297" in text). */
+          c_init = 512u * (7u * (ns + 1u) + lp + 1u) * (2u * N_mbsfn_id + 1u) + N_mbsfn_id;
+        } else if (scs == SRSRAN_SCS_7KHZ5) {
+          /* TS 36.211 clause 6.10.2.1.2 (7.5 kHz MBSFN RS):
+           *   cinit = 512*(7*(ns+1) + lp + 1)*(2*N_ID^MBSFN + 1) + N_ID^MBSFN
+           * where ns is the subframe index (0..9) and lp = nsymbol mod 3.
+           * At 7.5 kHz there is one slot per 1 ms subframe, so ns (not slot) is
+           * the correct time index; using slot (= ns*2 or ns*2+1) would produce
+           * the wrong cinit and broken pilot values. */
+          c_init = 512 * (7 * (ns + 1) + lp + 1) * (2 * N_mbsfn_id + 1) + N_mbsfn_id;
+        } else if (scs == SRSRAN_SCS_1KHZ25) {
+          /* TS 36.211 clause 6.10.2.1.1 (15 kHz / 1.25 kHz form, shared):
+           *   cinit = 512*(7*(ns+1) + l + 1)*(2*N+1) + N */
+          c_init = 512 * (7 * (ns + 1) + l + 1) * (2 * N_mbsfn_id + 1) + N_mbsfn_id;
+        } else {
+          /* SRSRAN_SCS_15KHZ: TS 36.211 clause 6.10.2.1.1:
+           *   cinit = 512*(7*(slot+1) + lp + 1)*(2*N+1) + N */
+          c_init = 512 * (7 * (slot + 1) + lp + 1) * (2 * N_mbsfn_id + 1) + N_mbsfn_id;
+        }
 
         srsran_sequence_set_LTE_pr(&seq_mbsfn, 10 * SRSRAN_REFSIGNAL_NUM_SF_MBSFN(SRSRAN_MAX_PRB, scs), c_init);
-        for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * q->cell.nof_prb; i++) {
-          uint32_t idx                   = SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, q->cell, scs);
-          mp                             = i + 3 * (SRSRAN_MAX_PRB - cell.nof_prb);
-          __real__ q->pilots[p][ns][idx] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 0]) * M_SQRT1_2;
-          __imag__ q->pilots[p][ns][idx] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 1]) * M_SQRT1_2;
+        if (scs == SRSRAN_SCS_370HZ_SL4) {
+          /* TS 36.211 clause 6.10.2.2.4 type1: m'=0..(NscRB/12 * prb)-1, m = m' + shift,
+           * shift = NscRB/12 * (N_RB^max,DL - N_RB^DL) — same centering idea as the other
+           * numerologies below, applied here since guard bands (N_RB^DL < N_RB^max,DL)
+           * are the common case for a real deployment, not just NRBmax,DL. NscRB/12 =
+           * 40.5 is non-integer; use floor for both the pilot count and the shift. */
+          uint32_t act_prb       = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+          uint32_t total_pilots  = (SRSRAN_NRE_SCS_370HZ * act_prb) / 12;
+          uint32_t center_offset = (SRSRAN_NRE_SCS_370HZ * (SRSRAN_MAX_PRB - act_prb)) / 24;
+          for (i = 0; i < total_pilots; i++) {
+            mp                            = i + center_offset;
+            __real__ q->pilots[p][ns][i] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 0]) * M_SQRT1_2;
+            __imag__ q->pilots[p][ns][i] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 1]) * M_SQRT1_2;
+          }
+        } else if (scs == SRSRAN_SCS_370HZ_SL2) {
+          /* TS 36.211 clause 6.10.2.2.4 type2: m'=0..(NscRB/6 * prb)-1 = 81*prb-1,
+           * shift = NscRB/6 * (N_RB^max,DL - N_RB^DL) / 2 = NscRB/12 * (...) — same
+           * centering as SL4 above, halved pilot density. */
+          uint32_t act_prb       = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+          uint32_t total_pilots  = SRSRAN_NRE_SCS_370HZ / 6 * act_prb;  /* 81 * act_prb */
+          uint32_t center_offset = (SRSRAN_NRE_SCS_370HZ * (SRSRAN_MAX_PRB - act_prb)) / 12;
+          for (i = 0; i < total_pilots; i++) {
+            mp                            = i + center_offset;
+            __real__ q->pilots[p][ns][i] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 0]) * M_SQRT1_2;
+            __imag__ q->pilots[p][ns][i] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 1]) * M_SQRT1_2;
+          }
+        } else {
+          // Centering offset m' = m + centering_factor*(N_RB^max,DL - N_RB^DL): shifts
+          // which slice of the master pilot table (sized for the spec's max bandwidth,
+          // SRSRAN_MAX_PRB=110) gets used for this deployment's actual bandwidth.
+          // rs_per_symbol(scs)/2 is a generic heuristic that happens to match 15 kHz
+          // MBSFN (rs_per_symbol=6, factor=3) and 2.5 kHz (verified separately against
+          // clause 6.10.2.2.3) but does NOT hold for 1.25 kHz: TS 36.211 clause
+          // 6.10.2.2.2 "Mapping to resource elements for 1.25 kHz" gives
+          // m' = m + 3*(N_RB^max,DL - N_RB^DL), a flat coefficient of 3 - not
+          // rs_per_symbol(24)/2=12, which is what this comment previously (wrongly)
+          // documented as the correct factor for 1.25 kHz without checking it against
+          // this specific clause. At the wrong (12x) offset this pulls pilot VALUES
+          // from the wrong slice of the master Gold-sequence table: finite,
+          // well-formed-looking numbers that are nevertheless wrong, rather than an
+          // obviously-broken value. 7.5 kHz and 15 kHz's coefficients have NOT been
+          // independently re-verified against their own clause (6.10.2.2.1) and are
+          // left as rs_per_symbol/2 for now.
+          // Use mbsfn_prb (extended BW allocation) when set; fall back to nof_prb (full carrier).
+          uint32_t act_prb          = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+          uint32_t centering_factor = (scs == SRSRAN_SCS_1KHZ25) ? 3u : (srsran_refsignal_mbsfn_rs_per_symbol(scs) / 2u);
+          uint32_t center_offset    = centering_factor * (SRSRAN_MAX_PRB - act_prb);
+          for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * act_prb; i++) {
+            uint32_t idx                   = SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, q->cell, scs);
+            mp                             = i + center_offset;
+            __real__ q->pilots[p][ns][idx] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 0]) * M_SQRT1_2;
+            __imag__ q->pilots[p][ns][idx] = (1 - 2 * (float)seq_mbsfn.c[2 * mp + 1]) * M_SQRT1_2;
+          }
         }
       }
     }
@@ -523,9 +704,22 @@ int srsran_refsignal_mbsfn_init(srsran_refsignal_t* q, uint32_t max_prb, srsran_
 
     q->type = SRSRAN_SF_MBSFN;
 
+    /* Size for the densest MBSFN RS pattern (SL2, see SRSRAN_REFSIGNAL_MAX_NUM_SF_MBSFN's
+     * own doc comment), not just the scs passed to THIS call. q->pilots[area_id][*] is
+     * shared across every scs that ever uses this area_id - chest_dl.c's
+     * srsran_chest_dl_set_mbsfn_area_id() only (re)allocates it the first time a given
+     * area_id is seen (`if (!q->mbsfn_refs[mbsfn_area_id])`), so a later call for the
+     * SAME area_id with a DIFFERENT, denser scs (e.g. an eNB using one area_id for both
+     * 15 kHz MTCH data and 1.25 kHz MCCH, as this fork does) reused this same, now-
+     * undersized buffer instead of resizing it. Confirmed via AddressSanitizer on the
+     * modem app (receive-only, so this path is only ever live there): heap-buffer-
+     * overflow reading past a 7200-byte (900-element, sized for 15 kHz) region in
+     * chest_dl_estimate_correct_sync_error's srsran_vec_prod_conj_ccc call, for a
+     * subframe using 1.25 kHz (needs 1200 elements at 50 PRB) - the exact MCCH scenario
+     * that made MCCH decode fail with a corrupted channel estimate. */
     for (p = 0; p < 2; p++) {
-      for (i = 0; i < SRSRAN_NOF_SF_X_FRAME; i++) {
-        q->pilots[p][i] = srsran_vec_cf_malloc(max_prb * srsran_refsignal_mbsfn_rs_per_rb(scs));
+      for (i = 0; i < SRSRAN_MBSFN_NOF_SF_40MS; i++) {
+        q->pilots[p][i] = srsran_vec_cf_malloc(SRSRAN_REFSIGNAL_MAX_NUM_SF_MBSFN(max_prb));
         if (!q->pilots[p][i]) {
           perror("malloc");
           goto free_and_exit;
@@ -563,7 +757,7 @@ exit:
   return ret;
 }
 
-int srsran_refsignal_mbsfn_get_sf(srsran_cell_t cell, uint32_t port_id, cf_t* sf_symbols, cf_t* pilots, srsran_scs_t scs, uint32_t sf_idx)
+int srsran_refsignal_mbsfn_get_sf(srsran_cell_t cell, uint32_t port_id, cf_t* sf_symbols, cf_t* pilots, srsran_scs_t scs, uint32_t tti)
 {
   uint32_t i, l;
   uint32_t fidx;
@@ -582,17 +776,55 @@ int srsran_refsignal_mbsfn_get_sf(srsran_cell_t cell, uint32_t port_id, cf_t* sf
       nonmbsfn_offset = 2 * cell.nof_prb;
     }
 
-    for (l = 0; l < srsran_refsignal_mbsfn_nof_symbols(scs); l++) {
-      nsymbol = srsran_refsignal_mbsfn_nsymbol(l, scs);
-      if (scs == SRSRAN_SCS_1KHZ25) {
-        fidx    = sf_idx%2==0 ? 0 : 3;
-      } else {
-        fidx    = srsran_refsignal_mbsfn_fidx(l, scs);
+    /* ns must match put_sf's ns (40 ms period, 13 slots of 3 ms, first slot absorbs the
+     * extra TTI) or this reads the RS from the wrong subcarriers whenever the eNB used a
+     * different stagger than a plain tti/3 would predict (from tti=3 onward each period). */
+    uint32_t pos40 = tti % 40u;
+    /* TS 36.211 §6.10.2.2.4: the stagger's "ns" is the ABSOLUTE 3ms slot number
+     * (ns = ns' + 13*nf/4, nf = radio frame number), not the period-local slot
+     * index -- folding in the period count makes the stagger phase advance by
+     * one step every successive 40 ms period (13 mod 4 = 1 for SL4, 13 mod 2 = 1
+     * for SL2) instead of always resetting to phase 0, as clause 6.10.2.2.4
+     * requires. This does NOT apply to which row of the local 13-row pilot
+     * VALUE table gets used elsewhere (that stays period-local, unaffected). */
+    uint32_t ns_37 = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (tti / 40u);
+    if (scs == SRSRAN_SCS_370HZ_SL4) {
+      /* TS 36.211 clause 6.10.2.2.4 type1: k = 12*m' + stagger, stagger = 3*(ns mod 4).
+       * Pilot spacing 12 does not divide NscRB=486, so per-RB framework is not used.
+       * Use mbsfn_prb (extended-BW allocation) when set to match put_sf pilot count;
+       * reading beyond mbsfn_prb would pull data subcarriers into the CE estimate. */
+      uint32_t act_prb_get  = cell.mbsfn_prb ? cell.mbsfn_prb : cell.nof_prb;
+      uint32_t stagger      = 3 * (ns_37 % 4);
+      uint32_t total_pilots = (SRSRAN_NRE_SCS_370HZ * act_prb_get) / 12;
+      for (i = 0; i < total_pilots; i++) {
+        uint32_t k = 12 * i + stagger;
+        pilots[i + nonmbsfn_offset] = sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, 0, k, SRSRAN_SCS_370HZ)];
       }
-      for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * cell.nof_prb; i++) {
-        pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, cell, scs) + nonmbsfn_offset] =
-          sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, nsymbol, fidx, scs)];
-        fidx += SRSRAN_NRE_SCS(scs) / srsran_refsignal_mbsfn_rs_per_symbol(scs);
+    } else {
+      /* For extended BW (mbsfn_prb < nof_prb), RS covers only the MBSFN allocation.
+       * pmch_cp writes data from subcarrier 0, so RS is also read left-aligned here. */
+      uint32_t act_prb_get = cell.mbsfn_prb ? cell.mbsfn_prb : cell.nof_prb;
+      for (l = 0; l < srsran_refsignal_mbsfn_nof_symbols(scs); l++) {
+        nsymbol = srsran_refsignal_mbsfn_nsymbol(l, scs);
+        if (scs == SRSRAN_SCS_1KHZ25) {
+          /* TS 36.211 §6.10.2.2.2 "Mapping to resource elements for 1.25 kHz": stagger
+           * is 3*(n_sf mod 2), n_sf = subframe number within the radio frame (0..9,
+           * changes every 1 ms) - not sfn=tti/10 (changes every 10 ms; wrong clause
+           * was cited too). tti%2 == n_sf%2. Must match put_sf's fidx and the
+           * chest_dl.c interpolator's fidx_offset exactly, or this reads pilots from
+           * the wrong subcarriers on every other subframe. */
+          fidx = tti%2==0 ? 0 : 3;
+        } else if (scs == SRSRAN_SCS_370HZ_SL2) {
+          /* TS 36.211 clause 6.10.2.2.4 type2: stagger = 3*(ns mod 2). */
+          fidx = 3 * (ns_37 % 2);
+        } else {
+          fidx = srsran_refsignal_mbsfn_fidx(l, scs);
+        }
+        for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * act_prb_get; i++) {
+          pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, cell, scs) + nonmbsfn_offset] =
+            sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, nsymbol, fidx, scs)];
+          fidx += SRSRAN_NRE_SCS(scs) / srsran_refsignal_mbsfn_rs_per_symbol(scs);
+        }
       }
     }
 

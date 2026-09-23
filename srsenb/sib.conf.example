@@ -10,14 +10,41 @@ sib1 =
         {
             si_periodicity = 16;
 
-            // comma-separated array of SIB-indexes (from 3 to 13), leave empty or commented to just scheduler sib2
-            si_mapping_info = [ 3 ];
+            // comma-separated array of SIB-indexes; this fork only parses SIB1 as the
+            // MBMS-r14 variant (SystemInformationBlockType1-MBMS-r14), so valid values
+            // are 10, 11, 12, 13, 15, or 16 - leave empty or commented to just schedule sib2
+            si_mapping_info = [ ];
         }
     );
     system_info_value_tag = 0;
 };
 
-sib2 = 
+// SIB13 is always parsed by this fork's SIB1-MBMS-r14 config path regardless of
+// si_mapping_info content or embms.enable - this minimal section is required for
+// any config file passed through parse_sib1_mbms(), even non-MBMS-focused tests.
+sib13 =
+{
+    mbsfn_notification_config =
+    {
+        mbsfn_notification_repetition_coeff = "n2";
+        mbsfn_notification_offset = 0;
+        mbsfn_notification_sf_index = 1;
+    };
+    mbsfn_area_info_list_size = 1;
+    mbsfn_area_info_list =
+    {
+        non_mbsfn_region_length = "s2";
+        mcch_repetition_period = "rf64";
+        mcch_modification_period = "rf512";
+        signalling_mcs = "n2";
+        mbsfn_area_id = 1;
+        notification_indicator = 0;
+        mcch_offset = 0;
+        sf_alloc_info = 32;
+    };
+};
+
+sib2 =
 {
     rr_config_common_sib =
     {

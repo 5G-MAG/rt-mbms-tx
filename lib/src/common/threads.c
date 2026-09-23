@@ -153,9 +153,13 @@ bool threads_new_rt_cpu(pthread_t* thread, void* (*start_routine)(void*), void* 
   int err = pthread_create(thread, attr_enable ? &attr : NULL, start_routine, arg);
   if (err) {
     if (EPERM == err) {
-      // Join failed thread for avoiding memory leak from previous trial
-      pthread_join(*thread, NULL);
-
+      // pthread_create() failed, so *thread was never populated (its contents
+      // are unspecified per POSIX) - there is no thread to join here. This
+      // used to call pthread_join(*thread, NULL) on that uninitialized
+      // handle, which is undefined behavior and crashes in environments
+      // without real-time scheduling privileges (e.g. unprivileged
+      // containers), since that's exactly when pthread_create fails with
+      // EPERM and this fallback path is reached.
       perror("Warning: Failed to create thread with real-time priority. Creating it with normal priority");
       err = pthread_create(thread, NULL, start_routine, arg);
       if (err) {

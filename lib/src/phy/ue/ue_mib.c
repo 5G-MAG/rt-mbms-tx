@@ -194,8 +194,17 @@ int srsran_ue_mib_sync_init_multi_prb(srsran_ue_mib_sync_t* q,
     void*    stream_handler,
     uint8_t nof_prb)
 {
+  // sf_buffer is the raw sample storage that srsran_ue_mib_init() below hands to
+  // srsran_ofdm_rx_init() (and that ue_sync fills, one subframe at a time, via the
+  // receive_callback) - it must hold a full subframe AT nof_prb, not at the fixed
+  // SRSRAN_UE_MIB_NOF_PRB (6) that MIB_BUFFER_MAX_SAMPLES is defined for. Sizing it from the
+  // constant regardless of nof_prb undersizes the buffer for any nof_prb > 6 (e.g. exactly at
+  // capacity at 50 PRB, and a 2x overflow at 100 PRB), which corrupts the heap the first time a
+  // subframe is written/read and crashes later and unpredictably (seen both as a
+  // MultichannelRingbuffer assertion and as a segfault inside fftwf_execute, depending on what
+  // the corrupted memory was reused for next).
   for (int i = 0; i < nof_rx_channels; i++) {
-    q->sf_buffer[i] = srsran_vec_cf_malloc(MIB_BUFFER_MAX_SAMPLES);
+    q->sf_buffer[i] = srsran_vec_cf_malloc(MIB_BUFFER_MAX_SAMPLES_FOR_PRB(nof_prb));
   }
   q->nof_rx_channels = nof_rx_channels;
 

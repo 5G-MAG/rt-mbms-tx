@@ -66,6 +66,11 @@ SRSRAN_API uint32_t srsran_ra_dl_grant_nof_re(const srsran_cell_t*  cell,
 /** Others */
 SRSRAN_API int srsran_dl_fill_ra_mcs(srsran_ra_tb_t* tb, int last_tbs, uint32_t nprb, bool pdsch_use_tbs_index_alt);
 
+/* Rel-19 LTE_terr_bcast_Ph2: PMCH MCS lookup per TS 36.213 §11.1.
+ * use_table2 selects 256QAM tables; scs distinguishes SL4 (Table 11.1-1/11.1-2) from standard SCS
+ * (Tables 7.1.7.1-1 / 7.1.7.1-1A). */
+SRSRAN_API int srsran_pmch_fill_ra_mcs(srsran_ra_tb_t* tb, uint32_t nprb, bool use_table2, srsran_scs_t scs);
+
 SRSRAN_API void
 srsran_ra_dl_compute_nof_re(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* sf, srsran_pdsch_grant_t* grant);
 

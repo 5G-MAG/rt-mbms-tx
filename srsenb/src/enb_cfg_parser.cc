@@ -20,6 +20,7 @@
  */
 
 #include "enb_cfg_parser.h"
+#include <cstdio>
 #include "srsenb/hdr/enb.h"
 #include "srsran/asn1/rrc_utils.h"
 #include "srsran/common/band_helper.h"
@@ -66,7 +67,7 @@ bool contains_value(T value, const std::initializer_list<T>& list)
   return false;
 }
 
-bool sib_is_present(const sched_info_list_mbms_r14_l& l, sib_type_e sib_num)
+bool sib_is_present(const sched_info_list_mbms_r14_l& l, sib_type_mbms_r14_e sib_num)
 {
   for (uint32_t i = 0; i < l.size(); i++) {
     for (uint32_t j = 0; j < l[i].sib_map_info_r14.size(); j++) {
@@ -86,25 +87,19 @@ int field_sched_info::parse(libconfig::Setting& root)
       fprintf(stderr, "Missing field si_periodicity in sched_info=%d\n", i);
       return SRSRAN_ERROR;
     }
-//    if (root[i].exists("si_mapping_info")) {
-//      data->sched_info_list_mbms_r14[i].sib_map_info_r14.resize((uint32_t)root[i]["si_mapping_info"].getLength());
-//      if (data->sched_info_list_mbms_r14[i].sib_map_info_r14.size() < ASN1_RRC_MAX_SIB) {
-//        for (uint32_t j = 0; j < data->sched_info_list_mbms_r14[i].sib_map_info_r14.size(); j++) {
-//          uint32_t sib_index = root[i]["si_mapping_info"][j];
-//          if (sib_index >= 3 && sib_index <= 13) {
-//            data->sched_info_list_mbms_r14[i].sib_map_info_r14[j].value = (sib_type_mbms_r14_opts::options)(sib_index - 3);
-//          } else {
-//            fprintf(stderr, "Invalid SIB index %d for si_mapping_info=%d in sched_info=%d\n", sib_index, j, i);
-//            return SRSRAN_ERROR;
-//          }
-//        }
-//      } else {
-//        fprintf(stderr, "Number of si_mapping_info values exceeds maximum (%d)\n", ASN1_RRC_MAX_SIB);
-//        return SRSRAN_ERROR;
-//      }
-//    } else {
+    if (root[i].exists("si_mapping_info")) {
+      uint32_t n = (uint32_t)root[i]["si_mapping_info"].getLength();
+      data->sched_info_list_mbms_r14[i].sib_map_info_r14.resize(n);
+      for (uint32_t j = 0; j < n; j++) {
+        uint32_t sib_num = (uint32_t)(int)root[i]["si_mapping_info"][j];
+        if (!asn1::number_to_enum(data->sched_info_list_mbms_r14[i].sib_map_info_r14[j], sib_num)) {
+          fprintf(stderr, "Invalid MBMS SIB number %u in si_mapping_info (valid: 10,11,12,13,15,16)\n", sib_num);
+          return SRSRAN_ERROR;
+        }
+      }
+    } else {
       data->sched_info_list_mbms_r14[i].sib_map_info_r14.resize(0);
-//    }
+    }
   }
   return 0;
 }
@@ -375,6 +370,34 @@ int mbsfn_area_info_list_parser::parse(Setting& root)
     }
     mbsfn_item->subcarrier_spacing_mbms_r14_present = true;
     mbsfn_item->ext = true;
+  }
+
+  /* Rel-14 v1430 MCCH period fields: shorter repetition/modification periods (rf1..rf16/rf256).
+   * These override the r9 periods OTA and allow faster MCCH acquisition in FeMBMS cells. */
+  bool has_v1430_period = root["mbsfn_area_info_list"].exists("mcch_repetition_period_v1430") ||
+                          root["mbsfn_area_info_list"].exists("mcch_modification_period_v1430");
+  if (has_v1430_period) {
+    mbsfn_area_info_r9_s::mcch_cfg_r14_s_ r14 = {};
+    if (root["mbsfn_area_info_list"].exists("mcch_repetition_period_v1430")) {
+      field_asn1_enum_str<mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_repeat_period_v1430_e_> rep_v14(
+          "mcch_repetition_period_v1430", &r14.mcch_repeat_period_v1430);
+      if (rep_v14.parse(root["mbsfn_area_info_list"])) {
+        fprintf(stderr, "Error parsing mcch_repetition_period_v1430\n");
+        return SRSRAN_ERROR;
+      }
+      r14.mcch_repeat_period_v1430_present = true;
+    }
+    if (root["mbsfn_area_info_list"].exists("mcch_modification_period_v1430")) {
+      field_asn1_enum_str<mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_e_> mod_v14(
+          "mcch_modification_period_v1430", &r14.mcch_mod_period_v1430);
+      if (mod_v14.parse(root["mbsfn_area_info_list"])) {
+        fprintf(stderr, "Error parsing mcch_modification_period_v1430\n");
+        return SRSRAN_ERROR;
+      }
+      r14.mcch_mod_period_v1430_present = true;
+    }
+    mbsfn_item->mcch_cfg_r14 = asn1::make_copy_ptr(r14);
+    mbsfn_item->ext           = true;
   }
 
   return 0;
@@ -1099,8 +1122,70 @@ int parse_cell_cfg(all_args_t* args_, srsran_cell_t* cell)
   cell->cp         = args_->phy.extended_cp ? SRSRAN_CP_EXT : SRSRAN_CP_NORM;
   cell->nof_ports  = args_->enb.nof_ports;
   cell->nof_prb    = args_->enb.n_prb;
-  cell->mbsfn_prb    = args_->enb.n_prb;
+  cell->mbsfn_prb    = (args_->stack.embms.pmch_bandwidth > 0) ? args_->stack.embms.pmch_bandwidth : args_->enb.n_prb;
+  if (cell->mbsfn_prb > cell->nof_prb) {
+    /* pmch_bandwidth is a sub-allocation within the carrier and can never
+     * exceed it; a value passing the {0,25,30,35,40} membership check in
+     * set_derived_args() further down can still exceed a smaller enb.n_prb
+     * (e.g. n_prb=25 with pmch_bandwidth=40), which would otherwise reach
+     * srsran_pmch_set_cell() and fail cell validation there instead. */
+    fprintf(stderr,
+            "Invalid embms.pmch_bandwidth=%u exceeds enb.n_prb=%u — clamping to %u\n",
+            cell->mbsfn_prb,
+            cell->nof_prb,
+            cell->nof_prb);
+    cell->mbsfn_prb = cell->nof_prb;
+  }
   cell->mbms_dedicated    = args_->stack.embms.mbms_dedicated;
+  cell->cas_muting        = args_->stack.embms.cas_muting;
+  cell->k_cas             = args_->stack.embms.k_cas;
+  cell->n_cas             = args_->stack.embms.n_cas;
+  cell->additional_non_mbms_frames = args_->stack.embms.additional_non_mbsfn_subframes;
+  if (cell->additional_non_mbms_frames > 3) {
+    fprintf(stderr, "Invalid embms.additional_non_mbsfn_subframes=%u; must be 0..3 — clamping to 3\n",
+            cell->additional_non_mbms_frames);
+    cell->additional_non_mbms_frames = 3;
+  }
+  /* semiStaticCFI-MBMS-r16 (MIB-MBMS, TS 36.331/36.213 §9.1.3): tells receivers to skip
+   * PCFICH decode on CAS/non-MBSFN subframes and use a fixed CFI instead (this repo's own
+   * modem app relies on it — see ue_dl.c). It is only correct to signal a fixed value when
+   * the scheduler is actually configured for a non-adaptive CFI on those subframes
+   * (min_nof_ctrl_symbols == max). The field is INTEGER(0..3) — CFI 1, 2, or 3 all fit
+   * (pbch.c packs/unpacks it as a plain 2-bit value now; it used to be truncated to 1 bit,
+   * which could only represent CFI 1 or 2 and silently dropped CFI 3 configs to 0). Before
+   * this fix, cell->semi_static_cfi was never assigned anywhere on the TX side, so it stayed
+   * at its zero-initialized default. That made srsran_pbch_mib_mbms_pack() always broadcast
+   * semiStaticCFI-MBMS-r16=0 ("derive from PCFICH") regardless of the scheduler's real CFI,
+   * AND made the sf_worker.cc override that's supposed to force dl_sf.cfi to this same value
+   * never activate either (its guard is also `!= 0`) — so the eNB transmitted CAS subframes
+   * at the scheduler's true CFI (e.g. 2, from min/max_nof_ctrl_symbols) while always telling
+   * receivers "derive from PCFICH". Any receiver that trusts this field for CAS subframes (as
+   * this repo's modem app does) then blind-searches PDCCH at the wrong REG/CCE positions and
+   * never finds a single DCI there, for SI-RNTI or otherwise. Leaving semi_static_cfi at 0
+   * ("not signalled") when the scheduler's CFI is adaptive is correct and intentional: PCFICH
+   * is a real, transmitted channel on CAS subframes (unlike on MBSFN subframes), so falling
+   * back to decoding it is the right behavior there. */
+  if (cell->mbms_dedicated) {
+    uint32_t min_cfi = args_->stack.mac.sched.min_nof_ctrl_symbols;
+    uint32_t max_cfi = args_->stack.mac.sched.max_nof_ctrl_symbols;
+    cell->semi_static_cfi = (min_cfi == max_cfi && min_cfi >= 1 && min_cfi <= 3) ? (uint8_t)min_cfi : 0;
+  }
+  if (cell->cas_muting) {
+    static const uint8_t valid_n_cas[] = {2, 4, 8, 16};
+    bool n_cas_ok = false;
+    for (uint8_t v : valid_n_cas) { if (cell->n_cas == v) { n_cas_ok = true; break; } }
+    if (!n_cas_ok) {
+      fprintf(stderr, "Invalid embms.n_cas=%u; must be 2, 4, 8, or 16\n", cell->n_cas);
+      return -1;
+    }
+    /* KCAS is documented in phy_common.h as an independent value in range
+     * 4..63 (active-CAS frames per 16*NCAS-frame period), not bounded by
+     * NCAS — e.g. n_cas=4, k_cas=10 is a valid CR 0577 config. */
+    if (cell->k_cas < 4 || cell->k_cas > 63) {
+      fprintf(stderr, "Invalid embms.k_cas=%u; must be 4..63\n", cell->k_cas);
+      return -1;
+    }
+  }
   // PCI not configured yet
 
   phich_cfg_s     phichcfg;
@@ -1251,6 +1336,13 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
   args_->stack.s1ap.cell_id = rrc_cfg_->cell_list.at(0).cell_id;
   args_->stack.s1ap.tac     = rrc_cfg_->cell_list.at(0).tac;
 
+  // M3AP's Global-MCE-ID reuses this eNB's own S1AP identity (no separate MCE identity space in this
+  // deployment, see srsenb/hdr/stack/m3ap/m3ap.h).
+  args_->stack.m3ap.enb_id   = args_->enb.enb_id;
+  args_->stack.m3ap.mcc      = args_->stack.s1ap.mcc;
+  args_->stack.m3ap.mnc      = args_->stack.s1ap.mnc;
+  args_->stack.m3ap.mce_name = args_->stack.s1ap.enb_name;
+
   // Create dedicated cell configuration from RRC configuration
   for (auto it = rrc_cfg_->cell_list.begin(); it != rrc_cfg_->cell_list.end(); ++it) {
     auto&          cfg          = *it;
@@ -1334,8 +1426,176 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
           args_->general.rrc_inactivity_timer,
           min_rrc_inactivity_timer);
   }
-  rrc_cfg_->enable_mbsfn = args_->stack.embms.enable;
-  rrc_cfg_->mbms_mcs     = args_->stack.embms.mcs;
+  rrc_cfg_->enable_mbsfn               = args_->stack.embms.enable;
+  rrc_cfg_->mbms_mcs                   = args_->stack.embms.mcs;
+  {
+    uint8_t bw = args_->stack.embms.pmch_bandwidth;
+    static const uint8_t valid_bw[] = {0, 25, 30, 35, 40};
+    bool bw_ok = false;
+    for (uint8_t v : valid_bw) { if (bw == v) { bw_ok = true; break; } }
+    if (!bw_ok) {
+      ERROR("embms.pmch_bandwidth %d is not valid (must be 0, 25, 30, 35, or 40 PRBs) — setting to 0", bw);
+      bw = 0;
+    }
+    rrc_cfg_->pmch_bandwidth = bw;
+  }
+  rrc_cfg_->pmch_cyclic_shift_alpha    = args_->stack.embms.cyclic_shift_alpha;
+  rrc_cfg_->pmch_freq_interleaving     = args_->stack.embms.freq_interleaving;
+  rrc_cfg_->pmch_time_interleaving_n   = args_->stack.embms.time_interleaving_n;
+  rrc_cfg_->pmch_time_interleaving_m   = args_->stack.embms.time_interleaving_m;
+  if (rrc_cfg_->pmch_time_interleaving_n > 1) {
+    /* Legal N values (pmch-TimeInterleavingN-r19, TS 36.331): 2, 4, 8, 16.
+     * PMCH's TX/RX accumulation buffers (ti_rx_buf/ti_tx_buf) are sized for a
+     * maximum of 16 subframes at init time; an unvalidated N here would
+     * overflow them. It also has to stay in the set the OTA-signaling switch
+     * in rrc::pack_mcch() maps 1:1 (case 4/8/16, default n2) — any other value
+     * would make the eNB encode with the raw N while telling UEs a different,
+     * silently-defaulted N. */
+    static const uint8_t valid_n[] = {2, 4, 8, 16};
+    bool                 n_ok      = false;
+    for (uint8_t v : valid_n) {
+      if (rrc_cfg_->pmch_time_interleaving_n == v) {
+        n_ok = true;
+        break;
+      }
+    }
+    if (!n_ok) {
+      ERROR("embms.time_interleaving_n=%u is not valid (must be 2, 4, 8, or 16) — disabling time interleaving",
+            rrc_cfg_->pmch_time_interleaving_n);
+      rrc_cfg_->pmch_time_interleaving_n = 0;
+      rrc_cfg_->pmch_time_interleaving_m = 0;
+    }
+  }
+  if (rrc_cfg_->pmch_time_interleaving_n > 1 && rrc_cfg_->pmch_time_interleaving_m > 0) {
+    /* Legal M values (pmch-TimeInterleavingM-r19): 4, 8, 16, 32. Same
+     * OTA-signaling-divergence concern as N above (rrc::pack_mcch() maps
+     * case 8/16/32, default sf4). */
+    static const uint8_t valid_m[] = {4, 8, 16, 32};
+    bool                 m_ok      = false;
+    for (uint8_t v : valid_m) {
+      if (rrc_cfg_->pmch_time_interleaving_m == v) {
+        m_ok = true;
+        break;
+      }
+    }
+    if (!m_ok) {
+      /* Smallest legal M (4/8/16/32) that is still >= N: for N=2 that is 4,
+       * not N itself, since 2 is a legal N value but not a legal M value. */
+      uint8_t fallback_m = (rrc_cfg_->pmch_time_interleaving_n < 4) ? 4u : rrc_cfg_->pmch_time_interleaving_n;
+      ERROR("embms.time_interleaving_m=%u is not valid (must be 4, 8, 16, or 32) — setting to %u",
+            rrc_cfg_->pmch_time_interleaving_m,
+            fallback_m);
+      rrc_cfg_->pmch_time_interleaving_m = fallback_m;
+    }
+  }
+  rrc_cfg_->pmch_use_mcs_table2        = args_->stack.embms.use_mcs_table2;
+  {
+    uint8_t sp = args_->stack.embms.mch_sched_period_rf;
+    static const uint8_t valid_sp[] = {4, 8, 16, 32, 64};
+    bool sp_ok = false;
+    for (uint8_t v : valid_sp) { if (sp == v) { sp_ok = true; break; } }
+    if (!sp_ok) {
+      ERROR("embms.mch_sched_period_rf %d is not valid (must be 4, 8, 16, 32, or 64) — setting to 64", sp);
+      sp = 64u;
+    }
+    rrc_cfg_->mch_sched_period_rf = sp;
+  }
+  rrc_cfg_->nof_mbms_sessions          = (args_->stack.embms.nof_mbms_sessions > 0 &&
+                                          args_->stack.embms.nof_mbms_sessions <= 8)
+                                             ? args_->stack.embms.nof_mbms_sessions : 1u;
+  rrc_cfg_->pmch_time_separation_sl2   = args_->stack.embms.pmch_time_separation_sl2;
+  {
+    const std::string& scs = args_->stack.embms.pmch_subcarrier_spacing;
+    if (!scs.empty() && scs != "khz1dot25" && scs != "khz2dot5" && scs != "khz7dot5" && scs != "khz0dot37") {
+      ERROR("embms.subcarrier_spacing \"%s\" not valid — must be khz1dot25/khz2dot5/khz7dot5/khz0dot37 or empty",
+            scs.c_str());
+      rrc_cfg_->pmch_subcarrier_spacing = "";
+    } else {
+      rrc_cfg_->pmch_subcarrier_spacing = scs;
+    }
+  }
+  if (rrc_cfg_->pmch_time_interleaving_n > 1 &&
+      rrc_cfg_->pmch_time_interleaving_m < rrc_cfg_->pmch_time_interleaving_n) {
+    ERROR("embms.time_interleaving_m (%d) must be >= embms.time_interleaving_n (%d) — clamping M to N",
+          rrc_cfg_->pmch_time_interleaving_m, rrc_cfg_->pmch_time_interleaving_n);
+    rrc_cfg_->pmch_time_interleaving_m = rrc_cfg_->pmch_time_interleaving_n;
+  }
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): same startup-time
+   * validation style as the main N/M above, mirrored in rrc::reconfigure_embms()
+   * for the live-reload path. N-last also legally accepts 1 (n1), unlike main N. */
+  rrc_cfg_->pmch_time_interleaving_n_last_mtch = args_->stack.embms.time_interleaving_n_last_mtch;
+  rrc_cfg_->pmch_time_interleaving_m_last_mtch = args_->stack.embms.time_interleaving_m_last_mtch;
+  if (rrc_cfg_->pmch_time_interleaving_n_last_mtch > 0) {
+    static const uint8_t valid_n_last[] = {1, 2, 4, 8, 16};
+    bool                 n_last_ok      = false;
+    for (uint8_t v : valid_n_last) {
+      if (rrc_cfg_->pmch_time_interleaving_n_last_mtch == v) {
+        n_last_ok = true;
+        break;
+      }
+    }
+    if (!n_last_ok) {
+      ERROR("embms.time_interleaving_n_last_mtch=%u is not valid (must be 1, 2, 4, 8, or 16) — disabling LastMTCH "
+            "time interleaving override",
+            rrc_cfg_->pmch_time_interleaving_n_last_mtch);
+      rrc_cfg_->pmch_time_interleaving_n_last_mtch = 0;
+      rrc_cfg_->pmch_time_interleaving_m_last_mtch = 0;
+    } else if (rrc_cfg_->pmch_time_interleaving_n <= 1) {
+      ERROR("embms.time_interleaving_n_last_mtch=%u set but embms.time_interleaving_n=%u (time interleaving "
+            "disabled) — LastMTCH override has nothing to override; ignoring",
+            rrc_cfg_->pmch_time_interleaving_n_last_mtch, rrc_cfg_->pmch_time_interleaving_n);
+      rrc_cfg_->pmch_time_interleaving_n_last_mtch = 0;
+      rrc_cfg_->pmch_time_interleaving_m_last_mtch = 0;
+    } else if (rrc_cfg_->nof_mbms_sessions <= 1) {
+      ERROR("embms.time_interleaving_n_last_mtch=%u set but embms.nof_mbms_sessions=%u — LastMTCH only makes sense "
+            "with 2+ sessions on this PMCH; ignoring",
+            rrc_cfg_->pmch_time_interleaving_n_last_mtch, rrc_cfg_->nof_mbms_sessions);
+      rrc_cfg_->pmch_time_interleaving_n_last_mtch = 0;
+      rrc_cfg_->pmch_time_interleaving_m_last_mtch = 0;
+    }
+  }
+  if (rrc_cfg_->pmch_time_interleaving_n_last_mtch > 1 && rrc_cfg_->pmch_time_interleaving_m_last_mtch > 0) {
+    static const uint8_t valid_m_last[] = {4, 8, 16, 32};
+    bool                 m_last_ok      = false;
+    for (uint8_t v : valid_m_last) {
+      if (rrc_cfg_->pmch_time_interleaving_m_last_mtch == v) {
+        m_last_ok = true;
+        break;
+      }
+    }
+    if (!m_last_ok) {
+      ERROR("embms.time_interleaving_m_last_mtch=%u is not valid (must be 4, 8, 16, or 32) — falling back to the "
+            "main embms.time_interleaving_m=%u for the last MTCH",
+            rrc_cfg_->pmch_time_interleaving_m_last_mtch, rrc_cfg_->pmch_time_interleaving_m);
+      rrc_cfg_->pmch_time_interleaving_m_last_mtch = 0;
+    }
+  }
+
+  /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping): mandatory
+   * sibling of time_interleaving_n/m whenever N>1 (see rrc.cc pack_mcch()), so only
+   * parse/validate when that's actually the case -- otherwise leave the header's
+   * defaults (category 4, beta=one) in rrc_cfg_, matching pmch_info_t's own defaults. */
+  if (rrc_cfg_->pmch_time_interleaving_n > 1) {
+    uint16_t cat = args_->stack.embms.n_soft_ref_category;
+    if (cat == 0 || cat > 15) {
+      ERROR("embms.n_soft_ref_category=%u is not a valid TS 36.306 UE DL category (1-15) — defaulting to 4",
+            cat);
+      cat = 4;
+    }
+    rrc_cfg_->pmch_n_soft_ref_category = (uint8_t)cat;
+
+    uint8_t beta_num = 1, beta_den = 1;
+    if (!args_->stack.embms.scaling_factor_beta.empty() &&
+        !srsran::pmch_scaling_factor_beta_by_name(args_->stack.embms.scaling_factor_beta, &beta_num, &beta_den)) {
+      ERROR("embms.scaling_factor_beta=\"%s\" is not a valid PMCH-SoftBufferSizeParameters-r19 token "
+            "(one32nd/one5th/one3rd/three8th/five12th/onehalf/five8th/two3rd/five6th/one) — defaulting to \"one\"",
+            args_->stack.embms.scaling_factor_beta.c_str());
+      beta_num = 1;
+      beta_den = 1;
+    }
+    rrc_cfg_->pmch_scaling_factor_beta_num = beta_num;
+    rrc_cfg_->pmch_scaling_factor_beta_den = beta_den;
+  }
 
   // Check number of control symbols
   if (args_->stack.mac.sched.min_nof_ctrl_symbols > args_->stack.mac.sched.max_nof_ctrl_symbols) {
@@ -1704,11 +1964,28 @@ int parse_sib1_mbms(std::string filename, sib_type1_mbms_r14_s* data)
 
   sib1.add_field(make_asn1_enum_number_parser("si_window_length", &data->si_win_len_r14));
   sib1.add_field(new parser::field<uint8_t>("system_info_value_tag", &data->sys_info_value_tag_r14));
+  // Optional: q_rx_lev_min for cellSelectionInfo-r14 (TS 36.331 §6.3.7 Q-RxLevMin, range -70..-22).
+  // Default -60 (= -120 dBm RSRP) is used if absent from the config file.
+  bool  q_rx_lev_min_present = false;
+  auto* q_rx_lev_min_f = new parser::field<int8_t>("q_rx_lev_min", &data->q_rx_lev_min_r14, &q_rx_lev_min_present);
+  sib1.add_field(q_rx_lev_min_f);
 
   // sched_info subsection uses a custom field class
   parser::section sched_info("sched_info");
   sib1.add_subsection(&sched_info);
   sched_info.add_field(new field_sched_info(data));
+
+  // Optional: non-MBSFN subframe allocation (hybrid FeMBMS/unicast carriers only).
+  // Absent means all subframes are MBSFN, which is correct for dedicated broadcast.
+  parser::section non_mbsfn_sf("non_mbsfn_sf_cfg");
+  sib1.add_subsection(&non_mbsfn_sf);
+  non_mbsfn_sf.set_optional(&data->non_mbsfn_sf_cfg_r14_present);
+  non_mbsfn_sf.add_field(make_asn1_enum_number_parser("radio_frame_alloc_period",
+                                                       &data->non_mbsfn_sf_cfg_r14.radio_frame_alloc_period_r14));
+  non_mbsfn_sf.add_field(new parser::field<uint8_t>("radio_frame_alloc_offset",
+                                                     &data->non_mbsfn_sf_cfg_r14.radio_frame_alloc_offset_r14));
+  non_mbsfn_sf.add_field(make_asn1_bitstring_number_parser("subframe_allocation",
+                                                            &data->non_mbsfn_sf_cfg_r14.sf_alloc_r14));
 
   // Run parser with single section
   return parser::parse_section(std::move(filename), &sib1);
@@ -2036,6 +2313,297 @@ int parse_sib9(std::string filename, sib_type9_s* data)
   }
 }
 
+int parse_sib10(const std::string& filename, sib_type10_s* data)
+{
+  Config cfg;
+  try {
+    cfg.readFile(filename.c_str());
+  } catch (const FileIOException&) {
+    fprintf(stderr, "parse_sib10: cannot read %s\n", filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const ParseException& e) {
+    fprintf(stderr, "parse_sib10: parse error in %s line %d: %s\n", filename.c_str(), e.getLine(), e.getError());
+    return SRSRAN_ERROR;
+  }
+  if (!cfg.getRoot().exists("sib10")) {
+    return SRSRAN_SUCCESS;
+  }
+  try {
+    const Setting& s = cfg.getRoot()["sib10"];
+
+    int msg_id = 0x1100;
+    s.lookupValue("message_identifier", msg_id);
+    data->msg_id.data()[0] = (uint8_t)((msg_id >> 8) & 0xFF);
+    data->msg_id.data()[1] = (uint8_t)(msg_id & 0xFF);
+
+    int serial = 0x3000;
+    s.lookupValue("serial_number", serial);
+    data->serial_num.data()[0] = (uint8_t)((serial >> 8) & 0xFF);
+    data->serial_num.data()[1] = (uint8_t)(serial & 0xFF);
+
+    // warning_type: 2 bytes per TS 23.041 §9.3.24
+    // Byte 1 bits 8..5: warning type value (0=earthquake,1=tsunami,2=EQ+tsunami,3=test,4=other)
+    // Byte 1 bit  4:    emergency user alert flag
+    // Byte 2:           reserved (0x00)
+    int wt = 0x0000;
+    s.lookupValue("warning_type", wt);
+    data->warning_type.data()[0] = (uint8_t)((wt >> 8) & 0xFF);
+    data->warning_type.data()[1] = (uint8_t)(wt & 0xFF);
+
+  } catch (const SettingNotFoundException& e) {
+    fprintf(stderr, "parse_sib10: missing setting %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const SettingTypeException& e) {
+    fprintf(stderr, "parse_sib10: type error for %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  }
+  return SRSRAN_SUCCESS;
+}
+
+int parse_sib11(const std::string& filename, sib_type11_s* data)
+{
+  Config cfg;
+  try {
+    cfg.readFile(filename.c_str());
+  } catch (const FileIOException&) {
+    fprintf(stderr, "parse_sib11: cannot read %s\n", filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const ParseException& e) {
+    fprintf(stderr, "parse_sib11: parse error in %s line %d: %s\n", filename.c_str(), e.getLine(), e.getError());
+    return SRSRAN_ERROR;
+  }
+  if (!cfg.getRoot().exists("sib11")) {
+    return SRSRAN_SUCCESS;
+  }
+  try {
+    const Setting& s = cfg.getRoot()["sib11"];
+
+    int msg_id = 0x1100;
+    s.lookupValue("message_identifier", msg_id);
+    data->msg_id.data()[0] = (uint8_t)((msg_id >> 8) & 0xFF);
+    data->msg_id.data()[1] = (uint8_t)(msg_id & 0xFF);
+
+    int serial = 0x3000;
+    s.lookupValue("serial_number", serial);
+    data->serial_num.data()[0] = (uint8_t)((serial >> 8) & 0xFF);
+    data->serial_num.data()[1] = (uint8_t)(serial & 0xFF);
+
+    std::string seg_type = "lastSegment";
+    s.lookupValue("warning_msg_segment_type", seg_type);
+    data->warning_msg_segment_type.value = (seg_type == "notLastSegment")
+        ? sib_type11_s::warning_msg_segment_type_opts::not_last_segment
+        : sib_type11_s::warning_msg_segment_type_opts::last_segment;
+
+    int seg_num = 0;
+    s.lookupValue("warning_msg_segment_num", seg_num);
+    data->warning_msg_segment_num = (uint8_t)seg_num;
+
+    int dcs = 0x48;
+    s.lookupValue("data_coding_scheme", dcs);
+    data->data_coding_scheme[0] = (uint8_t)dcs;
+    data->data_coding_scheme_present = true;
+
+    std::string hex_str;
+    if (!s.lookupValue("warning_msg_segment", hex_str)) {
+      fprintf(stderr, "parse_sib11: warning_msg_segment missing in %s\n", filename.c_str());
+      return SRSRAN_ERROR;
+    }
+    hex_str.erase(std::remove_if(hex_str.begin(), hex_str.end(),
+                                 [](unsigned char c) { return std::isspace(c); }),
+                  hex_str.end());
+    if (hex_str.empty() || hex_str.size() % 2 != 0) {
+      fprintf(stderr, "parse_sib11: warning_msg_segment must be a non-empty even-length hex string\n");
+      return SRSRAN_ERROR;
+    }
+    uint32_t n_bytes = (uint32_t)(hex_str.size() / 2);
+    data->warning_msg_segment.resize(n_bytes);
+    for (uint32_t i = 0; i < n_bytes; i++) {
+      unsigned int b = 0;
+      std::stringstream ss;
+      ss << std::hex << hex_str.substr(i * 2, 2);
+      ss >> b;
+      data->warning_msg_segment[i] = (uint8_t)b;
+    }
+  } catch (const SettingNotFoundException& e) {
+    fprintf(stderr, "parse_sib11: missing setting %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const SettingTypeException& e) {
+    fprintf(stderr, "parse_sib11: type error for %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  }
+  return SRSRAN_SUCCESS;
+}
+
+int parse_sib15(const std::string& filename, sib_type15_r11_s* data)
+{
+  Config cfg;
+  try {
+    cfg.readFile(filename.c_str());
+  } catch (const FileIOException&) {
+    fprintf(stderr, "parse_sib15: cannot read %s\n", filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const ParseException& e) {
+    fprintf(stderr, "parse_sib15: parse error in %s line %d: %s\n", filename.c_str(), e.getLine(), e.getError());
+    return SRSRAN_ERROR;
+  }
+  if (!cfg.getRoot().exists("sib15")) {
+    return SRSRAN_SUCCESS;
+  }
+  try {
+    const Setting& s = cfg.getRoot()["sib15"];
+    if (s.exists("mbms_sai_intra_freq")) {
+      const Setting& sai_list = s["mbms_sai_intra_freq"];
+      uint32_t n = (uint32_t)sai_list.getLength();
+      data->mbms_sai_intra_freq_r11.resize(n);
+      for (uint32_t i = 0; i < n; i++) {
+        data->mbms_sai_intra_freq_r11[i] = (uint32_t)(int)sai_list[(int)i];
+      }
+      data->mbms_sai_intra_freq_r11_present = n > 0;
+    }
+    // Rel-14: FeMBMS carrier type (TS 36.331 §6.3.1 SystemInformationBlockType15-r11)
+    // Tells UEs what kind of carrier this is. Default fembms_ded for a dedicated broadcast carrier.
+    std::string carrier_type_str = "fembms_ded";
+    if (s.exists("carrier_type")) {
+      s.lookupValue("carrier_type", carrier_type_str);
+    }
+    data->ext = true;
+    data->mbms_intra_freq_carrier_type_r14.set_present(true);
+    if (carrier_type_str == "fembms_mixed") {
+      data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
+          mbms_carrier_type_r14_s::carrier_type_r14_opts::fembms_mixed;
+    } else if (carrier_type_str == "mbms") {
+      data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
+          mbms_carrier_type_r14_s::carrier_type_r14_opts::mbms;
+    } else {
+      data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
+          mbms_carrier_type_r14_s::carrier_type_r14_opts::fembms_ded;
+    }
+  } catch (const SettingNotFoundException& e) {
+    fprintf(stderr, "parse_sib15: missing setting %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const SettingTypeException& e) {
+    fprintf(stderr, "parse_sib15: type error for %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  }
+  return SRSRAN_SUCCESS;
+}
+
+int parse_sib16(const std::string& filename, sib_type16_r11_s* data)
+{
+  Config cfg;
+  try {
+    cfg.readFile(filename.c_str());
+  } catch (const FileIOException&) {
+    fprintf(stderr, "parse_sib16: cannot read %s\n", filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const ParseException& e) {
+    fprintf(stderr, "parse_sib16: parse error in %s line %d: %s\n", filename.c_str(), e.getLine(), e.getError());
+    return SRSRAN_ERROR;
+  }
+  if (!cfg.getRoot().exists("sib16")) {
+    return SRSRAN_SUCCESS;
+  }
+  try {
+    const Setting& s = cfg.getRoot()["sib16"];
+    if (s.exists("time_info")) {
+      const Setting& ti = s["time_info"];
+      data->time_info_r11_present = true;
+      long long utc_val           = 0;
+      ti.lookupValue("time_info_utc", utc_val);
+      data->time_info_r11.time_info_utc_r11 = (uint64_t)utc_val;
+
+      int leap = 0;
+      if (ti.lookupValue("leap_seconds", leap)) {
+        data->time_info_r11.leap_seconds_r11         = (int16_t)leap;
+        data->time_info_r11.leap_seconds_r11_present = true;
+      }
+      int lto = 0;
+      if (ti.lookupValue("local_time_offset", lto)) {
+        data->time_info_r11.local_time_offset_r11         = (int8_t)lto;
+        data->time_info_r11.local_time_offset_r11_present = true;
+      }
+    }
+  } catch (const SettingNotFoundException& e) {
+    fprintf(stderr, "parse_sib16: missing setting %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const SettingTypeException& e) {
+    fprintf(stderr, "parse_sib16: type error for %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  }
+  return SRSRAN_SUCCESS;
+}
+
+int parse_sib12(const std::string& filename, sib_type12_r9_s* data)
+{
+  Config cfg;
+  try {
+    cfg.readFile(filename.c_str());
+  } catch (const FileIOException&) {
+    fprintf(stderr, "parse_sib12: cannot read %s\n", filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const ParseException& e) {
+    fprintf(stderr, "parse_sib12: parse error in %s line %d: %s\n", filename.c_str(), e.getLine(), e.getError());
+    return SRSRAN_ERROR;
+  }
+  try {
+    const Setting& root = cfg.getRoot()["sib12_alert"];
+
+    int msg_id = 0;
+    root.lookupValue("message_identifier", msg_id);
+    data->msg_id_r9.data()[0] = (uint8_t)((msg_id >> 8) & 0xFF);
+    data->msg_id_r9.data()[1] = (uint8_t)(msg_id & 0xFF);
+
+    int serial = 0;
+    root.lookupValue("serial_number", serial);
+    data->serial_num_r9.data()[0] = (uint8_t)((serial >> 8) & 0xFF);
+    data->serial_num_r9.data()[1] = (uint8_t)(serial & 0xFF);
+
+    std::string seg_type = "lastSegment";
+    root.lookupValue("warning_msg_segment_type", seg_type);
+    data->warning_msg_segment_type_r9.value = (seg_type == "notLastSegment")
+        ? sib_type12_r9_s::warning_msg_segment_type_r9_opts::not_last_segment
+        : sib_type12_r9_s::warning_msg_segment_type_r9_opts::last_segment;
+
+    int seg_num = 0;
+    root.lookupValue("warning_msg_segment_num", seg_num);
+    data->warning_msg_segment_num_r9 = (uint8_t)seg_num;
+
+    int dcs = 0x48;
+    root.lookupValue("data_coding_scheme", dcs);
+    data->data_coding_scheme_r9[0] = (uint8_t)dcs;
+    data->data_coding_scheme_r9_present = true;
+
+    std::string hex_str;
+    if (!root.lookupValue("warning_msg_segment_r9", hex_str)) {
+      fprintf(stderr, "parse_sib12: warning_msg_segment_r9 missing in %s\n", filename.c_str());
+      return SRSRAN_ERROR;
+    }
+    hex_str.erase(std::remove_if(hex_str.begin(), hex_str.end(),
+                                 [](unsigned char c) { return std::isspace(c); }),
+                  hex_str.end());
+    if (hex_str.empty() || hex_str.size() % 2 != 0) {
+      fprintf(stderr, "parse_sib12: warning_msg_segment_r9 must be a non-empty even-length hex string\n");
+      return SRSRAN_ERROR;
+    }
+    uint32_t n_bytes = (uint32_t)(hex_str.size() / 2);
+    data->warning_msg_segment_r9.resize(n_bytes);
+    for (uint32_t i = 0; i < n_bytes; i++) {
+      unsigned int b = 0;
+      std::stringstream ss;
+      ss << std::hex << hex_str.substr(i * 2, 2);
+      ss >> b;
+      data->warning_msg_segment_r9[i] = (uint8_t)b;
+    }
+  } catch (const SettingNotFoundException& e) {
+    fprintf(stderr, "parse_sib12: missing setting %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  } catch (const SettingTypeException& e) {
+    fprintf(stderr, "parse_sib12: type error for %s in %s\n", e.getPath(), filename.c_str());
+    return SRSRAN_ERROR;
+  }
+  return SRSRAN_SUCCESS;
+}
+
 int parse_sib13(std::string filename, sib_type13_r9_s* data)
 {
   parser::section sib13("sib13");
@@ -2085,16 +2653,33 @@ int parse_sib13_r14(std::string filename, sib_type13_r9_s* data)
 int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_config_common)
 {
   // TODO: Leave 0 blank for now
-  sib_type2_s*     sib2  = &rrc_cfg_->sibs[1].set_sib2();
-  sib_type3_s*     sib3  = &rrc_cfg_->sibs[2].set_sib3();
-  sib_type4_s*     sib4  = &rrc_cfg_->sibs[3].set_sib4();
-  sib_type7_s*     sib7  = &rrc_cfg_->sibs[6].set_sib7();
-  sib_type9_s*     sib9  = &rrc_cfg_->sibs[8].set_sib9();
-  sib_type13_r9_s* sib13 = &rrc_cfg_->sibs[12].set_sib13_v920();
+  sib_type2_s*      sib2  = &rrc_cfg_->sibs[1].set_sib2();
+  sib_type10_s*     sib10 = &rrc_cfg_->sibs[9].set_sib10();
+  sib_type11_s*     sib11 = &rrc_cfg_->sibs[10].set_sib11();
+  sib_type13_r9_s*  sib13 = &rrc_cfg_->sibs[12].set_sib13_v920();
+  sib_type15_r11_s* sib15 = &rrc_cfg_->sibs[14].set_sib15_v1130();
+  sib_type16_r11_s* sib16 = &rrc_cfg_->sibs[15].set_sib16_v1130();
 
   sib_type1_mbms_r14_s* sib1 = &rrc_cfg_->sib1;
   if (sib_sections::parse_sib1_mbms(args_->enb_files.sib_config, sib1) != SRSRAN_SUCCESS) {
     return SRSRAN_ERROR;
+  }
+
+  // Restore sys_info_value_tag_r14 from state file if present (persists across restarts)
+  {
+    std::string sib_path = args_->enb_files.sib_config;
+    auto        pos      = sib_path.rfind('/');
+    std::string sib_dir  = (pos != std::string::npos) ? sib_path.substr(0, pos + 1) : "./";
+    rrc_cfg_->sib_tag_state_file = sib_dir + "sib_tag.state";
+
+    FILE* f = fopen(rrc_cfg_->sib_tag_state_file.c_str(), "r");
+    if (f) {
+      unsigned tag_val = 0;
+      if (fscanf(f, "%u", &tag_val) == 1) {
+        sib1->sys_info_value_tag_r14 = (uint8_t)(tag_val & 0x1F);
+      }
+      fclose(f);
+    }
   }
 
   // Fill rest of data from enb config
@@ -2143,43 +2728,34 @@ int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_co
 //    }
   }
 
-  // Generate SIB3 if defined in mapping info
-  if (sib_is_present(sib1->sched_info_list_mbms_r14, sib_type_e::sib_type3)) {
-    if (sib_sections::parse_sib3(args_->enb_files.sib_config, sib3) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
+  // Parse SIB10 (ETWS primary), SIB11 (ETWS secondary), SIB15 (MBMS SAI), SIB16 (UTC time).
+  // Each parser is tolerant: if the section is absent from the config file it returns SUCCESS and
+  // leaves the struct at defaults. Transmission only occurs if the SIB appears in sched_info.
+  if (sib_sections::parse_sib10(args_->enb_files.sib_config, sib10) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
+  }
+  if (sib_sections::parse_sib11(args_->enb_files.sib_config, sib11) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
+  }
+  if (sib_sections::parse_sib15(args_->enb_files.sib_config, sib15) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
+  }
+  if (sib_sections::parse_sib16(args_->enb_files.sib_config, sib16) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
   }
 
-  // Generate SIB4 if defined in mapping info
-  if (sib_is_present(sib1->sched_info_list_mbms_r14, sib_type_e::sib_type4)) {
-    if (sib_sections::parse_sib4(args_->enb_files.sib_config, sib4) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
+  // SIB13 (MBMS session info) — always parsed; also embedded in SIB1-MBMS for quick access
+  if (sib_sections::parse_sib13(args_->enb_files.sib_config, &sib1->sib_type13_r14) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
   }
-
-  // Generate SIB7 if defined in mapping info
-  if (sib_is_present(sib1->sched_info_list_mbms_r14, sib_type_e::sib_type7)) {
-    if (sib_sections::parse_sib7(args_->enb_files.sib_config, sib7) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
+  if (sib_sections::parse_sib13(args_->enb_files.sib_config, sib13) != SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
   }
+  sib1->sib_type13_r14_present = true;
 
-  // Generate SIB9 if defined in mapping info
-  if (sib_is_present(sib1->sched_info_list_mbms_r14, sib_type_e::sib_type9)) {
-    if (sib_sections::parse_sib9(args_->enb_files.sib_config, sib9) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
-  }
-
- // if (sib_is_present(sib1->sched_info_list_mbms_r14, sib_type_e::sib_type13_v920)) {
-    if (sib_sections::parse_sib13(args_->enb_files.sib_config, &sib1->sib_type13_r14) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
-    if (sib_sections::parse_sib13(args_->enb_files.sib_config, sib13) != SRSRAN_SUCCESS) {
-      return SRSRAN_ERROR;
-    }
-    sib1->sib_type13_r14_present = true;
-//  }
+  // SIB1-MBMS pdsch_cfg_common_r14 must carry the same RS power / p_b as SIB2
+  // so UEs can correctly set their downlink receive power reference.
+  sib1->pdsch_cfg_common_r14 = sib2->rr_cfg_common.pdsch_cfg_common;
 
   // Copy PHY common configuration
   phy_config_common->prach_cnfg  = sib2->rr_cfg_common.prach_cfg;
@@ -2187,6 +2763,16 @@ int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_co
   phy_config_common->pusch_cnfg  = sib2->rr_cfg_common.pusch_cfg_common;
   phy_config_common->pucch_cnfg  = sib2->rr_cfg_common.pucch_cfg_common;
   phy_config_common->srs_ul_cnfg = sib2->rr_cfg_common.srs_ul_cfg_common;
+
+  // Resolve sib12_alert_file: explicit override or default next to sib_config
+  if (!args_->enb_files.sib12_alert_file.empty()) {
+    rrc_cfg_->sib12_alert_file = args_->enb_files.sib12_alert_file;
+  } else {
+    std::string sib_path = args_->enb_files.sib_config;
+    auto pos = sib_path.rfind('/');
+    std::string sib_dir = (pos != std::string::npos) ? sib_path.substr(0, pos + 1) : "./";
+    rrc_cfg_->sib12_alert_file = sib_dir + "sib12_alert.conf";
+  }
 
   return 0;
 }

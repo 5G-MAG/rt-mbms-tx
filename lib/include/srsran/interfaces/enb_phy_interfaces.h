@@ -44,6 +44,17 @@ public:
   virtual void set_mch_period_stop(uint32_t stop) = 0;
 
   /**
+   * pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3) cross-layer channel:
+   * tells the PHY, once per scheduling period, where (relative to this PMCH's own
+   * data region) the last of several MTCH sessions' window starts, so PHY can use
+   * a different N/M for just that window. 0 = no distinct last-session window this
+   * period.
+   * @param pmch_idx index into this cell's pmch_info_list
+   * @param start_sf  0-based subframe offset, same convention as mch_subframe_idx
+   */
+  virtual void set_last_mtch_start(uint8_t pmch_idx, uint32_t start_sf) = 0;
+
+  /**
    * Activates and/or deactivates Secondary Cells in the PHY for a given RNTI. Requires the RNTI of the given UE and a
    * vector with the activation/deactivation values. Use true for activation and false for deactivation. The index 0 is
    * reserved for PCell and will not be used.
@@ -62,6 +73,20 @@ public:
   srsran::phy_cfg_mbsfn_t mbsfn_cfg;
 
   virtual void configure_mbsfn(srsran::sib2_mbms_t* sib2, srsran::sib13_t* sib13, const srsran::mcch_msg_t& mcch) = 0;
+
+  /**
+   * Propagates the cell-wide CAS-muting/additionalNonMBSFNSubframes config to PHY's own live
+   * cell state, independent of configure_mbsfn()'s SIB2/SIB13/MCCH content. Without this, a live
+   * eMBMS reconfigure only changes what's *signalled* to UEs (via configure_mbsfn_sibs()'s SIB1/
+   * SIB13 rebuild) while PHY's actual subframe-scheduling logic keeps using the cell config
+   * snapshotted once at startup -- the eNB would tell UEs one CAS-muting pattern while actually
+   * transmitting a different one. Called from rrc::configure_mbsfn_sibs() every time it runs
+   * (including at startup, where it's a harmless no-op re-write of the same boot-time values).
+   */
+  virtual void set_cell_cas_muting_cfg(bool    cas_muting,
+                                       uint8_t k_cas,
+                                       uint8_t n_cas,
+                                       uint8_t additional_non_mbsfn_subframes) = 0;
 
   struct phy_rrc_cfg_t {
     bool              configured = false; ///< Indicates whether PHY shall consider configuring this cell/carrier

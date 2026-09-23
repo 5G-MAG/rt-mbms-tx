@@ -51,6 +51,8 @@ struct erab_to_be_modified_item_bearer_mod_req_s;
 struct cause_c;
 struct erab_item_s;
 struct ue_aggregate_maximum_bitrate_s;
+struct write_replace_warning_request_ies_container;
+struct kill_request_ies_container;
 
 template <class ies_set_paramT_>
 struct protocol_ie_single_container_s;

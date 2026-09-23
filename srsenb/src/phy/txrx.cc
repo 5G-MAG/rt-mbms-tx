@@ -90,9 +90,9 @@ void txrx::run_thread()
 {
   srsran::rf_buffer_t    buffer    = {};
   srsran::rf_timestamp_t timestamp = {};
-  uint32_t               sf_len    = SRSRAN_SF_LEN_PRB(worker_com->get_nof_prb(0));
-
-  float samp_rate = srsran_sampling_freq_hz(worker_com->get_nof_prb(0));
+  int      samp_rate_hz = srsran_sampling_freq_hz_scs(worker_com->get_nof_prb(0), worker_com->params.mbsfn_scs);
+  float    samp_rate    = (float)samp_rate_hz;
+  uint32_t sf_len       = (uint32_t)(samp_rate_hz / 1000);
 
   // Configure radio
   radio_h->set_rx_srate(samp_rate);

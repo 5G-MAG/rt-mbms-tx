@@ -90,6 +90,23 @@ static int ofdm_init_mbsfn_(srsran_ofdm_t* q, srsran_ofdm_cfg_t* cfg, srsran_dft
       q->nof_re            = cfg->nof_prb * SRSRAN_NRE_SCS_1KHZ25;
       q->non_mbsfn_region  = -1;
       break;
+    case SRSRAN_SCS_2KHZ5:
+      /* TS 36.211: 2 OFDM symbols per 1 ms subframe, NscRB=72. */
+      q->nof_symbols_mbsfn = SRSRAN_CP_SCS_2KHZ5_NSYMB;
+      q->nof_re            = cfg->nof_prb * SRSRAN_NRE_SCS_2KHZ5;
+      q->non_mbsfn_region  = -1;
+      break;
+    case SRSRAN_SCS_370HZ_SL4:
+    case SRSRAN_SCS_370HZ_SL2:
+    case SRSRAN_SCS_370HZ:
+      /* TS 36.211: one symbol spans 3 ms (92160 Ts), NscRB=486.
+       * 1 ms srsRAN window covers 1/3 of one symbol — full support requires wider frame. */
+      q->nof_symbols_mbsfn = 1;
+      q->nof_re            = cfg->nof_prb * SRSRAN_NRE_SCS_370HZ;
+      q->non_mbsfn_region  = -1;
+      break;
+    default:
+      break;
   }
 
   q->nof_guards        = (q->cfg.symbol_sz - q->nof_re) / 2U;
@@ -111,8 +128,9 @@ static int ofdm_init_mbsfn_(srsran_ofdm_t* q, srsran_ofdm_cfg_t* cfg, srsran_dft
     }
   }
 
-  // Reallocate temporal buffer only if the new number of resource blocks is bigger than initial
-  if (q->cfg.nof_prb > q->max_prb) {
+  // Reallocate temporal buffer if nof_prb or symbol_sz grew (symbol_sz can grow independently
+  // when SCS changes — e.g. 0.37 kHz has larger Nu than 1.25 kHz for the same nof_prb).
+  if (q->cfg.nof_prb > q->max_prb || q->cfg.symbol_sz > q->max_symbol_sz) {
     // Free before reallocating if allocted
     if (q->tmp) {
       free(q->tmp);
@@ -141,7 +159,8 @@ static int ofdm_init_mbsfn_(srsran_ofdm_t* q, srsran_ofdm_cfg_t* cfg, srsran_dft
       return SRSRAN_ERROR;
     }
 
-    q->max_prb = cfg->nof_prb;
+    q->max_prb       = cfg->nof_prb;
+    q->max_symbol_sz = cfg->symbol_sz;
   }
 
 #ifdef AVOID_GURU
@@ -546,17 +565,34 @@ static void ofdm_rx_slot_mbsfn(srsran_ofdm_t* q, cf_t* input, cf_t* output)
 {
   uint32_t i;
   for (i = 0; i < q->nof_symbols_mbsfn * SRSRAN_MBSFN_NOF_SLOTS(q->cfg.subcarrier_spacing); i++) {
-    if (i == q->non_mbsfn_region) {
+    /* Non-MBSFN guard compensates for the normal→extended CP transition in standard
+     * 15 kHz MBSFN subframes.  FeMBMS SCS types (1.25/2.5/7.5/0.37 kHz) use a fixed
+     * extended-like CP throughout and have no such boundary; skip the guard for them. */
+    if (q->cfg.subcarrier_spacing == SRSRAN_SCS_15KHZ && i == (uint32_t)q->non_mbsfn_region) {
       input += SRSRAN_NON_MBSFN_REGION_GUARD_LENGTH(q->non_mbsfn_region, q->cfg.symbol_sz);
     }
     if (q->cfg.subcarrier_spacing != SRSRAN_SCS_15KHZ) {
-      input += q->cfg.symbol_sz / 4U;
-    } else {
-      if (SRSRAN_CP_ISNORM(q->cfg.cp)) {
-        input += (i >= q->non_mbsfn_region) ? SRSRAN_CP_LEN_EXT(q->cfg.symbol_sz) : SRSRAN_CP_LEN_NORM(i, q->cfg.symbol_sz);
+      /* TS 36.211 Table 6.12-1: CP/Nu = 1/4 for 7.5/1.25/2.5 kHz; 1/9 for 0.37 kHz (CR 0548). */
+      if (SRSRAN_SCS_IS_370HZ(q->cfg.subcarrier_spacing)) {
+        input += q->cfg.symbol_sz / 9U;
       } else {
-        input += SRSRAN_CP_LEN_EXT(q->cfg.symbol_sz);
+        input += q->cfg.symbol_sz / 4U;
       }
+    } else {
+      /* The non-MBSFN region (symbols before non_mbsfn_region) uses normal CP
+       * length and the MBSFN region uses extended CP length, based purely on
+       * the symbol index vs. non_mbsfn_region - this must NOT depend on
+       * q->cfg.cp (the CP configured for this OFDM object's *own* symbols,
+       * e.g. slot 1 - not a statement that the whole grid uses one uniform
+       * CP). A prior version of this function gated the split on
+       * SRSRAN_CP_ISNORM(q->cfg.cp): whenever the object was configured with
+       * SRSRAN_CP_EXT (the common case for MBSFN), RX always assumed extended
+       * CP for the non-MBSFN symbols too, regardless of non_mbsfn_region -
+       * a symbol/sample misalignment that corrupted every MBSFN payload
+       * symbol in slot 0 (see pmch_test's QPSK/16QAM/64QAM cases, which
+       * exercise exactly this srsran_ofdm_tx/rx_init_mbsfn(..., SRSRAN_CP_EXT, ...)
+       * configuration). */
+      input += (i >= q->non_mbsfn_region) ? SRSRAN_CP_LEN_EXT(q->cfg.symbol_sz) : SRSRAN_CP_LEN_NORM(i, q->cfg.symbol_sz);
     }
     srsran_dft_run_c(&q->fft_plan, input, q->tmp);
     memcpy(output, &q->tmp[q->nof_guards], q->nof_re * sizeof(cf_t));
@@ -607,8 +643,10 @@ void srsran_ofdm_rx_sf_ng(srsran_ofdm_t* q, cf_t* input, cf_t* output)
       srsran_ofdm_rx_slot_ng(q, &input[n * q->slot_sz], &output[n * q->nof_re * q->nof_symbols]);
     }
   } else {
-    ofdm_rx_slot_mbsfn(q, q->cfg.in_buffer, q->cfg.out_buffer);
-    ofdm_rx_slot(q, 1);
+    ofdm_rx_slot_mbsfn(q, input, output);
+    if (q->non_mbsfn_region != -1) {
+      ofdm_rx_slot(q, 1);
+    }
   }
 }
 
@@ -687,15 +725,44 @@ static void ofdm_tx_slot(srsran_ofdm_t* q, int slot_in_sf)
 
 void ofdm_tx_slot_mbsfn(srsran_ofdm_t* q, cf_t* input, cf_t* output)
 {
-  uint32_t symbol_sz = q->cfg.symbol_sz;
+  uint32_t symbol_sz  = q->cfg.symbol_sz;
+  /* For FeMBMS SCS (non-15 kHz), nof_symbols_mbsfn counts per-slot; multiply by
+   * SRSRAN_MBSFN_NOF_SLOTS to get the total symbol count per 1 ms subframe — matching
+   * the ofdm_rx_slot_mbsfn loop.  For 15 kHz MBSFN, slot 1 is handled separately by
+   * ofdm_tx_slot(), so keep nof_symbols_mbsfn as-is. */
+  uint32_t total_syms = (q->cfg.subcarrier_spacing != SRSRAN_SCS_15KHZ)
+                        ? q->nof_symbols_mbsfn * SRSRAN_MBSFN_NOF_SLOTS(q->cfg.subcarrier_spacing)
+                        : q->nof_symbols_mbsfn;
 
-  for (uint32_t i = 0; i < q->nof_symbols_mbsfn; i++) {
-    int cp_len = 0; 
+  for (uint32_t i = 0; i < total_syms; i++) {
+    int cp_len = 0;
     if (q->cfg.subcarrier_spacing != SRSRAN_SCS_15KHZ) {
-      cp_len = q->cfg.symbol_sz / 4U;
+      /* FeMBMS SCS (non-15 kHz) never have a PDCCH/non-MBSFN control region at all,
+       * regardless of q->non_mbsfn_region's value: every symbol always uses the
+       * SCS-specific extended CP. The previous is_mbsfn_sym check here (gating on
+       * q->non_mbsfn_region, mirroring the 15 kHz branch below) was live and wrong:
+       * non_mbsfn_region is unconditionally overwritten every subframe from SIB13's
+       * raw non_mbsfn_region_length field by srsenb's phy_common.cc, which only
+       * zeroes it for area_info->subcarrier_spacing explicitly equal to one of
+       * {khz_1dot25, khz_7dot5, khz_0dot37} - an ASN.1 "field not present"/nulltype
+       * value (or khz_2dot5) matches none of those and falls through to the raw
+       * SIB13 value (typically 1 or 2), even though the *same* function's very next
+       * statement (a separate switch on the same field) already defaults that exact
+       * case to 1.25 kHz. That mismatch made this loop's i=0 symbol take the
+       * SRSRAN_CP_LEN_NORM(0, symbol_sz)=960-sample branch instead of the correct
+       * 3072-sample extended CP for 1.25 kHz @ 50 PRB - a 2112-sample underwrite at
+       * the end of every 1.25 kHz MBSFN symbol, corrupting the tail of the
+       * transmitted waveform while leaving TX's own resource-grid content and the
+       * IFFT math themselves provably correct (both independently verified this
+       * session). ofdm_rx_slot_mbsfn already treats this unconditionally for
+       * non-15 kHz SCS (symbol_sz/4 or /9, no non_mbsfn_region check) - this makes
+       * TX match that, rather than depending on non_mbsfn_region being correctly
+       * zeroed upstream for every possible SIB13 configuration. TS 36.211 Table
+       * 6.12-1: CP/Nu = 1/4 for 7.5/1.25/2.5 kHz; 1/9 for 0.37 kHz (CR 0548). */
+      cp_len = SRSRAN_SCS_IS_370HZ(q->cfg.subcarrier_spacing) ? (int)(symbol_sz / 9U) : SRSRAN_CP_LEN_EXT(symbol_sz);
     } else {
       if (SRSRAN_CP_ISNORM(q->cfg.cp)) {
-        cp_len = (i > (q->non_mbsfn_region - 1)) ? SRSRAN_CP_LEN_EXT(symbol_sz) : SRSRAN_CP_LEN_NORM(i, symbol_sz);
+        cp_len = (q->non_mbsfn_region < 0 || (int)i >= q->non_mbsfn_region) ? SRSRAN_CP_LEN_EXT(symbol_sz) : SRSRAN_CP_LEN_NORM(i, symbol_sz);
       } else {
         cp_len = SRSRAN_CP_LEN_EXT(q->cfg.symbol_sz);
       }

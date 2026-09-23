@@ -3392,6 +3392,193 @@ struct rf_params_v1570_s {
   void        to_json(json_writer& j) const;
 };
 
+// MBMS-SupportedBandInfo-v1900 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757, Rel-19).
+// Per-band capability entry: cas-Muting-5GB-r19 (CR 1916) plus time interleaving,
+// cyclic-shift-alpha1/2/3, and frequency interleaving support (CR 1920/1934). This
+// struct was previously a flat mbms_params_v1900_s with only cas_muting_5gb_r19 -
+// the spec nests all of this one level down, per E-UTRA band, inside a list.
+struct mbms_supported_band_info_v1900_s {
+  struct time_interleaving_r19_s_ {
+    bool time_interleaving_khz15_r19_present     = false;
+    bool time_interleaving_khz7dot5_r19_present  = false;
+    bool time_interleaving_khz2dot5_r19_present  = false;
+    bool time_interleaving_khz1dot25_r19_present = false;
+  };
+  struct freq_interleaving_r19_s_ {
+    bool freq_interleaving_khz15_r19_present     = false;
+    bool freq_interleaving_khz7dot5_r19_present  = false;
+    bool freq_interleaving_khz2dot5_r19_present  = false;
+    bool freq_interleaving_khz1dot25_r19_present = false;
+  };
+
+  // member variables
+  bool                     cas_muting_5gb_r19_present           = false;
+  bool                     time_interleaving_r19_present        = false;
+  time_interleaving_r19_s_ time_interleaving_r19;
+  bool                     pmch_cyclic_shift_alpha1_r19_present = false;
+  bool                     pmch_cyclic_shift_alpha2_r19_present = false;
+  bool                     pmch_cyclic_shift_alpha3_r19_present = false;
+  bool                     freq_interleaving_r19_present        = false;
+  freq_interleaving_r19_s_ freq_interleaving_r19;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBMS-SupportedBandInfoList-v1900 ::= SEQUENCE (SIZE (1..maxBands)) OF MBMS-SupportedBandInfo-v1900
+using mbms_supported_band_info_list_v1900_l = dyn_array<mbms_supported_band_info_v1900_s>;
+
+// MBMS-Parameters-v1900 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757, Rel-19)
+struct mbms_params_v1900_s {
+  bool                                   mbms_supported_band_info_list_v1900_present = false;
+  mbms_supported_band_info_list_v1900_l  mbms_supported_band_info_list_v1900;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// UE-EUTRA-Capability-v1900-IEs ::= SEQUENCE
+struct ue_eutra_cap_v1900_ies_s {
+  bool                mbms_params_v1900_present = false;
+  mbms_params_v1900_s mbms_params_v1900;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBMS-SupportedBandInfo-r16 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757's reproduced
+// baseline text, Rel-16). Corrected July 2026: this codebase previously modeled
+// MBMS-Parameters-v1610 as a flat struct with mbms-ScalingFactor0dot37/timeSeparation
+// fields folded directly into it - matching an earlier draft of the CR. Cross-checked
+// against R2-2508757 (the most recent MBMS-related 36.331 CR on disk, which reproduces
+// the full current clause even for unrelated edits): as of that baseline,
+// subcarrierSpacingMBMS-khz2dot5/-khz0dot37 (and, nested under -khz0dot37,
+// timeSeparationSlot2/4) are reported per E-UTRA band via this struct, matching the
+// same MBMS-SupportedBandInfoList pattern later reused (and NOT wrongly assumed here
+// by copying) for v1700/v1900 - see mbms_supported_band_info_v1900_s's own comment.
+struct mbms_supported_band_info_r16_s {
+  struct subcarrier_spacing_mbms_khz0dot37_r16_s_ {
+    bool time_separation_slot2_r16_present = false;
+    bool time_separation_slot4_r16_present = false;
+  };
+
+  // member variables
+  bool                                      subcarrier_spacing_mbms_khz2dot5_r16_present  = false;
+  bool                                      subcarrier_spacing_mbms_khz0dot37_r16_present = false;
+  subcarrier_spacing_mbms_khz0dot37_r16_s_  subcarrier_spacing_mbms_khz0dot37_r16;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBMS-SupportedBandInfoList-r16 ::= SEQUENCE (SIZE (1..maxBands)) OF MBMS-SupportedBandInfo-r16
+using mbms_supported_band_info_list_r16_l = dyn_array<mbms_supported_band_info_r16_s>;
+
+// MBMS-Parameters-v1610 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757's reproduced
+// baseline text, Rel-16). mbms-ScalingFactor2dot5/0dot37 stay direct (UE-wide) fields
+// here - only the per-band subcarrier-spacing/time-separation support flags moved into
+// mbms_supported_band_info_list_r16 (see above). The list itself has no OPTIONAL
+// marker in the reproduced ASN.1, unlike its v1700/v1900 counterparts - modeled as
+// mandatory (no _present flag) accordingly.
+struct mbms_params_v1610_s {
+  struct mbms_scaling_factor2dot5_r16_opts {
+    enum options { n2, n4, n6, n8, nulltype } value;
+    typedef uint8_t number_type;
+
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<mbms_scaling_factor2dot5_r16_opts> mbms_scaling_factor2dot5_r16_e_;
+  struct mbms_scaling_factor0dot37_r16_opts {
+    enum options { n12, n16, n20, n24, nulltype } value;
+    typedef uint8_t number_type;
+
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<mbms_scaling_factor0dot37_r16_opts> mbms_scaling_factor0dot37_r16_e_;
+
+  // member variables
+  bool                                 mbms_scaling_factor2dot5_r16_present  = false;
+  bool                                 mbms_scaling_factor0dot37_r16_present = false;
+  mbms_scaling_factor2dot5_r16_e_      mbms_scaling_factor2dot5_r16;
+  mbms_scaling_factor0dot37_r16_e_     mbms_scaling_factor0dot37_r16;
+  mbms_supported_band_info_list_r16_l  mbms_supported_band_info_list_r16;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBMS-SupportedBandInfo-v1700 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757, Rel-17).
+// Per-band capability entry: pmch-Bandwidth-n40/35/30-r17 (extended MBSFN bandwidth
+// support, TS 36.211/36.213). Previously not modeled in this codebase at all.
+struct mbms_supported_band_info_v1700_s {
+  bool pmch_bandwidth_n40_r17_present = false;
+  bool pmch_bandwidth_n35_r17_present = false;
+  bool pmch_bandwidth_n30_r17_present = false;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBMS-SupportedBandInfoList-v1700 ::= SEQUENCE (SIZE (1..maxBands)) OF MBMS-SupportedBandInfo-v1700
+using mbms_supported_band_info_list_v1700_l = dyn_array<mbms_supported_band_info_v1700_s>;
+
+// MBMS-Parameters-v1700 ::= SEQUENCE (TS 36.331 CR 5168 R2-2508757, Rel-17)
+struct mbms_params_v1700_s {
+  bool                                   mbms_supported_band_info_list_v1700_present = false;
+  mbms_supported_band_info_list_v1700_l  mbms_supported_band_info_list_v1700;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// UE-EUTRA-Capability-v1700-IEs ::= SEQUENCE. The real spec chain has several
+// intermediate IEs between v1610 and v1700 (v1630/v1650/v1660/v1690) that carry no
+// MBMS-related fields and are not modeled in this codebase (same simplification
+// already used for the v15a0->v1610->v1900 chain - see mbms_params_v1900_s's own
+// history). mbms_params_v1700 has no OPTIONAL marker on it in the reproduced ASN.1
+// (unlike mbms_params_v1610/v1900 above it and below it in the real chain), so it's
+// modeled as mandatory here too - unusual for a version-extension IEs container, but
+// that's what the reproduced text shows.
+struct ue_eutra_cap_v1700_ies_s {
+  bool                     non_crit_ext_present = false;
+  mbms_params_v1700_s      mbms_params_v1700;
+  ue_eutra_cap_v1900_ies_s non_crit_ext;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// UE-EUTRA-Capability-v1610-IEs ::= SEQUENCE
+struct ue_eutra_cap_v1610_ies_s {
+  bool                     mbms_params_v1610_present = false;
+  bool                     non_crit_ext_present      = false;
+  mbms_params_v1610_s      mbms_params_v1610;
+  ue_eutra_cap_v1700_ies_s non_crit_ext;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
 // UE-EUTRA-Capability-v15a0-IEs ::= SEQUENCE
 struct ue_eutra_cap_v15a0_ies_s {
   bool                                     eutra_minus5_gc_params_r15_present = false;
@@ -3402,6 +3589,7 @@ struct ue_eutra_cap_v15a0_ies_s {
   eutra_minus5_gc_params_r15_s             eutra_minus5_gc_params_r15;
   ue_eutra_cap_add_xdd_mode_v15a0_s        fdd_add_ue_eutra_cap_v15a0;
   ue_eutra_cap_add_xdd_mode_v15a0_s        tdd_add_ue_eutra_cap_v15a0;
+  ue_eutra_cap_v1610_ies_s                 non_crit_ext;
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;

@@ -99,6 +99,28 @@ SRSRAN_API int srsran_dlsch_decode2(srsran_sch_t*       q,
                                     int                 codeword_idx,
                                     uint32_t            nof_layers);
 
+/* TS 36.212 §5.1.4.1.2 encode/decode for MCH configured with
+ * pmch-TimeInterleaving-N. rv_idx is this subframe's position within its own
+ * N-span (0..N-1, NOT a 0-3 HARQ rv); e_min is TS 36.212 §5.1.4.1.2's
+ * E_min = N_L*Qm*floor(G'/C) for this TB (N_L=1 always for PMCH). n_cb_cap is
+ * the pre-computed N_cb = min(floor(N_IR/C), K_w) soft-buffer limitation (0 =
+ * no real cap available, fall back to the uncapped K_w). */
+SRSRAN_API int srsran_dlsch_encode_mch(srsran_sch_t*       q,
+                                       srsran_pdsch_cfg_t* cfg,
+                                       uint8_t*            data,
+                                       uint8_t*            e_bits,
+                                       uint32_t            rv_idx,
+                                       uint32_t            e_min,
+                                       uint32_t            n_cb_cap);
+
+SRSRAN_API int srsran_dlsch_decode_mch(srsran_sch_t*       q,
+                                       srsran_pdsch_cfg_t* cfg,
+                                       int16_t*            e_bits,
+                                       uint8_t*            data,
+                                       uint32_t            rv_idx,
+                                       uint32_t            e_min,
+                                       uint32_t            n_cb_cap);
+
 SRSRAN_API int srsran_ulsch_encode(srsran_sch_t*       q,
                                    srsran_pusch_cfg_t* cfg,
                                    uint8_t*            data,

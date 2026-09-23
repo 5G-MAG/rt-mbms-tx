@@ -18,5 +18,5 @@
 # and at http://www.gnu.org/licenses/.
 #
 
-file(GLOB SOURCES "*.cc")
-add_library(srsepc_mbms_gw STATIC ${SOURCES})
+set(SOURCES m3ap.cc)
+add_library(srsenb_m3ap STATIC ${SOURCES})

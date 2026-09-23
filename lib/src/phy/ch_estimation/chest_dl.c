@@ -121,7 +121,8 @@ int srsran_chest_dl_init(srsran_chest_dl_t* q, uint32_t max_prb, uint32_t nof_rx
       goto clean_exit;
     }
 
-    if (srsran_interp_linear_vector_init(&q->srsran_interp_linvec,  SRSRAN_NRE_SCS(SRSRAN_SCS_1KHZ25) * max_prb)) {
+    /* Size linvec for the widest SCS (0.37 kHz: 486 sc/PRB). Smaller SCS resize down later. */
+    if (srsran_interp_linear_vector_init(&q->srsran_interp_linvec, SRSRAN_NRE_SCS_370HZ * max_prb)) {
       ERROR("Error initializing vector interpolator");
       goto clean_exit;
     }
@@ -136,9 +137,25 @@ int srsran_chest_dl_init(srsran_chest_dl_t* q, uint32_t max_prb, uint32_t nof_rx
       goto clean_exit;
     }
 
-    if (srsran_interp_linear_init(&q->srsran_interp_lin_mbsfn, 24 * max_prb,  SRSRAN_NRE_SCS(SRSRAN_SCS_1KHZ25) / 24)) {
-      ERROR("Error initializing interpolator");
-      goto clean_exit;
+    /* Size for the largest MBSFN SCS. SL2 (step 6) has the most pilots:
+     * floor(486*max_prb/6) points; SL4 (step 12) has floor(486*max_prb/12); the
+     * 1.25 kHz case uses 24*max_prb points at step 6. Take the maximum of all three so
+     * set_mbsfn_area_id can resize to any of them (2025 at 25 PRB for SL2 is the true
+     * max). M=12 covers every case (resize to M=6 is always allowed since 6 <= 12). */
+    {
+      uint32_t sl4_max_pilots = (SRSRAN_NRE_SCS_370HZ * max_prb) / 12u;
+      uint32_t sl2_max_pilots = (SRSRAN_NRE_SCS_370HZ * max_prb) / 6u;
+      uint32_t mbsfn_max_pts  = sl4_max_pilots;
+      if (sl2_max_pilots > mbsfn_max_pts) {
+        mbsfn_max_pts = sl2_max_pilots;
+      }
+      if (24u * max_prb > mbsfn_max_pts) {
+        mbsfn_max_pts = 24u * max_prb;
+      }
+      if (srsran_interp_linear_init(&q->srsran_interp_lin_mbsfn, mbsfn_max_pts, 12u)) {
+        ERROR("Error initializing interpolator");
+        goto clean_exit;
+      }
     }
 
     q->wiener_dl = calloc(sizeof(srsran_wiener_dl_t), 1);
@@ -207,7 +224,12 @@ void srsran_chest_dl_free(srsran_chest_dl_t* q)
 
 int srsran_chest_dl_res_init(srsran_chest_dl_res_t* q, uint32_t max_prb)
 {
-  return srsran_chest_dl_res_init_re(q, SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
+  /* 0.37 kHz (SL2/SL4): 486 sc/PRB × 1 symbol/subframe = 486*prb RE, capped at 75 PRBs.
+   * For 75 PRBs that is 36450, exceeding the standard NORM-CP grid of 16800 for 100 PRBs. */
+  uint32_t sl4_prb = (max_prb <= 75u) ? max_prb : 75u;
+  uint32_t sl4_re  = SRSRAN_NRE_SCS_370HZ * sl4_prb;
+  uint32_t std_re  = SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM);
+  return srsran_chest_dl_res_init_re(q, (sl4_re > std_re) ? sl4_re : std_re);
 }
 
 int srsran_chest_dl_res_init_re(srsran_chest_dl_res_t* q, uint32_t nof_re)
@@ -266,20 +288,59 @@ int srsran_chest_dl_set_mbsfn_area_id(srsran_chest_dl_t* q, uint16_t mbsfn_area_
     ERROR("Error initializing vector interpolator\n");
     return SRSRAN_ERROR;
   }
-  if (srsran_interp_linear_resize(&q->srsran_interp_lin_mbsfn, srsran_refsignal_mbsfn_rs_per_symbol(subcarrier_spacing) *
-        q->cell.nof_prb, SRSRAN_NRE_SCS(subcarrier_spacing) / srsran_refsignal_mbsfn_rs_per_symbol(subcarrier_spacing))) {
-    fprintf(stderr, "Error initializing interpolator\n");
-    return SRSRAN_ERROR;
+  /* SL4/SL2 RS are globally spaced at step 12/6 across the full carrier. Use the exact
+   * total pilot count (floor division) so the interpolator doesn't read past the filled
+   * portion of pilot_estimates. The 486/41=11 formula (ceiling RS per PRB) is wrong.
+   * Use act_prb (mbsfn_prb or nof_prb) to match get_sf/put_sf and the CE result buffer
+   * allocation, which is sized to act_prb*486, not nof_prb*486. */
+  uint32_t act_prb_sm = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+  if (subcarrier_spacing == SRSRAN_SCS_370HZ_SL4) {
+    uint32_t total_pilots = (SRSRAN_NRE_SCS_370HZ * act_prb_sm) / 12u;
+    if (srsran_interp_linear_resize(&q->srsran_interp_lin_mbsfn, total_pilots, 12u)) {
+      fprintf(stderr, "Error initializing interpolator for SL4\n");
+      return SRSRAN_ERROR;
+    }
+  } else if (subcarrier_spacing == SRSRAN_SCS_370HZ_SL2) {
+    uint32_t total_pilots = (SRSRAN_NRE_SCS_370HZ * act_prb_sm) / 6u;
+    if (srsran_interp_linear_resize(&q->srsran_interp_lin_mbsfn, total_pilots, 6u)) {
+      fprintf(stderr, "Error initializing interpolator for SL2\n");
+      return SRSRAN_ERROR;
+    }
+  } else {
+    if (srsran_interp_linear_resize(&q->srsran_interp_lin_mbsfn,
+          srsran_refsignal_mbsfn_rs_per_symbol(subcarrier_spacing) * q->cell.nof_prb,
+          SRSRAN_NRE_SCS(subcarrier_spacing) / srsran_refsignal_mbsfn_rs_per_symbol(subcarrier_spacing))) {
+      fprintf(stderr, "Error initializing interpolator\n");
+      return SRSRAN_ERROR;
+    }
   }
   if (mbsfn_area_id < SRSRAN_MAX_MBSFN_AREA_IDS) {
+    /* Regenerate the reference sequence content every call, not just the first time
+     * this area_id is seen. q->mbsfn_refs[area_id] is shared across every scs that
+     * ever uses this area_id (e.g. an eNB using one area_id for both 15 kHz MTCH data
+     * and 1.25 kHz MCCH, as this fork does) - the old "only init once" guard here left
+     * the buffers correctly *sized* (after the allocation fix above) but still holding
+     * whichever scs's reference sequence was generated on the FIRST call for this
+     * area_id, silently reused for every other scs afterwards. The LS channel estimate
+     * (received pilot * conj(known pilot)) then reflects a sequence mismatch rather
+     * than the true channel, which is what actually broke MCCH decode on the modem app
+     * (receive-only, so this path is only ever live there): the resulting "channel
+     * estimate" had smoothly-varying but wrong magnitude (tens instead of ~1 for a
+     * unity-gain loopback channel) instead of being obviously garbage, so it wasn't
+     * caught by the earlier out-of-bounds fix (which only addressed the crash/
+     * undersized-buffer symptom, not this separate content-reuse bug). This function
+     * is only ever called on an actual scs transition (or once at startup), never
+     * per-subframe, so regenerating here is not a hot path. */
     if (!q->mbsfn_refs[mbsfn_area_id]) {
       q->mbsfn_refs[mbsfn_area_id] = calloc(1, sizeof(srsran_refsignal_t));
-      if (srsran_refsignal_mbsfn_init(q->mbsfn_refs[mbsfn_area_id], q->cell.nof_prb, subcarrier_spacing)) {
-        return SRSRAN_ERROR;
-      }
-      if (srsran_refsignal_mbsfn_set_cell(q->mbsfn_refs[mbsfn_area_id], q->cell, mbsfn_area_id, subcarrier_spacing)) {
-        return SRSRAN_ERROR;
-      }
+    } else {
+      srsran_refsignal_free(q->mbsfn_refs[mbsfn_area_id]);
+    }
+    if (srsran_refsignal_mbsfn_init(q->mbsfn_refs[mbsfn_area_id], q->cell.nof_prb, subcarrier_spacing)) {
+      return SRSRAN_ERROR;
+    }
+    if (srsran_refsignal_mbsfn_set_cell(q->mbsfn_refs[mbsfn_area_id], q->cell, mbsfn_area_id, subcarrier_spacing)) {
+      return SRSRAN_ERROR;
     }
     return SRSRAN_SUCCESS;
   }
@@ -333,13 +394,21 @@ int srsran_chest_dl_set_cell(srsran_chest_dl_t* q, srsran_cell_t cell)
 /* Uses the difference between the averaged and non-averaged pilot estimates */
 static float estimate_noise_pilots(srsran_chest_dl_t* q, srsran_dl_sf_cfg_t* sf, uint32_t port_id)
 {
-  srsran_sf_t ch_mode   = sf->sf_type;
+  srsran_sf_t  ch_mode = sf->sf_type;
+  srsran_scs_t scs     = sf->subcarrier_spacing;
   const float weight    = 1.0f;
   float       sum_power = 0.0f;
   uint32_t    count     = 0;
-  uint32_t    npilots   = (ch_mode == SRSRAN_SF_MBSFN) ? SRSRAN_REFSIGNAL_NUM_SF_MBSFN(q->cell.nof_prb, port_id)
-                                                       : srsran_refsignal_cs_nof_re(&q->csr_refs, sf, port_id);
-  uint32_t    nsymbols  = (ch_mode == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_nof_symbols()
+  uint32_t    npilots;
+  if (ch_mode == SRSRAN_SF_MBSFN) {
+    uint32_t act_prb_n = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+    npilots = (scs == SRSRAN_SCS_370HZ_SL4) ?
+        (SRSRAN_NRE_SCS_370HZ * act_prb_n) / 12u :
+        SRSRAN_REFSIGNAL_NUM_SF_MBSFN(act_prb_n, scs);
+  } else {
+    npilots = srsran_refsignal_cs_nof_re(&q->csr_refs, sf, port_id);
+  }
+  uint32_t    nsymbols  = (ch_mode == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_nof_symbols(scs)
                                                        : srsran_refsignal_cs_nof_symbols(&q->csr_refs, sf, port_id);
   if (nsymbols == 0) {
     ERROR("Invalid number of CRS symbols\n");
@@ -348,7 +417,7 @@ static float estimate_noise_pilots(srsran_chest_dl_t* q, srsran_dl_sf_cfg_t* sf,
 
   uint32_t nref = npilots / nsymbols;
   uint32_t fidx =
-    (ch_mode == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_fidx(1, SRSRAN_SCS_15KHZ) : srsran_refsignal_cs_fidx(q->cell, 0, port_id, 0);
+    (ch_mode == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_fidx(1, scs) : srsran_refsignal_cs_fidx(q->cell, 0, port_id, 0);
   cf_t* tmp_noise = q->tmp_noise;
 
   // Special case for 1 or 2 symbol
@@ -492,13 +561,54 @@ static void interpolate_pilots(srsran_chest_dl_t*     q,
             &ce[srsran_refsignal_mbsfn_nsymbol(l, scs) * q->cell.nof_prb * SRSRAN_NRE_SCS(scs)],
             fidx_offset,
             l==1 ? 2 : 4 );
+      } else if (scs == SRSRAN_SCS_370HZ_SL4 || scs == SRSRAN_SCS_370HZ_SL2) {
+        /* SL4/SL2: RS globally at step 12/6 with stagger = 3*(ns mod period), ns = tti/3.
+         * Pilot index l is always 0 (single RS symbol per subframe).
+         * off_end = act_prb*NRE - stagger - step*(total_pilots-1) to cover the full carrier.
+         * Use act_prb (mbsfn_prb or nof_prb) to match get_sf/put_sf and avoid writing
+         * beyond the CE result buffer (allocated to act_prb*486, not nof_prb*486). */
+        uint32_t step    = (scs == SRSRAN_SCS_370HZ_SL4) ? 12u : 6u;
+        /* slot number ns must match put_sf/get_sf's ns (40 ms period, 13 slots of 3 ms,
+         * first slot absorbs the extra TTI) — a plain tti/3 disagrees with that from
+         * tti=3 onward within every period, misaligning the interpolation start.
+         * Stagger cycles with period 4 (SL4) or 2 (SL2) slots. */
+        uint32_t period  = (scs == SRSRAN_SCS_370HZ_SL4) ? 4u : 2u;
+        uint32_t pos40   = sf->tti % 40u;
+        /* TS 36.211 §6.10.2.2.4: "ns" is the ABSOLUTE 3ms slot number
+         * (ns = ns' + 13*nf/4), not period-local -- see matching comment
+         * in refsignal_dl.c's put_sf/get_sf. */
+        uint32_t ns_37   = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (sf->tti / 40u);
+        fidx_offset      = 3u * (ns_37 % period);
+        uint32_t act_prb_ip = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+        uint32_t nre     = SRSRAN_NRE_SCS_370HZ * act_prb_ip;
+        uint32_t tot_pil = nre / step;
+        uint32_t off_end = nre - fidx_offset - step * (tot_pil - 1u);
+        srsran_interp_linear_offset(&q->srsran_interp_lin_mbsfn,
+            &pilot_estimates[0],
+            &cesymb_mbsfn(0, scs),
+            fidx_offset,
+            off_end);
       } else  { // SRSRAN_SCS_1KHZ25
-        fidx_offset = sf->tti%2==0 ? 0 : 3;
+        /* TS 36.211 §6.10.2.2.2 "Mapping to resource elements for 1.25 kHz":
+         *   k = 6m if n_sf mod 2 = 0, k = 6m+3 if n_sf mod 2 = 1
+         * where n_sf is the SUBFRAME NUMBER WITHIN THE RADIO FRAME (0..9, changes
+         * every 1 ms) - not the frame number sfn = tti/10 (changes every 10 ms).
+         * tti%2 == n_sf%2 since tti = 10*sfn+n_sf and 10 is even.
+         *
+         * A previous fix here changed this from tti%2 to (tti/10)%2 specifically to
+         * match refsignal_dl.c's put_sf/get_sf, which at the time used sfn%2 - but
+         * that made TX and RX *mutually* consistent while both were wrong relative to
+         * the spec (verified directly against the transcribed clause text above).
+         * refsignal_dl.c has now been corrected back to tti%2 to match the spec; this
+         * must track it exactly, or the interpolation start is misaligned from the
+         * actual pilot subcarriers on every other subframe. */
+        uint32_t frame_parity = sf->tti % 2u;
+        fidx_offset = (frame_parity == 0u) ? 0 : 3;
         srsran_interp_linear_offset(&q->srsran_interp_lin_mbsfn,
             &pilot_estimates[srsran_refsignal_mbsfn_rs_per_symbol(scs) * q->cell.nof_prb * l],
             &ce[srsran_refsignal_mbsfn_nsymbol(l, scs) * q->cell.nof_prb * SRSRAN_NRE_SCS(scs)],
             fidx_offset,
-            sf->tti%2==0 ? 6 : 3 );
+            (frame_parity == 0u) ? 6 : 3 );
       }
     } else {
       if (cfg->estimator_alg == SRSRAN_ESTIMATOR_ALG_AVERAGE) {
@@ -552,6 +662,15 @@ static void interpolate_pilots(srsran_chest_dl_t*     q,
         srsran_interp_linear_vector2(&q->srsran_interp_linvec, &cesymb_mbsfn(3, scs), &cesymb_mbsfn(1, scs), &cesymb_mbsfn(1, scs), &cesymb_mbsfn(0, scs), 2, 1);
         srsran_interp_linear_vector(&q->srsran_interp_linvec, &cesymb_mbsfn(1, scs), &cesymb_mbsfn(3, scs), &cesymb_mbsfn(2, scs), 2, 1);
         srsran_interp_linear_vector(&q->srsran_interp_linvec, &cesymb_mbsfn(3, scs), &cesymb_mbsfn(5, scs), &cesymb_mbsfn(4, scs), 2, 1);
+      } else if (scs == SRSRAN_SCS_370HZ_SL4 || scs == SRSRAN_SCS_370HZ_SL2) {
+        /* RS only in symbol 0; copy to all remaining symbols within the 1 ms subframe.
+         * After SRSRAN_MBSFN_NOF_SLOTS/SYMBOLS fix: nof_syms=1 for SL4/SL2, so the loop
+         * is a no-op.  Kept for future multi-ms symbol support. */
+        uint32_t sym_stride = q->cell.nof_prb * SRSRAN_NRE_SCS_370HZ;
+        uint32_t nof_syms   = SRSRAN_MBSFN_NOF_SLOTS(scs) * SRSRAN_MBSFN_NOF_SYMBOLS(scs);
+        for (uint32_t sym = 1; sym < nof_syms; sym++) {
+          memcpy(&cesymb_mbsfn(sym, scs), &cesymb_mbsfn(0, scs), sym_stride * sizeof(cf_t));
+        }
       }
       // For SRSRAN_SCS_1KHZ25, there's only one symbol
     } else {
@@ -600,7 +719,20 @@ static void average_pilots(srsran_chest_dl_t*     q,
 {
   uint32_t nsymbols = (sf->sf_type == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_nof_symbols(sf->subcarrier_spacing)
                                                        : srsran_refsignal_cs_nof_symbols(&q->csr_refs, sf, port_id);
-  uint32_t nref = (sf->sf_type == SRSRAN_SF_MBSFN) ? srsran_refsignal_mbsfn_rs_per_symbol(sf->subcarrier_spacing) * q->cell.nof_prb : 2 * q->cell.nof_prb;
+  /* SL4/SL2: pilot count is floor(486*act_prb/step), not the ceiling macro*nof_prb.
+   * estimate_port_mbsfn fills only act_prb pilots; reading nof_prb would access
+   * uninitialized entries in pilot_estimates for extended-BW cells (mbsfn_prb < nof_prb). */
+  uint32_t nref;
+  if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL4) {
+    uint32_t act_prb_ap = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+    nref = (SRSRAN_NRE_SCS_370HZ * act_prb_ap) / 12u;
+  } else if (sf->sf_type == SRSRAN_SF_MBSFN) {
+    uint32_t nref_prb = (sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL2) ?
+        (q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb) : q->cell.nof_prb;
+    nref = srsran_refsignal_mbsfn_rs_per_symbol(sf->subcarrier_spacing) * nref_prb;
+  } else {
+    nref = 2 * q->cell.nof_prb;
+  }
 
   // Average in the time domain if enabled
   if (cfg->estimator_alg == SRSRAN_ESTIMATOR_ALG_AVERAGE && nsymbols > 1) {
@@ -696,9 +828,9 @@ static void chest_interpolate_noise_est(srsran_chest_dl_t*     q,
   if (cfg->noise_alg == SRSRAN_NOISE_ALG_REFS) {
     if (ch_mode == SRSRAN_SF_MBSFN) {
       ERROR("Warning: REFS noise estimation algorithm not supported in MBSFN subframes");
+    } else {
+      q->noise_estimate[rxant_id][port_id] = estimate_noise_pilots(q, sf, port_id);
     }
-
-    q->noise_estimate[rxant_id][port_id] = estimate_noise_pilots(q, sf, port_id);
   }
 
   if (q->wiener_dl && ch_mode == SRSRAN_SF_NORM && cfg->estimator_alg == SRSRAN_ESTIMATOR_ALG_WIENER) {
@@ -877,7 +1009,16 @@ static int estimate_port_mbsfn(srsran_chest_dl_t*     q,
                                uint32_t               port_id,
                                uint32_t               rxant_id)
 {
-  uint32_t sf_idx        = sf->tti % 10;
+  /* TS 36.211 §6.10.2.1.3-4: pilot table index.
+   * 0.37 kHz: 40 ms period; slot n_s = (tti%40 - 1)/3 (slots 0..12, 3 ms each).
+   * All other SCS (including 2.5 kHz): 10 ms period → index = tti % 10. */
+  uint32_t sf_idx;
+  if (SRSRAN_SCS_IS_370HZ(sf->subcarrier_spacing)) {
+    uint32_t pos40 = sf->tti % 40u;
+    sf_idx = (pos40 > 0u) ? (pos40 - 1u) / 3u : 0u;
+  } else {
+    sf_idx = sf->tti % 10u;
+  }
   uint16_t mbsfn_area_id = cfg->mbsfn_area_id;
   uint8_t  symbol_offset = 0;
 
@@ -886,7 +1027,7 @@ static int estimate_port_mbsfn(srsran_chest_dl_t*     q,
   }
 
   /* Use the known CSR signal to compute Least-squares estimates */
-  srsran_refsignal_mbsfn_get_sf(q->cell, port_id, input, q->pilot_recv_signal, sf->subcarrier_spacing, sf_idx);
+  srsran_refsignal_mbsfn_get_sf(q->cell, port_id, input, q->pilot_recv_signal, sf->subcarrier_spacing, sf->tti);
 
   if (sf->subcarrier_spacing == SRSRAN_SCS_15KHZ) {
     // estimate for non-mbsfn section of subframe
@@ -895,10 +1036,57 @@ static int estimate_port_mbsfn(srsran_chest_dl_t*     q,
     symbol_offset = 2;
   }
 
+  /* SL4/SL2: actual pilot count is floor(486*act_prb/step), not the ceiling macro*nof_prb.
+   * get_sf uses mbsfn_prb (act_prb) for all 0.37 kHz variants; reading nof_prb pilots would
+   * access uninitialized pilot_recv_signal entries beyond what get_sf filled. */
+  uint32_t nref_mbsfn;
+  if (sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL4) {
+    uint32_t act_prb = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
+    nref_mbsfn = (SRSRAN_NRE_SCS_370HZ * act_prb) / 12u;
+  } else {
+    uint32_t nref_prb = (sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL2) ?
+        (q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb) : q->cell.nof_prb;
+    nref_mbsfn = SRSRAN_REFSIGNAL_NUM_SF_MBSFN(nref_prb, sf->subcarrier_spacing);
+  }
   srsran_vec_prod_conj_ccc(&q->pilot_recv_signal[(symbol_offset * q->cell.nof_prb)],
                            q->mbsfn_refs[mbsfn_area_id]->pilots[port_id / 2][sf_idx],
                            &q->pilot_estimates[(symbol_offset * q->cell.nof_prb)],
-                           SRSRAN_REFSIGNAL_NUM_SF_MBSFN(q->cell.nof_prb, sf->subcarrier_spacing) - (symbol_offset * q->cell.nof_prb));
+                           nref_mbsfn - (symbol_offset * q->cell.nof_prb));
+
+  /* DIAG (PMCH_RE_DUMP): see modem repo's copy of this function for the full comment.
+   * This app (srsenb, TX-only) never actually calls this decode path at runtime;
+   * kept mirrored here for consistency. */
+  if (getenv("PMCH_RE_DUMP") && sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
+    char fn[160];
+    snprintf(fn, sizeof(fn), "/tmp/pmch_rx_pilotest_tti%u.bin", sf->tti);
+    FILE* fp = fopen(fn, "wb");
+    if (fp) {
+      fwrite(q->pilot_estimates, sizeof(cf_t), nref_mbsfn, fp);
+      fclose(fp);
+    }
+    snprintf(fn, sizeof(fn), "/tmp/pmch_rx_pilotrecv_tti%u.bin", sf->tti);
+    fp = fopen(fn, "wb");
+    if (fp) {
+      fwrite(q->pilot_recv_signal, sizeof(cf_t), nref_mbsfn, fp);
+      fclose(fp);
+    }
+    snprintf(fn, sizeof(fn), "/tmp/pmch_rx_pilotknown_tti%u.bin", sf->tti);
+    fp = fopen(fn, "wb");
+    if (fp) {
+      fwrite(q->mbsfn_refs[mbsfn_area_id]->pilots[port_id / 2][sf_idx], sizeof(cf_t), nref_mbsfn, fp);
+      fclose(fp);
+    }
+    fprintf(stderr, "[PMCH_RE_DUMP] DIAG pilotest tti=%u sf_idx=%u nref_mbsfn=%u mbsfn_area_id=%u\n",
+            sf->tti, sf_idx, nref_mbsfn, mbsfn_area_id);
+  }
+
+  /* RSRP: average received reference-signal power over all pilot REs read for this
+   * subframe. estimate_port() (the non-MBSFN path) always computed this; this
+   * MBSFN-specific path never did, leaving q->rsrp at its stale/zero default for
+   * every MBSFN subframe (MCCH and MTCH alike). Combined with noise_alg=EMPTY also
+   * skipping q->noise_estimate for MBSFN subframes (chest_interpolate_noise_est),
+   * get_snr()'s rsrp/noise ratio ends up 0/0 = NaN for any MBSFN-only decode. */
+  q->rsrp[rxant_id][port_id] = srsran_vec_avg_power_cf(q->pilot_recv_signal, nref_mbsfn);
 
   chest_interpolate_noise_est(q, sf, cfg, input, ce, port_id, rxant_id);
 

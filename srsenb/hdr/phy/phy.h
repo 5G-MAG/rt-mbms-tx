@@ -62,11 +62,13 @@ public:
   /* MAC->PHY interface */
   void rem_rnti(uint16_t rnti) final;
   void set_mch_period_stop(uint32_t stop) final;
+  void set_last_mtch_start(uint8_t pmch_idx, uint32_t start_sf) final;
   void set_activation_deactivation_scell(uint16_t                                     rnti,
                                          const std::array<bool, SRSRAN_MAX_CARRIERS>& activation) override;
 
   /*RRC-PHY interface*/
   void configure_mbsfn(srsran::sib2_mbms_t* sib2, srsran::sib13_t* sib13, const srsran::mcch_msg_t& mcch) override;
+  void set_cell_cas_muting_cfg(bool cas_muting, uint8_t k_cas, uint8_t n_cas, uint8_t additional_non_mbsfn_subframes) override;
 
   void start_plot() override;
   void set_config(uint16_t rnti, const phy_rrc_cfg_list_t& phy_cfg_list) override;

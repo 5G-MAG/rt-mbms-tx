@@ -19,6 +19,7 @@
  *
  */
 
+#include <algorithm>
 #include <pthread.h>
 #include <string.h>
 
@@ -145,9 +146,11 @@ int mac::rlc_buffer_state(uint16_t rnti, uint32_t lc_id, uint32_t tx_queue, uint
     if (rnti != SRSRAN_MRNTI) {
       ret = scheduler.dl_rlc_buffer_state(rnti, lc_id, tx_queue, retx_queue);
     } else {
-      for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-        if (lc_id == mch.mtch_sched[i].lcid) {
-          mch.mtch_sched[i].lcid_buffer_size = tx_queue;
+      for (uint32_t p = 0; p < 15u; p++) {
+        for (uint32_t i = 0; i < mch_per_pmch[p].num_mtch_sched; i++) {
+          if (lc_id == mch_per_pmch[p].mtch_sched[i].lcid) {
+            mch_per_pmch[p].mtch_sched[i].lcid_buffer_size = tx_queue;
+          }
         }
       }
       ret = 0;
@@ -239,6 +242,16 @@ int mac::cell_cfg(const std::vector<sched_interface::cell_cfg_t>& cell_cfg_)
   srsran::rwlock_write_guard lock(rwlock);
   cell_config = cell_cfg_;
   return scheduler.cell_cfg(cell_config);
+}
+
+void mac::set_sib_lens(uint32_t enb_cc_idx, const sched_interface::cell_cfg_sib_t* sibs)
+{
+  srsran::rwlock_write_guard lock(rwlock);
+  if (enb_cc_idx >= cell_config.size()) {
+    return;
+  }
+  std::copy(sibs, sibs + sched_interface::MAX_SIBS, cell_config[enb_cc_idx].sibs);
+  scheduler.set_sib_lens(enb_cc_idx, sibs);
 }
 
 void mac::get_metrics(mac_metrics_t& metrics)
@@ -728,7 +741,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
         }
 #endif
       } else { // PCCH is for paging
-      /*  dl_sched_res->pdsch[n].softbuffer_tx[0] = &common_buffers[enb_cc_idx].pcch_softbuffer_tx;
+        dl_sched_res->pdsch[n].softbuffer_tx[0] = &common_buffers[enb_cc_idx].pcch_softbuffer_tx;
         dl_sched_res->pdsch[n].data[0]          = common_buffers[enb_cc_idx].pcch_payload_buffer;
         rrc_h->read_pdu_pcch(tti_tx_dl, common_buffers[enb_cc_idx].pcch_payload_buffer, pcch_payload_buffer_len);
 
@@ -737,7 +750,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
         }
         if (pcap_net) {
           pcap_net->write_dl_pch(dl_sched_res->pdsch[n].data[0], sched_result.bc[i].tbs, true, tti_tx_dl, enb_cc_idx);
-        }*/
+        }
       }
 
       n++;
@@ -757,9 +770,10 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
   return SRSRAN_SUCCESS;
 }
 
-void mac::build_mch_sched(uint32_t tbs)
+void mac::build_mch_sched(uint32_t tbs, uint8_t pmch_idx)
 {
-  int sfs_per_sched_period = mcch.pmch_info_list[0].sf_alloc_end;
+  sched_interface::dl_pdu_mch_t& m = mch_per_pmch[pmch_idx];
+  int sfs_per_sched_period = mcch.pmch_info_list[pmch_idx].sf_alloc_end;
   int bytes_per_sf         = tbs / 8 - 6; // leave 6 bytes for header
 
   int total_space_avail_bytes = sfs_per_sched_period * bytes_per_sf;
@@ -767,96 +781,244 @@ void mac::build_mch_sched(uint32_t tbs)
   int total_bytes_to_tx = 0;
 
   // calculate total bytes to be scheduled
-  for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-    total_bytes_to_tx += mch.mtch_sched[i].lcid_buffer_size;
-    mch.mtch_sched[i].stop = 0;
+  for (uint32_t i = 0; i < m.num_mtch_sched; i++) {
+    total_bytes_to_tx += m.mtch_sched[i].lcid_buffer_size;
+    m.mtch_sched[i].stop = 0;
   }
 
   int last_mtch_stop = 0;
 
   if (total_bytes_to_tx > 0 && total_bytes_to_tx >= total_space_avail_bytes) {
-    for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-      double ratio           = mch.mtch_sched[i].lcid_buffer_size / total_bytes_to_tx;
-      float  assigned_sfs    = floor(sfs_per_sched_period * ratio);
-      mch.mtch_sched[i].stop = last_mtch_stop + (uint32_t)assigned_sfs;
-      last_mtch_stop         = mch.mtch_sched[i].stop;
+    for (uint32_t i = 0; i < m.num_mtch_sched; i++) {
+      double ratio        = (double)m.mtch_sched[i].lcid_buffer_size / (double)total_bytes_to_tx;
+      float  assigned_sfs = floor(sfs_per_sched_period * ratio);
+      m.mtch_sched[i].stop = last_mtch_stop + (uint32_t)assigned_sfs;
+      last_mtch_stop       = m.mtch_sched[i].stop;
     }
   } else {
-    for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-      float assigned_sfs     = ceil(((float)mch.mtch_sched[i].lcid_buffer_size) / ((float)bytes_per_sf));
-      mch.mtch_sched[i].stop = last_mtch_stop + (uint32_t)assigned_sfs;
-      last_mtch_stop         = mch.mtch_sched[i].stop;
+    for (uint32_t i = 0; i < m.num_mtch_sched; i++) {
+      float assigned_sfs   = ceil(((float)m.mtch_sched[i].lcid_buffer_size) / ((float)bytes_per_sf));
+      m.mtch_sched[i].stop = last_mtch_stop + (uint32_t)assigned_sfs;
+      last_mtch_stop       = m.mtch_sched[i].stop;
     }
   }
 }
 
-int mac::get_mch_sched(uint32_t tti, bool is_mcch, dl_sched_list_t& dl_sched_res_list)
+int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res_list)
 {
   srsran::rwlock_read_guard lock(rwlock);
   dl_sched_t*               dl_sched_res = &dl_sched_res_list[0];
   logger.set_context(tti);
+  /* Clamp pmch_idx to valid range. */
+  if (pmch_idx >= mcch.nof_pmch_info) {
+    pmch_idx = 0;
+  }
   srsran_ra_tb_t mcs      = {};
   srsran_ra_tb_t mcs_data = {};
-  mcs.mcs_idx             = enum_to_number(this->sib13.mbsfn_area_info_list[0].mcch_cfg.sig_mcs);
-  mcs_data.mcs_idx        = this->mcch.pmch_info_list[0].data_mcs;
-  srsran_dl_fill_ra_mcs(&mcs, 0, cell_config[0].cell.nof_prb, false);
-  srsran_dl_fill_ra_mcs(&mcs_data, 0, cell_config[0].cell.nof_prb, false);
+  mcs.mcs_idx      = enum_to_number(this->sib13.mbsfn_area_info_list[0].mcch_cfg.sig_mcs);
+  mcs_data.mcs_idx = this->mcch.pmch_info_list[pmch_idx].data_mcs;
+  // MCCH/MTCH TBS depends on MBSFN PRBs; mbsfn_prb equals nof_prb when pmch_bandwidth=0
+  // and is smaller (30/35/40 PRBs at 1.25 kHz SCS) when pmch_bandwidth > 0 (Rel-17 extended bandwidth).
+  const uint32_t mbsfn_prb = cell_config[0].cell.mbsfn_prb;
+  srsran_dl_fill_ra_mcs(&mcs, 0, mbsfn_prb, false);
+  /* Derive srsran_scs_t from the area_info SCS enum for PMCH MCS table selection. */
+  srsran_scs_t pmch_scs;
+  using scs_t = srsran::mbsfn_area_info_t::subcarrier_spacing_t;
+  switch (this->sib13.mbsfn_area_info_list[0].subcarrier_spacing) {
+    case scs_t::khz_0dot37:
+      pmch_scs = (this->sib13.mbsfn_area_info_list[0].time_separation ==
+                      srsran::mbsfn_area_info_t::time_separation_t::sl2)
+                     ? SRSRAN_SCS_370HZ_SL2
+                     : SRSRAN_SCS_370HZ_SL4;
+      break;
+    case scs_t::khz_7dot5: pmch_scs = SRSRAN_SCS_7KHZ5;   break;
+    case scs_t::khz_2dot5: pmch_scs = SRSRAN_SCS_2KHZ5;   break;
+    default:               pmch_scs = SRSRAN_SCS_1KHZ25;  break;
+  }
+  /* Rel-19: use PMCH-specific MCS table (TS 36.213 §11.1) */
+  srsran_pmch_fill_ra_mcs(&mcs_data, mbsfn_prb,
+                           this->mcch.pmch_info_list[pmch_idx].use_mcs_table2,
+                           pmch_scs);
+  /* Save the per-subframe TBS before scaling; build_mch_sched uses it to compute
+   * how many subframes each service needs, which is based on actual per-subframe
+   * capacity — not the N×scaled TBS used by the time-interleaved encoder. */
+  const int per_sf_tbs = mcs_data.tbs;
+  /* Rel-19: time interleaving TBS scaling (TS 36.213 §11.1) */
+  if (this->mcch.pmch_info_list[pmch_idx].time_interleaving_n > 1) {
+    int scaled   = mcs_data.tbs * (int)this->mcch.pmch_info_list[pmch_idx].time_interleaving_n;
+    int tbs_idx  = srsran_ra_tbs_to_table_idx((uint32_t)scaled, mbsfn_prb, SRSRAN_RA_NOF_TBS_IDX - 1);
+    if (tbs_idx >= (int)SRSRAN_RA_NOF_TBS_IDX) tbs_idx = (int)SRSRAN_RA_NOF_TBS_IDX - 1;
+    if (tbs_idx < 0) tbs_idx = 0;
+    mcs_data.tbs = srsran_ra_tbs_from_idx((uint32_t)tbs_idx, mbsfn_prb);
+  }
+  /* MCCH modification-period enforcement (TS 36.331 §5.8.5.3 / §6.7.4.2).
+   * Swap the pending payload into the live buffer only at a modification-period
+   * boundary (sfn % mcch_mod_period == 0) so UEs can detect the change first. */
+  if (is_mcch && mcch_content_pending) {
+    uint32_t sfn = (tti / 10u) % 1024u;
+    uint32_t mod_period_rf = 512u;
+    using mod_t = srsran::mbsfn_area_info_t::mcch_cfg_t::mod_period_t;
+    if (sib13.nof_mbsfn_area_info > 0) {
+      switch (sib13.mbsfn_area_info_list[0].mcch_cfg.mcch_mod_period) {
+        case mod_t::rf1:    mod_period_rf = 1;    break;
+        case mod_t::rf2:    mod_period_rf = 2;    break;
+        case mod_t::rf4:    mod_period_rf = 4;    break;
+        case mod_t::rf8:    mod_period_rf = 8;    break;
+        case mod_t::rf16:   mod_period_rf = 16;   break;
+        case mod_t::rf32:   mod_period_rf = 32;   break;
+        case mod_t::rf64:   mod_period_rf = 64;   break;
+        case mod_t::rf128:  mod_period_rf = 128;  break;
+        case mod_t::rf256:  mod_period_rf = 256;  break;
+        case mod_t::rf512:  mod_period_rf = 512;  break;
+        case mod_t::rf1024: mod_period_rf = 1024; break;
+        default:            mod_period_rf = 512;  break;
+      }
+    }
+    if (sfn % mod_period_rf == 0u) {
+      mcch = pending_mcch_struct;
+      for (uint32_t p = 0; p < mcch.nof_pmch_info && p < 15u; p++) {
+        mch_per_pmch[p] = {};
+        /* nof_mbms_session_info is legally up to 29 (mbms_session_info_list_r9_l), but
+         * mtch_sched[8]/pdu[20] below are fixed-size; num_mtch_sched is used unclamped
+         * as an index/loop bound by every later consumer (build_mch_sched, get_mch_sched,
+         * pdu[num_mtch_sched] writes), so it must never exceed mtch_sched's capacity here,
+         * at the source, rather than relying on each consumer to re-clamp it. Upstream RRC
+         * config already caps nof_mbms_sessions to 8, so this is defense in depth. */
+        mch_per_pmch[p].num_mtch_sched =
+            (mcch.pmch_info_list[p].nof_mbms_session_info < 8u) ? mcch.pmch_info_list[p].nof_mbms_session_info : 8u;
+        for (uint32_t i = 0; i < mch_per_pmch[p].num_mtch_sched; i++) {
+          mch_per_pmch[p].mtch_sched[i].lcid = mcch.pmch_info_list[p].mbms_session_info_list[i].lc_ch_id;
+        }
+      }
+      memcpy(mcch_payload_buffer, pending_mcch_payload_buffer, (size_t)pending_mcch_length);
+      current_mcch_length  = pending_mcch_length;
+      mcch_content_pending = false;
+      logger.info("MCCH: content updated at SFN=%u (mod_period=%u RF)", sfn, mod_period_rf);
+    }
+  }
+
+  sched_interface::dl_pdu_mch_t& m = mch_per_pmch[pmch_idx];
   if (is_mcch) {
-    build_mch_sched(mcs_data.tbs);
-    mch.mcch_payload              = mcch_payload_buffer;
-    mch.current_sf_allocation_num = 1;
+    build_mch_sched(per_sf_tbs, pmch_idx);
+    m.mcch_payload              = mcch_payload_buffer;
+    m.current_sf_allocation_num = 1;
     logger.info("MCH Sched Info: LCID: %d, Stop: %d, tti is %d ",
-                mch.mtch_sched[0].lcid,
-                mch.mtch_sched[mch.num_mtch_sched - 1].stop,
+                m.mtch_sched[0].lcid,
+                m.mtch_sched[m.num_mtch_sched - 1].stop,
                 tti);
-    phy_h->set_mch_period_stop(mch.mtch_sched[mch.num_mtch_sched - 1].stop);
-    for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-      mch.pdu[i].lcid = (uint32_t)srsran::mch_lcid::MCH_SCHED_INFO;
-      // m1u.mtch_sched[i].lcid = 1+i;
+    phy_h->set_mch_period_stop(m.mtch_sched[m.num_mtch_sched - 1].stop);
+    /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): tell PHY where the
+     * last of num_mtch_sched sessions' window starts, so is_mch_subframe() can apply
+     * a different N/M just for that window. m.mtch_sched[i].stop values are already
+     * 0-based cumulative subframe counts from this period's own first data subframe
+     * (build_mch_sched() above) -- the exact same convention as cfg->mch_subframe_idx
+     * on the PHY side, so no unit conversion is needed here. 0 (num_mtch_sched<=1, or
+     * no LastMTCH override configured) means "no distinct window this period", which
+     * is_mch_subframe() already treats as a no-op -- the common single-session case
+     * is unaffected. */
+    uint32_t last_mtch_window_start = 0;
+    if (m.num_mtch_sched > 1 && this->mcch.pmch_info_list[pmch_idx].time_interleaving_n_last_mtch > 0) {
+      last_mtch_window_start = m.mtch_sched[m.num_mtch_sched - 2].stop;
+    }
+    phy_h->set_last_mtch_start(pmch_idx, last_mtch_window_start);
+    for (uint32_t i = 0; i < m.num_mtch_sched; i++) {
+      m.pdu[i].lcid = (uint32_t)srsran::mch_lcid::MCH_SCHED_INFO;
     }
 
-    mch.pdu[mch.num_mtch_sched].lcid   = 0;
-    mch.pdu[mch.num_mtch_sched].nbytes = current_mcch_length;
+    m.pdu[m.num_mtch_sched].lcid   = 0;
+    m.pdu[m.num_mtch_sched].nbytes = current_mcch_length;
     dl_sched_res->pdsch[0].dci.rnti    = SRSRAN_MRNTI;
 
 
     // we use TTI % HARQ to make sure we use different buffers for consecutive TTIs to avoid races between PHY workers
     ue_db[SRSRAN_MRNTI]->metrics_tx(true, mcs.tbs);
     dl_sched_res->pdsch[0].data[0] =
-        ue_db[SRSRAN_MRNTI]->generate_mch_pdu(tti % SRSRAN_FDD_NOF_HARQ, mch, mch.num_mtch_sched + 1, mcs.tbs / 8);
+        ue_db[SRSRAN_MRNTI]->generate_mch_pdu(tti % SRSRAN_FDD_NOF_HARQ, m, m.num_mtch_sched + 1, mcs.tbs / 8);
 
   } else {
     uint32_t current_lcid = 1;
     uint32_t mtch_index   = 0;
-    uint32_t mtch_stop    = mch.mtch_sched[mch.num_mtch_sched - 1].stop;
+    uint32_t mtch_stop    = m.mtch_sched[m.num_mtch_sched - 1].stop;
 
-    for (uint32_t i = 0; i < mch.num_mtch_sched; i++) {
-      if (mch.current_sf_allocation_num <= mch.mtch_sched[i].stop) {
-        current_lcid = mch.mtch_sched[i].lcid;
+    for (uint32_t i = 0; i < m.num_mtch_sched; i++) {
+      if (m.current_sf_allocation_num <= m.mtch_sched[i].stop) {
+        current_lcid = m.mtch_sched[i].lcid;
         mtch_index   = i;
         break;
       }
     }
-    if (mch.current_sf_allocation_num <= mtch_stop) {
-      int requested_bytes = (mcs_data.tbs / 8 > (int)mch.mtch_sched[mtch_index].lcid_buffer_size)
-                                ? (mch.mtch_sched[mtch_index].lcid_buffer_size)
-                                : ((mcs_data.tbs / 8) - 2);
-      int bytes_received = ue_db[SRSRAN_MRNTI]->read_pdu(current_lcid, mtch_payload_buffer, requested_bytes);
-      mch.pdu[0].lcid    = current_lcid;
-      mch.pdu[0].nbytes  = bytes_received;
-      mch.mtch_sched[0].mtch_payload  = mtch_payload_buffer;
+    if (m.current_sf_allocation_num <= mtch_stop) {
+      /* TS 36.213 §11.1 (Rel-19 time interleaving): subframe s (0-based,
+       * s = current_sf_allocation_num-1, matching the PHY-side
+       * mch_subframe_idx convention) belongs to slot m=s%M with redundancy
+       * version n=(s%(N*M))/M (see srsran_pmch_decode's comment in pmch.c
+       * for the full derivation). RLC only needs to be read ONCE per slot's
+       * own N-span, at n==0 - PHY caches that payload (ti_tx_buf[m] in
+       * pmch.c) and re-encodes it fresh at every subsequent n for that slot,
+       * so continuation subframes (n>0) hand PHY data=NULL and skip
+       * read_pdu/generate_mch_pdu entirely. This also fixes the pre-existing
+       * "MAC redundant read" wart (previously read_pdu/generate_mch_pdu ran
+       * every subframe regardless of N/M, with PHY silently discarding all
+       * but the first result each block - see the roadmap's Phase 1/2/3
+       * findings log). When time interleaving isn't configured (N<=1),
+       * slot_n is always 0 and every subframe reads fresh, exactly as
+       * before. */
+      uint8_t  N = this->mcch.pmch_info_list[pmch_idx].time_interleaving_n;
+      uint32_t s = (m.current_sf_allocation_num >= 1) ? (m.current_sf_allocation_num - 1) : 0;
+      /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): if this subframe
+       * belongs to the last of num_mtch_sched sessions and a LastMTCH override is
+       * configured, use N-last/M-last and count s relative to THIS session's own
+       * window start instead of the whole period -- must stay in lockstep with
+       * is_mch_subframe()'s identical window-relative computation (both are fed the
+       * same set_last_mtch_start() boundary), or MAC's "read fresh vs re-encode
+       * cached" decision below would desync from PHY's own rate-matching cycle. */
+      bool is_last_mtch = (m.num_mtch_sched > 1) && (mtch_index == m.num_mtch_sched - 1);
+      if (is_last_mtch && this->mcch.pmch_info_list[pmch_idx].time_interleaving_n_last_mtch > 0) {
+        uint32_t window_start = m.mtch_sched[m.num_mtch_sched - 2].stop;
+        s = (s >= window_start) ? (s - window_start) : 0;
+        N = this->mcch.pmch_info_list[pmch_idx].time_interleaving_n_last_mtch;
+      }
+      uint32_t slot_n = 0;
+      /* current_sf_allocation_num is only ever 0 before the first is_mcch=true
+       * call has run for this pmch_idx (build_mch_sched sets it to 1) - guard
+       * the -1 above against that transient startup state rather than
+       * underflowing; falling back to slot_n=0 (read fresh) is always safe. */
+      if (N > 1 && m.current_sf_allocation_num >= 1) {
+        uint8_t M = is_last_mtch && this->mcch.pmch_info_list[pmch_idx].time_interleaving_m_last_mtch > 0
+                        ? this->mcch.pmch_info_list[pmch_idx].time_interleaving_m_last_mtch
+                        : this->mcch.pmch_info_list[pmch_idx].time_interleaving_m;
+        if (M == 0) {
+          M = 1;
+        }
+        uint32_t block_len = (uint32_t)N * (uint32_t)M;
+        slot_n              = (s % block_len) / M;
+      }
+
       dl_sched_res->pdsch[0].dci.rnti = SRSRAN_MRNTI;
-      printf("Stop: %d, tbs: %d, Bytes_recieved: %d, Requested_bytes: %d\n", mtch_stop, mcs_data.tbs, bytes_received, requested_bytes);
-      if (bytes_received) {
-        ue_db[SRSRAN_MRNTI]->metrics_tx(true, mcs.tbs);
-        dl_sched_res->pdsch[0].data[0] =
-            ue_db[SRSRAN_MRNTI]->generate_mch_pdu(tti % SRSRAN_FDD_NOF_HARQ, mch, 1, mcs_data.tbs / 8);
+      if (slot_n == 0) {
+        int requested_bytes = (mcs_data.tbs / 8 > (int)m.mtch_sched[mtch_index].lcid_buffer_size)
+                                  ? (m.mtch_sched[mtch_index].lcid_buffer_size)
+                                  : ((mcs_data.tbs / 8) - 2);
+        int bytes_received = ue_db[SRSRAN_MRNTI]->read_pdu(current_lcid, mtch_payload_buffer, requested_bytes);
+        m.pdu[0].lcid    = current_lcid;
+        m.pdu[0].nbytes  = bytes_received;
+        m.mtch_sched[0].mtch_payload  = mtch_payload_buffer;
+        logger.debug("MTCH: stop=%d tbs=%d bytes_received=%d requested=%d", mtch_stop, mcs_data.tbs, bytes_received, requested_bytes);
+        if (bytes_received) {
+          ue_db[SRSRAN_MRNTI]->metrics_tx(true, mcs_data.tbs);
+          dl_sched_res->pdsch[0].data[0] =
+              ue_db[SRSRAN_MRNTI]->generate_mch_pdu(tti % SRSRAN_FDD_NOF_HARQ, m, 1, mcs_data.tbs / 8);
+        }
+      } else {
+        /* Continuation subframe: PHY re-encodes slot m's cached payload at a
+         * new rv_idx; no fresh RLC read needed. */
+        dl_sched_res->pdsch[0].data[0] = nullptr;
       }
     } else {
       dl_sched_res->pdsch[0].dci.rnti = 0;
       dl_sched_res->pdsch[0].data[0]  = nullptr;
     }
-    mch.current_sf_allocation_num++;
+    m.current_sf_allocation_num++;
   }
 
   // Count number of TTIs for all active users
@@ -988,16 +1150,43 @@ void mac::write_mcch(const srsran::sib2_mbms_t* sib2_,
                      const uint8_t              mcch_payload_length)
 {
   srsran::rwlock_write_guard lock(rwlock);
-  mcch               = *mcch_;
-  mch.num_mtch_sched = this->mcch.pmch_info_list[0].nof_mbms_session_info;
-  for (uint32_t i = 0; i < mch.num_mtch_sched; ++i) {
-    mch.mtch_sched[i].lcid = this->mcch.pmch_info_list[0].mbms_session_info_list[i].lc_ch_id;
-  }
   sib2  = *sib2_;
   sib13 = *sib13_;
-  memcpy(mcch_payload_buffer, mcch_payload, mcch_payload_length * sizeof(uint8_t));
-  //mcch_payload_buffer[0] = 0x01;
-  current_mcch_length     = mcch_payload_length;
+
+  /* Sync cell_config mbsfn_prb with the current pmch_bandwidth so that
+   * get_mch_sched uses the correct PRB count after a runtime reconfigure_embms(). */
+  if (!cell_config.empty()) {
+    const uint8_t bw = (sib13_->nof_mbsfn_area_info > 0) ? sib13_->mbsfn_area_info_list[0].pmch_bandwidth : 0;
+    /* bw comes from the (possibly just-reconfigured) OTA pmch_bandwidth value,
+     * which reload_embms_config()'s SIGHUP path does not range-check against
+     * nof_prb; clamp here too so a live reconfigure can't push mbsfn_prb past
+     * nof_prb and overflow the PMCH PRB-sized buffers (see srsran_cell_isvalid). */
+    cell_config[0].cell.mbsfn_prb =
+        (bw > 0 && bw <= cell_config[0].cell.nof_prb) ? bw : cell_config[0].cell.nof_prb;
+  }
+
+  /* Buffer the new MCCH config (both encoded payload and mcch struct) into
+   * pending fields.  The swap into the live buffers happens in get_mch_sched()
+   * at the next modification-period boundary.  On first call, also apply
+   * immediately so MCCH can be transmitted before the first boundary. */
+  pending_mcch_struct = *mcch_;
+  memcpy(pending_mcch_payload_buffer, mcch_payload, mcch_payload_length * sizeof(uint8_t));
+  pending_mcch_length  = mcch_payload_length;
+  mcch_content_pending = true;
+
+  if (!mcch_initialized) {
+    mcch = *mcch_;
+    for (uint32_t p = 0; p < mcch.nof_pmch_info && p < 15u; p++) {
+      mch_per_pmch[p]                = {};
+      mch_per_pmch[p].num_mtch_sched = mcch.pmch_info_list[p].nof_mbms_session_info;
+      for (uint32_t i = 0; i < mch_per_pmch[p].num_mtch_sched && i < 8u; i++) {
+        mch_per_pmch[p].mtch_sched[i].lcid = mcch.pmch_info_list[p].mbms_session_info_list[i].lc_ch_id;
+      }
+    }
+    memcpy(mcch_payload_buffer, mcch_payload, mcch_payload_length * sizeof(uint8_t));
+    current_mcch_length = mcch_payload_length;
+    mcch_initialized    = true;
+  }
 
   unique_rnti_ptr<ue> ue_ptr = make_rnti_obj<ue>(
       SRSRAN_MRNTI, SRSRAN_MRNTI, 0, &scheduler, rrc_h, rlc_h, phy_h, logger, cells.size(), softbuffer_pool.get());

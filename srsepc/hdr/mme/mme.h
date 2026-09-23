@@ -28,7 +28,9 @@
 #ifndef SRSEPC_MME_H
 #define SRSEPC_MME_H
 
+#include "m3ap.h"
 #include "s1ap.h"
+#include "sbc.h"
 #include "srsran/common/buffer_pool.h"
 #include "srsran/common/standard_streams.h"
 #include "srsran/common/threads.h"
@@ -37,7 +39,15 @@
 namespace srsepc {
 
 typedef struct {
-  s1ap_args_t s1ap_args;
+  std::string sm_bind_addr = "0.0.0.0";
+  uint16_t    sm_bind_port = 2123; // MUST stay 2123 for spec-compliant interop (TS 29.274 sec 4.2.1.1)
+} mme_sm_args_t;
+
+typedef struct {
+  s1ap_args_t   s1ap_args;
+  mme_sm_args_t sm_args;
+  sbc_args_t    sbc_args;
+  m3ap_args_t   m3ap_args;
   // diameter_args_t diameter_args;
   // gtpc_args_t gtpc_args;
 } mme_args_t;
@@ -70,6 +80,8 @@ private:
   static mme* m_instance;
   s1ap*       m_s1ap;
   mme_gtpc*   m_mme_gtpc;
+  sbc*        m_sbc;
+  m3ap*       m_m3ap;
 
   bool   m_running;
   fd_set m_set;

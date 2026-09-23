@@ -53,7 +53,7 @@ public:
   /**
    * Allocates DCI space in PDCCH and PUCCH, avoiding in the process collisions with other users
    * @param alloc_type allocation type (e.g. DL data, UL data, ctrl)
-   * @param aggr_idx Aggregation level index (0..3)
+   * @param aggr_idx Aggregation level index (0..4; 4=AL16 for MBMS-dedicated broadcast)
    * @param user UE object or null in case of broadcast/RAR/paging allocation
    * @param has_pusch_grant If the UE has already an PUSCH grant for UCI allocated
    * @return if the allocation was successful

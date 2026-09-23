@@ -33,7 +33,7 @@ namespace srsenb {
  **********************/
 
 constexpr float    tti_duration_ms = 1;
-constexpr uint32_t NOF_AGGR_LEVEL  = 4;
+constexpr uint32_t NOF_AGGR_LEVEL  = 5; // 4 standard levels (L=0..3) + 1 for AL16/L=4 (MBMS-dedicated, Rel-16)
 
 /***********************
  *   Helper Types

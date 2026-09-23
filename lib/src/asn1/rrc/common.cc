@@ -513,6 +513,185 @@ bool mbsfn_sf_cfg_v1430_s::sf_alloc_v1430_c_::operator==(const sf_alloc_v1430_c_
   return true;
 }
 
+// MBSFN-SubframeConfig-v1610 ::= SEQUENCE
+SRSASN_CODE mbsfn_sf_cfg_v1610_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(sf_alloc_v1610.pack(bref));
+
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbsfn_sf_cfg_v1610_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(sf_alloc_v1610.unpack(bref));
+
+  return SRSASN_SUCCESS;
+}
+void mbsfn_sf_cfg_v1610_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  j.write_fieldname("subframeAllocation-v1610");
+  sf_alloc_v1610.to_json(j);
+  j.end_obj();
+}
+bool mbsfn_sf_cfg_v1610_s::operator==(const mbsfn_sf_cfg_v1610_s& other) const
+{
+  return sf_alloc_v1610 == other.sf_alloc_v1610;
+}
+
+const char* mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::types_opts::to_string() const
+{
+  static const char* options[] = {"oneFrame-v1610", "fourFrames-v1610"};
+  return convert_enum_idx(options, 2, value, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::types");
+}
+uint8_t mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::types_opts::to_number() const
+{
+  static const uint8_t options[] = {1, 4};
+  return map_enum_number(options, 2, value, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::types");
+}
+
+void mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::destroy_()
+{
+  switch (type_) {
+    case types::one_frame_v1610:
+      c.destroy<fixed_bitstring<2> >();
+      break;
+    case types::four_frames_v1610:
+      c.destroy<fixed_bitstring<8> >();
+      break;
+    default:
+      break;
+  }
+}
+void mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::set(types::options e)
+{
+  destroy_();
+  type_ = e;
+  switch (type_) {
+    case types::one_frame_v1610:
+      c.init<fixed_bitstring<2> >();
+      break;
+    case types::four_frames_v1610:
+      c.init<fixed_bitstring<8> >();
+      break;
+    case types::nulltype:
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+  }
+}
+mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::sf_alloc_v1610_c_(const mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_& other)
+{
+  type_ = other.type();
+  switch (type_) {
+    case types::one_frame_v1610:
+      c.init(other.c.get<fixed_bitstring<2> >());
+      break;
+    case types::four_frames_v1610:
+      c.init(other.c.get<fixed_bitstring<8> >());
+      break;
+    case types::nulltype:
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+  }
+}
+mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_&
+mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::operator=(const mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_& other)
+{
+  if (this == &other) {
+    return *this;
+  }
+  set(other.type());
+  switch (type_) {
+    case types::one_frame_v1610:
+      c.set(other.c.get<fixed_bitstring<2> >());
+      break;
+    case types::four_frames_v1610:
+      c.set(other.c.get<fixed_bitstring<8> >());
+      break;
+    case types::nulltype:
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+  }
+
+  return *this;
+}
+fixed_bitstring<2>& mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::set_one_frame_v1610()
+{
+  set(types::one_frame_v1610);
+  return c.get<fixed_bitstring<2> >();
+}
+fixed_bitstring<8>& mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::set_four_frames_v1610()
+{
+  set(types::four_frames_v1610);
+  return c.get<fixed_bitstring<8> >();
+}
+void mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::to_json(json_writer& j) const
+{
+  j.start_obj();
+  switch (type_) {
+    case types::one_frame_v1610:
+      j.write_str("oneFrame-v1610", c.get<fixed_bitstring<2> >().to_string());
+      break;
+    case types::four_frames_v1610:
+      j.write_str("fourFrames-v1610", c.get<fixed_bitstring<8> >().to_string());
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+  }
+  j.end_obj();
+}
+SRSASN_CODE mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::pack(bit_ref& bref) const
+{
+  type_.pack(bref);
+  switch (type_) {
+    case types::one_frame_v1610:
+      HANDLE_CODE(c.get<fixed_bitstring<2> >().pack(bref));
+      break;
+    case types::four_frames_v1610:
+      HANDLE_CODE(c.get<fixed_bitstring<8> >().pack(bref));
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+      return SRSASN_ERROR_ENCODE_FAIL;
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::unpack(cbit_ref& bref)
+{
+  types e;
+  e.unpack(bref);
+  set(e);
+  switch (type_) {
+    case types::one_frame_v1610:
+      HANDLE_CODE(c.get<fixed_bitstring<2> >().unpack(bref));
+      break;
+    case types::four_frames_v1610:
+      HANDLE_CODE(c.get<fixed_bitstring<8> >().unpack(bref));
+      break;
+    default:
+      log_invalid_choice_id(type_, "mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_");
+      return SRSASN_ERROR_DECODE_FAIL;
+  }
+  return SRSASN_SUCCESS;
+}
+bool mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::operator==(const sf_alloc_v1610_c_& other) const
+{
+  if (type_ != other.type_) {
+    return false;
+  }
+  switch (type_) {
+    case types::one_frame_v1610:
+      return c.get<fixed_bitstring<2> >() == other.c.get<fixed_bitstring<2> >();
+    case types::four_frames_v1610:
+      return c.get<fixed_bitstring<8> >() == other.c.get<fixed_bitstring<8> >();
+    default:
+      return true;
+  }
+  return true;
+}
+
 // MeasSubframePattern-r10 ::= CHOICE
 void meas_sf_pattern_r10_c::destroy_()
 {

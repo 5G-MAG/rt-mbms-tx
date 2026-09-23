@@ -32,6 +32,9 @@ struct gtpu_args_t {
   std::string mme_addr;
   std::string embms_m1u_multiaddr;
   std::string embms_m1u_if_addr;
+  /* Comma-separated per-session TEIDs for M1-U demux (e.g. "0xAAAAAAAA,0xAAAAAAAB"),
+   * index i -> LCID i+1. Empty = legacy single-bearer behavior. See m1u_handler. */
+  std::string embms_session_teids;
   bool        embms_enable                 = false;
   uint32_t    indirect_tunnel_timeout_msec = 0;
 };

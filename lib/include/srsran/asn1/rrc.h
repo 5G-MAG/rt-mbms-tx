@@ -285,6 +285,9 @@ struct pmch_cfg_r12_s {
 // CommonSF-AllocPatternList-r14 ::= SEQUENCE (SIZE (1..8)) OF MBSFN-SubframeConfig-v1430
 using common_sf_alloc_pattern_list_r14_l = dyn_array<mbsfn_sf_cfg_v1430_s>;
 
+// CommonSF-AllocPatternList-v1610 ::= SEQUENCE (SIZE (1..8)) OF MBSFN-SubframeConfig-v1610
+using common_sf_alloc_pattern_list_v1610_l = dyn_array<mbsfn_sf_cfg_v1610_s>;
+
 // PMCH-InfoExt-r12 ::= SEQUENCE
 struct pmch_info_ext_r12_s {
   bool                        ext = false;
@@ -298,10 +301,139 @@ struct pmch_info_ext_r12_s {
   void        to_json(json_writer& j) const;
 };
 
+// PMCH-SoftBufferSizeParameters-r19 ::= SEQUENCE
+struct pmch_soft_buf_size_params_r19_s {
+  struct pmch_time_interleaving_scaling_factor_beta_r19_opts {
+    enum options { one32nd, one5th, one3rd, three8th, five12th, onehalf, five8th, two3rd, five6th, one, nulltype } value;
+    const char* to_string() const;
+  };
+  typedef enumerated<pmch_time_interleaving_scaling_factor_beta_r19_opts> pmch_time_interleaving_scaling_factor_beta_r19_e_;
+
+  uint8_t                                           pmch_time_interleaving_ref_ue_category_dl_r19 = 4;
+  pmch_time_interleaving_scaling_factor_beta_r19_e_ pmch_time_interleaving_scaling_factor_beta_r19;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// PMCH-TFI-Config-r19 ::= SEQUENCE
+struct pmch_tfi_cfg_r19_s {
+  struct time_interleav_cfg_r19_s_ {
+    struct pmch_time_interleav_m_r19_opts {
+      enum options { sf4, sf8, sf16, sf32, nulltype } value;
+      typedef uint8_t number_type;
+      const char*     to_string() const;
+      uint8_t         to_number() const;
+    };
+    typedef enumerated<pmch_time_interleav_m_r19_opts> pmch_time_interleav_m_r19_e_;
+
+    struct pmch_time_interleav_n_r19_opts {
+      enum options { n2, n4, n8, n16, nulltype } value;
+      typedef uint8_t number_type;
+      const char*     to_string() const;
+      uint8_t         to_number() const;
+    };
+    typedef enumerated<pmch_time_interleav_n_r19_opts> pmch_time_interleav_n_r19_e_;
+
+    // n1 added by CR 5168r3 to represent "last MTCH not time-interleaved"
+    struct pmch_time_interleav_n_last_mtch_r19_opts {
+      enum options { n1, n2, n4, n8, n16, nulltype } value;
+      typedef uint8_t number_type;
+      const char*     to_string() const;
+      uint8_t         to_number() const;
+    };
+    typedef enumerated<pmch_time_interleav_n_last_mtch_r19_opts> pmch_time_interleav_n_last_mtch_r19_e_;
+
+    struct pmch_cyclic_shift_alpha_r19_opts {
+      enum options { alpha1, alpha2, alpha3, nulltype } value;
+      typedef uint8_t number_type;
+      const char*     to_string() const;
+      uint8_t         to_number() const;
+    };
+    typedef enumerated<pmch_cyclic_shift_alpha_r19_opts> pmch_cyclic_shift_alpha_r19_e_;
+
+    bool                                    pmch_time_interleav_m_last_mtch_r19_present = false;
+    bool                                    pmch_time_interleav_n_last_mtch_r19_present = false;
+    bool                                    pmch_cyclic_shift_alpha_r19_present         = false;
+    pmch_time_interleav_m_r19_e_            pmch_time_interleav_m_r19;
+    pmch_time_interleav_n_r19_e_            pmch_time_interleav_n_r19;
+    pmch_time_interleav_m_r19_e_            pmch_time_interleav_m_last_mtch_r19;
+    pmch_time_interleav_n_last_mtch_r19_e_  pmch_time_interleav_n_last_mtch_r19;
+    pmch_soft_buf_size_params_r19_s         pmch_soft_buf_size_params_r19;
+    pmch_cyclic_shift_alpha_r19_e_          pmch_cyclic_shift_alpha_r19;
+  };
+
+  struct pmch_freq_interleav_r19_opts {
+    enum options { enabled, nulltype } value;
+    const char* to_string() const;
+  };
+  typedef enumerated<pmch_freq_interleav_r19_opts> pmch_freq_interleav_r19_e_;
+
+  struct mch_sched_period_v1900_opts {
+    enum options { rf7, rf14, rf28, rf53, rf56, rf108, rf112, rf212, rf424, nulltype } value;
+    typedef uint16_t number_type;
+    const char*      to_string() const;
+    uint16_t         to_number() const;
+  };
+  typedef enumerated<mch_sched_period_v1900_opts> mch_sched_period_v1900_e_;
+
+  bool                       time_interleav_cfg_r19_present  = false;
+  bool                       pmch_freq_interleav_r19_present = false;
+  bool                       mch_sched_period_v1900_present  = false;
+  time_interleav_cfg_r19_s_  time_interleav_cfg_r19;
+  pmch_freq_interleav_r19_e_ pmch_freq_interleav_r19;
+  mch_sched_period_v1900_e_  mch_sched_period_v1900;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// PMCH-InfoExt-r19 ::= SEQUENCE
+struct pmch_info_ext_r19_s {
+  bool                        ext                      = false;
+  bool                        pmch_tfi_cfg_r19_present = false;
+  pmch_cfg_r12_s              pmch_cfg_r19;
+  pmch_tfi_cfg_r19_s          pmch_tfi_cfg_r19;
+  mbms_session_info_list_r9_l mbms_session_info_list_r19;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// PMCH-InfoListExt-v1900 ::= SEQUENCE (SIZE (0..15)) OF PMCH-InfoExt-r19
+using pmch_info_list_ext_v1900_l = dyn_array<pmch_info_ext_r19_s>;
+
+// MBSFNAreaConfiguration-v1900-IEs ::= SEQUENCE
+struct mbsfn_area_cfg_v1900_ies_s {
+  bool                       pmch_info_list_ext_v1900_present = false;
+  bool                       non_crit_ext_present             = false;
+  pmch_info_list_ext_v1900_l pmch_info_list_ext_v1900;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBSFNAreaConfiguration-v1610-IEs ::= SEQUENCE
+struct mbsfn_area_cfg_v1610_ies_s {
+  bool                                  common_sf_alloc_v1610_present = false;
+  bool                                  non_crit_ext_present          = false;
+  common_sf_alloc_pattern_list_v1610_l  common_sf_alloc_v1610;
+  mbsfn_area_cfg_v1900_ies_s            non_crit_ext;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
 // MBSFNAreaConfiguration-v1430-IEs ::= SEQUENCE
 struct mbsfn_area_cfg_v1430_ies_s {
   bool                               non_crit_ext_present = false;
   common_sf_alloc_pattern_list_r14_l common_sf_alloc_r14;
+  mbsfn_area_cfg_v1610_ies_s         non_crit_ext;
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;

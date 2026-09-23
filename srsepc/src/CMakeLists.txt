@@ -21,7 +21,6 @@
 add_subdirectory(mme)
 add_subdirectory(hss)
 add_subdirectory(spgw)
-add_subdirectory(mbms-gw)
 
 # Link libstdc++ and libgcc
 if(BUILD_STATIC)
@@ -39,6 +38,8 @@ target_link_libraries( srsepc  srsepc_mme
                                srsepc_hss
                                srsepc_sgw
                                s1ap_asn1
+                               sbc_ap_asn1
+                               m3ap_asn1
                                srsran_gtpu
                                srsran_asn1
                                srsran_common
@@ -50,20 +51,8 @@ target_link_libraries( srsepc  srsepc_mme
                                ${LIBCONFIGPP_LIBRARIES}
                                ${SCTP_LIBRARIES})
 
-add_executable(srsmbms mbms-gw/main.cc )
-target_link_libraries(srsmbms   srsepc_mbms_gw
-                                srsran_asn1
-                                srsran_gtpu
-                                srsran_common
-                                srslog
-                                ${CMAKE_THREAD_LIBS_INIT}
-                                ${Boost_LIBRARIES}
-                                ${SEC_LIBRARIES}
-                                ${LIBCONFIGPP_LIBRARIES}
-                                ${SCTP_LIBRARIES})
 if (RPATH)
   set_target_properties(srsepc PROPERTIES INSTALL_RPATH ".")
-  set_target_properties(srsmbms PROPERTIES INSTALL_RPATH ".")
 endif (RPATH)
 
 ########################################################################
@@ -77,4 +66,3 @@ else(NOT ${BUILDEPC_CMD} STREQUAL "")
 endif (NOT ${BUILDEPC_CMD} STREQUAL "")
 
 install(TARGETS srsepc DESTINATION ${RUNTIME_DIR})
-install(TARGETS srsmbms DESTINATION ${RUNTIME_DIR})

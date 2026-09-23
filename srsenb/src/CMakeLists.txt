@@ -36,13 +36,32 @@ endif (RPATH)
 add_library(enb_cfg_parser STATIC parser.cc enb_cfg_parser.cc)
 target_link_libraries(enb_cfg_parser srsran_common ${LIBCONFIGPP_LIBRARIES})
 
-add_executable(srsenb main.cc enb.cc metrics_stdout.cc metrics_csv.cc metrics_json.cc)
+add_executable(srsenb main.cc enb.cc control_server.cc metrics_stdout.cc metrics_csv.cc metrics_json.cc)
 
-set(SRSENB_SOURCES srsenb_phy srsenb_stack srsenb_common srsenb_s1ap srsenb_upper srsenb_mac srsenb_rrc srslog system)
-set(SRSRAN_SOURCES srsran_common srsran_mac srsran_phy srsran_gtpu srsran_rlc srsran_pdcp srsran_radio rrc_asn1 s1ap_asn1 enb_cfg_parser srslog support system)
+set(SRSENB_SOURCES srsenb_phy srsenb_stack srsenb_common srsenb_s1ap srsenb_m3ap srsenb_upper srsenb_mac srsenb_rrc srslog system)
+set(SRSRAN_SOURCES srsran_common srsran_mac srsran_phy srsran_gtpu srsran_rlc srsran_pdcp srsran_radio rrc_asn1 s1ap_asn1 m3ap_asn1 enb_cfg_parser srslog support system)
 
-set(SRSENB_SOURCES ${SRSENB_SOURCES} srsgnb_stack srsgnb_ngap srsgnb_upper srsgnb_mac srsgnb_rrc)
+# rrc_nr_asn1/ngap_nr_asn1 are pure ASN.1 codec libraries (only depend on
+# asn1_utils/srsran_common, verified via lib/src/asn1/CMakeLists.txt) that
+# enb_cfg_parser.cc needs for its general config parsing regardless of
+# whether the 5G-NR stack itself is linked - unlike srsgnb_stack below, they
+# carry no risky transitive dependency, so they stay linked unconditionally.
 set(SRSRAN_SOURCES ${SRSRAN_SOURCES} rrc_nr_asn1 ngap_nr_asn1)
+
+# 5G-NR/gNB STACK support (srsgnb_*) is unconditionally linked upstream, but
+# this fork is LTE-only (FeMBMS/5G Terrestrial Broadcast, TS 36.xxx, no 5G
+# NR) and srsgnb_stack unconditionally depends on srsue_upper, which is not
+# built without ENABLE_SRSUE=ON. Rather than build srsue's NR/RRC code too (a
+# large, unrelated detour - it has real staleness bugs of its own, unrelated
+# to FeMBMS, from never having been compiled in this fork before), the gNB
+# stack libraries are simply not linked into this executable. No source
+# files were removed; flip this one variable (and fix srsue's NR build) to
+# bring it back.
+set(SRSENB_ENABLE_5GNR FALSE)
+if(SRSENB_ENABLE_5GNR)
+  set(SRSENB_SOURCES ${SRSENB_SOURCES} srsgnb_stack srsgnb_ngap srsgnb_upper srsgnb_mac srsgnb_rrc)
+  target_compile_definitions(srsenb PRIVATE SRSENB_HAS_5GNR_STACK)
+endif()
 
 target_link_libraries(srsenb  ${SRSENB_SOURCES}
                               ${SRSRAN_SOURCES}

@@ -1409,7 +1409,7 @@ void srsran_dci_cfg_set_common_ss(srsran_dci_cfg_t* cfg)
 
 int srsran_dci_location_set(srsran_dci_location_t* c, uint32_t L, uint32_t nCCE)
 {
-  if (L <= 3) {
+  if (L <= 4) {  /* L=4 = AL16 for MBMS-dedicated PDCCH (TS 36.211 §6.7) */
     c->L = L;
   } else {
     ERROR("Invalid L %d", L);
@@ -1426,7 +1426,7 @@ int srsran_dci_location_set(srsran_dci_location_t* c, uint32_t L, uint32_t nCCE)
 
 bool srsran_dci_location_isvalid(srsran_dci_location_t* c)
 {
-  if (c->L <= 3 && c->ncce <= 87) {
+  if (c->L <= 4 && c->ncce <= 87) {  /* L=4 = AL16 for MBMS-dedicated PDCCH */
     return true;
   } else {
     return false;

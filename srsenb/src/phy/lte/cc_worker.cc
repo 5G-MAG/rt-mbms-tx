@@ -19,6 +19,9 @@
  *
  */
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "srsran/common/threads.h"
 #include "srsran/srsran.h"
 
@@ -232,7 +235,21 @@ void cc_worker::work_dl(const srsran_dl_sf_cfg_t&            dl_sf_cfg,
 {
   std::lock_guard<std::mutex> lock(mutex);
   dl_sf = dl_sf_cfg;
-  dl_sf.subcarrier_spacing = SRSRAN_SCS_1KHZ25;
+  /* Propagate the MBSFN SCS from the PHY config on the first MBSFN subframe.
+   * Both the dl_sf SCS (used by encode_pmch/put_refs) and the enb_dl internal
+   * pilot sequence SCS must match. The lazy update only fires when they diverge
+   * (once, on the first MBSFN subframe after configure_mbsfn is called). */
+  srsran_scs_t mbsfn_scs = SRSRAN_SCS_1KHZ25;
+  if (dl_sf.sf_type == SRSRAN_SF_MBSFN && mbsfn_cfg != nullptr) {
+    mbsfn_scs = mbsfn_cfg->subcarrier_spacing;
+    if (mbsfn_scs != enb_dl.subcarrier_spacing) {
+      srsran_enb_dl_set_mbsfn_subcarrier_spacing(&enb_dl, mbsfn_scs);
+    }
+    if (mbsfn_cfg->mbsfn_area_id != enb_dl.mbsfnr_signal.mbsfn_area_id) {
+      srsran_enb_dl_set_mbsfn_area_id(&enb_dl, mbsfn_cfg->mbsfn_area_id);
+    }
+  }
+  dl_sf.subcarrier_spacing = mbsfn_scs;
 
   // Put base signals (references, PBCH, PCFICH and PSS/SSS) into the resource grid
   srsran_enb_dl_put_base(&enb_dl, &dl_sf);
@@ -543,16 +560,41 @@ int cc_worker::encode_pdcch_dl(stack_interface_phy_lte::dl_sched_grant_t* grants
 
 int cc_worker::encode_pmch(stack_interface_phy_lte::dl_sched_grant_t* grant, srsran_mbsfn_cfg_t* mbsfn_cfg)
 {
+  /* MAC sets dci.rnti=0 (mac.cc) when there is nothing to actually transmit
+   * this subframe (e.g. mtch_stop==0, no MBMS traffic queued) - distinct from
+   * grant->data[0]==NULL, which is also used intentionally for a time-
+   * interleaving continuation subframe (slot_n>0) that must still encode the
+   * slot's cached ti_tx_buf content, so data[0] alone can't be the guard.
+   * Without this check, srsran_enb_dl_put_pmch() encoded a well-formed PMCH TB
+   * from srsran_pmch_t's zeroed, never-primed ti_tx_buf[] regardless - RX,
+   * decoding that all-zero payload successfully, saw its first MAC subheader
+   * byte (0x00: E-bit=0, LCID=0) and misrouted it to the MCCH/RRC handler
+   * (LCID 0 is MCCH's reserved bearer ID), corrupting Phy::_mcch until the
+   * next real MCCH occasion. Mirrors encode_pdsch()'s existing
+   * `rnti && ue_db.count(rnti)` gate for the same reason. */
+  if (getenv("PMCH_TI_DIAG")) {
+    fprintf(stderr, "TI_DIAG_ENCPMCH tti=%u rnti=0x%x data=%p subframe_idx=%u\n", dl_sf.tti, grant->dci.rnti,
+            (void*)grant->data[0], mbsfn_cfg->mch_subframe_idx);
+  }
+  if (!grant->dci.rnti) {
+    return SRSRAN_SUCCESS;
+  }
   srsran_pmch_cfg_t pmch_cfg;
   ZERO_OBJECT(pmch_cfg);
   srsran_configure_pmch(&pmch_cfg, &enb_dl.cell, mbsfn_cfg);
   srsran_ra_dl_compute_nof_re(&enb_dl.cell, &dl_sf, &pmch_cfg.pdsch_cfg.grant);
+  pmch_cfg.cyclic_shift       = mbsfn_cfg->cyclic_shift;
+  pmch_cfg.cyclic_shift_alpha = mbsfn_cfg->cyclic_shift_alpha;
+  pmch_cfg.freq_interleaving  = mbsfn_cfg->freq_interleaving;
+  pmch_cfg.subframe_idx       = mbsfn_cfg->mch_subframe_idx;
 
   // Set soft buffer
   pmch_cfg.pdsch_cfg.softbuffers.tx[0] = &temp_mbsfn_softbuffer;
 
-  // Encode PMCH
-  if (srsran_enb_dl_put_pmch(&enb_dl, &pmch_cfg, grant->data[0])) {
+  // Encode PMCH. Shared, cell-wide ti_tx_buf (not this worker's own
+  // enb_dl.pmch.ti_tx_buf[]) - see phy_common::pmch_ti_tx_buf's doc comment
+  // for why a per-worker buffer is unsafe with time interleaving active.
+  if (srsran_enb_dl_put_pmch(&enb_dl, &pmch_cfg, grant->data[0], phy->get_pmch_ti_tx_buf())) {
     Error("Error putting PMCH");
     return SRSRAN_ERROR;
   }

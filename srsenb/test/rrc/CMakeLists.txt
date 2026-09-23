@@ -34,6 +34,16 @@ target_link_libraries(erab_setup_test test_helpers ${LIBCONFIGPP_LIBRARIES} ${AT
 add_executable(rrc_mobility_test rrc_mobility_test.cc)
 target_link_libraries(rrc_mobility_test srsran_asn1 test_helpers ${ATOMIC_LIBS})
 
+add_executable(mbms_session_test mbms_session_test.cc)
+target_link_libraries(mbms_session_test test_helpers ${ATOMIC_LIBS})
+
+# Mirrors clamp_pmch_mcs_to_feasible() locally (see the test file's own comment) instead of linking the full
+# srsenb_rrc static lib just to resolve one small static function - only needs the PHY RA helpers it calls.
+add_executable(pmch_mcs_clamp_test pmch_mcs_clamp_test.cc)
+target_link_libraries(pmch_mcs_clamp_test srsran_phy srslog ${ATOMIC_LIBS})
+
 add_test(rrc_mobility_test rrc_mobility_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(erab_setup_test erab_setup_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(rrc_meascfg_test rrc_meascfg_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+add_test(mbms_session_test mbms_session_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+add_test(pmch_mcs_clamp_test pmch_mcs_clamp_test)

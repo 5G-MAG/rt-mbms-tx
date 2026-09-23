@@ -30,6 +30,10 @@
 #ifndef SRSRAN_PMCH_H
 #define SRSRAN_PMCH_H
 
+/* TS 36.331: pmch-TimeInterleaving-M (MTimePMCH) max legal value. Bounds the
+ * per-slot state arrays below - see srsran_pmch_t. */
+#define SRSRAN_PMCH_MAX_TI_M 32
+
 #include "srsran/config.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/common/sequence.h"
@@ -50,6 +54,25 @@ typedef struct {
 typedef struct SRSRAN_API {
   srsran_pdsch_cfg_t pdsch_cfg;
   uint16_t           area_id;
+  /* Rel-19 LTE_terr_bcast_Ph2 (TS 36.211 §6.5.1): PMCH cyclic bit shift */
+  bool    cyclic_shift;       /* enabled by pmch-CyclicShiftAlpha-r19 */
+  uint8_t cyclic_shift_alpha; /* α: 1, 2, or 3 (alpha1/alpha2/alpha3 from RRC) */
+  uint32_t subframe_idx;      /* i: index of this subframe within the N-subframe TB span */
+  /* Rel-19 LTE_terr_bcast_Ph2 (TS 36.211 §6.5.2): frequency-domain block interleaving */
+  bool freq_interleaving;     /* enabled by pmch-FreqInterleaving-r19 */
+  /* Rel-19 LTE_terr_bcast_Ph2 (TS 36.213 §11.1): MCS table and time interleaving */
+  bool    use_mcs_table2;       /* use Table 11.1-2 (256QAM) instead of Table 11.1-1 */
+  uint8_t time_interleaving_n;  /* NTimePMCH: TB spans N subframes; 0/1 = disabled */
+  uint8_t time_interleaving_m;  /* MTimePMCH: scheduling period length in subframes */
+  /* PMCH-SoftBufferSizeParameters-r19: N_cb = min(floor(N_IR/C), K_w) soft-buffer
+   * limitation (TS 36.212 §5.1.4.1.2). n_soft_ref_category (TS 36.306 Table 4.1-1)
+   * and the exact scaling_factor_beta_num/den fraction are broadcast alongside
+   * time_interleaving_n/m whenever time interleaving is active. 0 category = not
+   * yet configured/decoded; srsran_pmch_encode/decode falls back to the uncapped
+   * K_w in that case, exactly like before this field existed. */
+  uint8_t n_soft_ref_category;
+  uint8_t scaling_factor_beta_num;
+  uint8_t scaling_factor_beta_den;
 } srsran_pmch_cfg_t;
 
 /* PMCH object */
@@ -69,12 +92,47 @@ typedef struct SRSRAN_API {
   void* e;
 
   /* tx & rx objects */
-  srsran_modem_table_t mod[4];
+  srsran_modem_table_t mod[5]; /* BPSK, QPSK, 16QAM, 64QAM, 256QAM */
 
   // This is to generate the scrambling seq for multiple MBSFN Area IDs
   srsran_pmch_seq_t** seqs;
 
   srsran_sch_t dl_sch;
+
+  /* Rel-19 time interleaving (TS 36.211 §6.5.3 / TS 36.213 §11.1). A PMCH
+   * configured with pmch-TimeInterleaving-N/M pipelines up to M independent
+   * transport-block streams (TBm, m=0..M-1) within one N*M-subframe block;
+   * subframe s (0-based, s=cfg->subframe_idx) belongs to slot m=s%M with
+   * redundancy version rvidx=n=(s%(N*M))/M. Each slot needs its own cached
+   * payload and de-dup state, hence the arrays below, indexed by m.
+   *
+   * ti_rx_buf is unused by the rate-matching path - LLR soft-combining
+   * happens inside the per-codeblock softbuffer via srsran_dlsch_decode_mch
+   * instead (that softbuffer is caller-owned, not part of this struct - see
+   * MbsfnFrameProcessor.cpp, which must itself keep one softbuffer per slot
+   * m for the same reason these arrays exist). Left allocated rather than
+   * removed since nothing currently depends on its absence. */
+  int16_t* ti_rx_buf;  /* accumulated RX LLRs (unused - see above); max_re * 8 int16 */
+  uint32_t ti_buf_nre; /* max_re value at allocation time */
+
+  /* Per-slot (indexed by m) cached raw TB payload for TX re-encoding.
+   * srsran_pmch_encode caches data into ti_tx_buf[m] the first time slot m
+   * is seen at rvidx n==0, then re-encodes fresh from that cache on every
+   * subsequent n for that slot - MAC only supplies a fresh `data` pointer
+   * at n==0 (see mac.cc), matching this. Lazily allocated (NULL until slot m
+   * is first used) since a configured M is typically far below the spec max
+   * of 32 - sized ti_buf_nre * 8 bits worth of bytes per slot, same as the
+   * single buffer this replaces (worst-case-N=16 sizing, unchanged). */
+  uint8_t* ti_tx_buf[SRSRAN_PMCH_MAX_TI_M];
+
+  /* Per-slot (indexed by m) de-dup guard for the RX path: once a TB's
+   * codeblocks all pass CRC (partway through its own N-subframe span), the
+   * codeblock-CRC-skip machinery means every later subframe of that slot's
+   * span would also report success - this flag (reset when slot m starts a
+   * new TB, i.e. at n==0 for that slot) stops srsran_pmch_decode from
+   * re-reporting crc=true (and its caller from re-delivering the same
+   * transport block) more than once per slot per block. */
+  bool ti_decoded[SRSRAN_PMCH_MAX_TI_M];
 
 } srsran_pmch_t;
 
@@ -90,11 +148,20 @@ SRSRAN_API void srsran_pmch_free_area_id(srsran_pmch_t* q, uint16_t area_id);
 
 SRSRAN_API void srsran_configure_pmch(srsran_pmch_cfg_t* pmch_cfg, srsran_cell_t* cell, srsran_mbsfn_cfg_t* mbsfn_cfg);
 
+/* shared_ti_tx_buf: NULL for the single-worker/test-harness case (falls back to
+ * q->ti_tx_buf[], lazily allocated as before). Pass a caller-owned array of
+ * SRSRAN_PMCH_MAX_TI_M pre-allocated buffers (each large enough for one slot's
+ * raw TB payload) when multiple worker threads each hold their own srsran_pmch_t
+ * for the same cell - q->ti_tx_buf[] is per-instance, so a slot's payload cached
+ * by one worker would be invisible to whichever worker happens to process that
+ * slot's next subframe. See the 5g-broadcast-release-roadmap.md design doc
+ * ("TX-side ti_tx_buf per-worker fragmentation") for the full rationale. */
 SRSRAN_API int srsran_pmch_encode(srsran_pmch_t*      q,
                                   srsran_dl_sf_cfg_t* sf,
                                   srsran_pmch_cfg_t*  cfg,
                                   uint8_t*            data,
-                                  cf_t*               sf_symbols[SRSRAN_MAX_PORTS]);
+                                  cf_t*               sf_symbols[SRSRAN_MAX_PORTS],
+                                  uint8_t**           shared_ti_tx_buf);
 
 SRSRAN_API int srsran_pmch_decode(srsran_pmch_t*         q,
                                   srsran_dl_sf_cfg_t*    sf,

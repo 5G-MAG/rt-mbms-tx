@@ -299,7 +299,7 @@ int main(int argc, char** argv)
     }
   }
 
-  if (srsran_pmch_encode(&pmch, &dl_sf, &pmch_cfg, data_tx[0], tx_slot_symbols)) {
+  if (srsran_pmch_encode(&pmch, &dl_sf, &pmch_cfg, data_tx[0], tx_slot_symbols, NULL)) {
     ERROR("Error encoding PDSCH");
     exit(-1);
   }
@@ -376,12 +376,20 @@ int main(int argc, char** argv)
   /* Check Tx and Rx bytes */
   for (int tb = 0; tb < SRSRAN_MAX_CODEWORDS; tb++) {
     if (pmch_cfg.pdsch_cfg.grant.tb[tb].enabled) {
+      int nof_err = 0;
+      int first_err = -1;
       for (int byte = 0; byte < pmch_cfg.pdsch_cfg.grant.tb[tb].tbs / 8; byte++) {
         if (data_tx[tb][byte] != data_rx[tb][byte]) {
-          ERROR("Found BYTE error in TB %d (%02X != %02X), quiting...", tb, data_tx[tb][byte], data_rx[tb][byte]);
-          ret = SRSRAN_ERROR;
-          goto quit;
+          if (first_err < 0) first_err = byte;
+          nof_err++;
         }
+      }
+      if (nof_err > 0) {
+        ERROR("Found %d BYTE errors in TB %d out of %d bytes, first at byte %d (%02X != %02X), quiting...",
+              nof_err, tb, pmch_cfg.pdsch_cfg.grant.tb[tb].tbs / 8, first_err,
+              data_tx[tb][first_err], data_rx[tb][first_err]);
+        ret = SRSRAN_ERROR;
+        goto quit;
       }
     }
   }

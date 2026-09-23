@@ -22,6 +22,7 @@
 #include "srsran/phy/phch/ra_dl.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/phch/ra.h"
+#include "tbs_tables.h"
 #include "srsran/phy/utils/bit.h"
 #include "srsran/phy/utils/debug.h"
 #include "srsran/phy/utils/vector.h"
@@ -29,6 +30,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -52,7 +54,34 @@ uint32_t ra_re_x_prb(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* sf, uint32_t
     if (sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
       re = SRSRAN_NRE_SCS(sf->subcarrier_spacing) * SRSRAN_MBSFN_NOF_SYMBOLS(sf->subcarrier_spacing);
       if (skip_refs) {
-        re -= srsran_refsignal_mbsfn_rs_per_symbol(sf->subcarrier_spacing) * (slot+1);
+        if (sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL4) {
+          /* SL4 type-1: RS only in l=0.  NRE_SCS=486 is not a multiple of 12
+           * (486%12=6), so the per-PRB RS start shifts by 6 for each successive
+           * PRB.  Compute the actual RS count for this specific PRB so that the
+           * rate-matching output size matches what pmch_cp_sl4_prb will copy.
+           * ns must match put_sf/get_sf's ns (40 ms period, 13 slots of 3 ms, first
+           * slot absorbs the extra TTI) — a plain tti/3 disagrees with that from
+           * tti=3 onward within every period. Also, per TS 36.211 §6.10.2.2.4, "ns"
+           * is the ABSOLUTE slot number (ns' + 13*nf/4) -- fold in the period count
+           * so the stagger phase advances every period like put_sf/get_sf now do. */
+          uint32_t pos40          = sf->tti % 40u;
+          uint32_t ns_37          = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (sf->tti / 40u);
+          uint32_t global_stagger = 3u * (ns_37 % 4u);
+          uint32_t prb_stagger    = (global_stagger + prb_idx * (SRSRAN_NRE_SCS_370HZ % 12u)) % 12u;
+          uint32_t rs_n           = (SRSRAN_NRE_SCS_370HZ - prb_stagger + 11u) / 12u; /* ceil */
+          re -= rs_n;
+        } else {
+          /* Count RS-bearing symbols in this slot.  For 7.5 kHz the distribution
+           * is unequal (1 in slot 0, 2 in slot 1), so SRSRAN_MBSFN_NOF_SYMBOLS
+           * would over-subtract; SRSRAN_SYMBOL_HAS_REF_MBSFN_SCS gives the truth. */
+          uint32_t nof_rs_syms = 0;
+          for (uint32_t l = 0; l < SRSRAN_MBSFN_NOF_SYMBOLS(sf->subcarrier_spacing); l++) {
+            if (SRSRAN_SYMBOL_HAS_REF_MBSFN_SCS(l, slot, sf->subcarrier_spacing)) {
+              nof_rs_syms++;
+            }
+          }
+          re -= srsran_refsignal_mbsfn_rs_per_symbol(sf->subcarrier_spacing) * nof_rs_syms;
+        }
       }
       return re;
     }
@@ -69,9 +98,14 @@ uint32_t ra_re_x_prb(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* sf, uint32_t
     re = nof_symbols * SRSRAN_NRE;
   }
 
-  /* if it's the prb in the middle, there are less RE due to PBCH and PSS/SSS */
+  /* if it's the prb in the middle, there are less RE due to PBCH and PSS/SSS.
+   * Does not apply to an MBSFN-typed subframe #0/#5: those are only reachable on an
+   * MBMS-dedicated cell (TS 36.331 commonSF-Alloc-v1610 is "included only when the cell
+   * is a MBMS-dedicated cell"), where PBCH/PSS/SSS are carried solely in the periodic,
+   * separate Cell Acquisition Subframe (TS 103 720 clause 6.4.2) rather than overlaid on
+   * this subframe - so there is no PBCH/PSS/SSS to protect against here. */
   if (cell->frame_type == SRSRAN_FDD) {
-    if ((subframe == 0 || subframe == 5) &&
+    if (sf->sf_type != SRSRAN_SF_MBSFN && (subframe == 0 || subframe == 5) &&
         (prb_idx >= cell->nof_prb / 2 - 3 && prb_idx < cell->nof_prb / 2 + 3 + (cell->nof_prb % 2))) {
       if (subframe == 0) {
         if (slot == 0) {
@@ -347,6 +381,61 @@ int srsran_dl_fill_ra_mcs(srsran_ra_tb_t* tb, int last_tbs, uint32_t nprb, bool 
   return tbs;
 }
 
+/* Rel-19 LTE_terr_bcast_Ph2: PMCH MCS lookup per TS 36.213 §11.1.
+ * Four cases depending on 256QAM capability and SCS family. */
+int srsran_pmch_fill_ra_mcs(srsran_ra_tb_t* tb, uint32_t nprb, bool use_table2, srsran_scs_t scs)
+{
+  uint32_t mcs    = tb->mcs_idx;
+  bool     is_sl4 = SRSRAN_SCS_IS_370HZ(scs);
+  int      i_tbs;
+
+  if (use_table2) {
+    /* 256QAM enabled. Both tables share the same 28-entry I_TBS sequence
+     * (dl_mcs_tbs_idx_table2; confirmed against R1-2504967's Table 11.1-2 text,
+     * which lists the identical 0,2,4,...,33 I_TBS progression), but the two
+     * tables put the modulation-order boundaries at different MCS indices:
+     * SL4:     TS 36.213 Table 11.1-2  — QPSK 0-5, 16QAM 6-14, 64QAM 15-20, 256QAM 21-27.
+     * non-SL4: TS 36.213 Table 7.1.7.1-1A — QPSK 0-4, 16QAM 5-10, 64QAM 11-19, 256QAM 20-27
+     *          (matches srsran_ra_dl_mod_from_mcs's alt-table branch in ra.c).
+     * MCS 28-31 reserved in both. */
+    if (mcs >= 28) return SRSRAN_ERROR;
+    i_tbs = dl_mcs_tbs_idx_table2[mcs];
+    if (is_sl4) {
+      if (mcs < 6)        tb->mod = SRSRAN_MOD_QPSK;
+      else if (mcs < 15)  tb->mod = SRSRAN_MOD_16QAM;
+      else if (mcs < 21)  tb->mod = SRSRAN_MOD_64QAM;
+      else                tb->mod = SRSRAN_MOD_256QAM;
+    } else {
+      if (mcs < 5)        tb->mod = SRSRAN_MOD_QPSK;
+      else if (mcs < 11)  tb->mod = SRSRAN_MOD_16QAM;
+      else if (mcs < 20)  tb->mod = SRSRAN_MOD_64QAM;
+      else                tb->mod = SRSRAN_MOD_256QAM;
+    }
+  } else if (is_sl4) {
+    /* No 256QAM, SL4: TS 36.213 Table 11.1-1.
+     * QPSK MCS 0-10, 16QAM MCS 11-20, 64QAM MCS 21-28 (MCS 29-31 reserved). */
+    if (mcs >= 29) return SRSRAN_ERROR;
+    i_tbs = pmch_mcs_tbs_idx_table1[mcs];
+    if (mcs <= 10)      tb->mod = SRSRAN_MOD_QPSK;
+    else if (mcs <= 20) tb->mod = SRSRAN_MOD_16QAM;
+    else                tb->mod = SRSRAN_MOD_64QAM;
+  } else {
+    /* No 256QAM, non-SL4: TS 36.213 Table 7.1.7.1-1 (standard PDSCH table).
+     * QPSK MCS 0-9, 16QAM MCS 10-16, 64QAM MCS 17-28 (MCS 29-31 reserved).
+     * Matches srsran_ra_dl_mod_from_mcs()'s non-alt-table branch in ra.c, which uses
+     * the same dl_mcs_tbs_idx_table and the same table reference. */
+    if (mcs >= 29) return SRSRAN_ERROR;
+    i_tbs = dl_mcs_tbs_idx_table[mcs];
+    if (mcs < 10)       tb->mod = SRSRAN_MOD_QPSK;
+    else if (mcs <= 16) tb->mod = SRSRAN_MOD_16QAM;
+    else                tb->mod = SRSRAN_MOD_64QAM;
+  }
+
+  int tbs = srsran_ra_tbs_from_idx((uint32_t)i_tbs, nprb);
+  tb->tbs = tbs;
+  return tbs;
+}
+
 /* Modulation order and transport block size determination 7.1.7 in 36.213
  * */
 static int dl_dci_compute_tb(bool pdsch_use_tbs_index_alt, const srsran_dci_dl_t* dci, srsran_pdsch_grant_t* grant)
@@ -432,6 +521,12 @@ void srsran_ra_dl_compute_nof_re(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* 
 {
   // Compute number of RE
   grant->nof_re   = srsran_ra_dl_grant_nof_re(cell, sf, grant);
+  if (getenv("PMCH_TI_DIAG")) {
+    fprintf(stderr,
+            "TI_DIAG_NOFRE tti=%u sf_type=%d sf_scs=%d cfi=%d cp=%d nof_ports=%d cell.nof_prb=%u grant.nof_prb=%u nof_re=%u\n",
+            sf->tti, (int)sf->sf_type, (int)sf->subcarrier_spacing, sf->cfi, (int)cell->cp, cell->nof_ports,
+            cell->nof_prb, grant->nof_prb, grant->nof_re);
+  }
   srsran_cp_t cp_ = SRSRAN_SF_NORM == sf->sf_type ? cell->cp : SRSRAN_CP_EXT;
   if (cell->frame_type == SRSRAN_FDD) {
    if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing == SRSRAN_SCS_1KHZ25) {
@@ -440,6 +535,14 @@ void srsran_ra_dl_compute_nof_re(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* 
     } else if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing == SRSRAN_SCS_7KHZ5) {
       grant->nof_symb_slot[0] = SRSRAN_CP_SCS_7KHZ5_NSYMB;
       grant->nof_symb_slot[1] = SRSRAN_CP_SCS_7KHZ5_NSYMB;
+    } else if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing == SRSRAN_SCS_2KHZ5) {
+      /* 2.5 kHz: 2 symbols per 1 ms subframe (nof_slots=1, both symbols in slot 0). */
+      grant->nof_symb_slot[0] = SRSRAN_CP_SCS_2KHZ5_NSYMB;
+      grant->nof_symb_slot[1] = 0;
+    } else if (sf->sf_type == SRSRAN_SF_MBSFN && SRSRAN_SCS_IS_370HZ(sf->subcarrier_spacing)) {
+      /* 0.37 kHz: one 3 ms symbol per 1 ms window (placeholder). */
+      grant->nof_symb_slot[0] = 1;
+      grant->nof_symb_slot[1] = 0;
     } else {
       grant->nof_symb_slot[0] = SRSRAN_CP_NSYMB(cp_);
       grant->nof_symb_slot[1] = SRSRAN_CP_NSYMB(cp_);
@@ -683,9 +786,36 @@ uint32_t srsran_ra_dl_approx_nof_re(const srsran_cell_t* cell, uint32_t nof_prb,
 uint32_t srsran_ra_dl_grant_nof_re(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* sf, srsran_pdsch_grant_t* grant)
 {
   uint32_t j, s;
-  // Compute number of RE per PRB
-  uint32_t nof_re = 0;
+  uint32_t nof_re   = 0;
   uint32_t nof_slots = (sf->sf_type == SRSRAN_SF_MBSFN ? SRSRAN_MBSFN_NOF_SLOTS(sf->subcarrier_spacing) : 2);
+
+  /* SL4 (0.37 kHz, sl4) has global pilot spacing of 12 subcarriers across the full bandwidth.
+   * 486 is not divisible by 12, so per-PRB RS count alternates between 40 and 41 depending
+   * on the global stagger. Use the same exact per-PRB formula as pmch_sym_re_per_sym. */
+  if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing == SRSRAN_SCS_370HZ_SL4) {
+    uint32_t nre  = SRSRAN_NRE_SCS_370HZ;
+    uint32_t prb  = grant->nof_prb;
+    /* Stagger must use the same 40 ms/13-slot ns as put_sf's actual RS placement
+     * (see refsignal_dl.c), not a plain tti/3 — the two disagree from tti=3 onward
+     * within every period, which would count the wrong number of RS REs per PRB
+     * here and desync nof_bits/TBS from what was actually transmitted. Also, per
+     * TS 36.211 §6.10.2.2.4, "ns" is the ABSOLUTE slot number (ns' + 13*nf/4) --
+     * fold in the period count so the stagger phase advances every period. */
+    uint32_t pos40 = sf->tti % 40u;
+    uint32_t ns_37 = ((pos40 > 0u) ? (pos40 - 1u) / 3u : 0u) + 13u * (sf->tti / 40u);
+    uint32_t g     = 3u * (ns_37 % 4u);
+    uint32_t s1   = g % 12u;
+    uint32_t s2   = (g + 6u) % 12u;
+    uint32_t rs1  = (nre - s1 + 11u) / 12u;
+    uint32_t rs2  = (nre - s2 + 11u) / 12u;
+    uint32_t n1   = (prb + 1u) / 2u;
+    uint32_t n2   = prb / 2u;
+    return prb * nre - (n1 * rs1 + n2 * rs2);
+  }
+
+  /* Iterate over the full carrier bandwidth so centered or non-contiguous PRB
+   * allocations (e.g. PMCH extended BW) are counted correctly. Non-allocated
+   * PRBs have prb_idx[s][j]=false and contribute 0 RE. */
   for (s = 0; s < nof_slots; s++) {
     for (j = 0; j < cell->nof_prb; j++) {
       if (grant->prb_idx[s][j]) {

@@ -133,6 +133,25 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("pcap.enable",   bpo::value<bool>(&args->mme_args.s1ap_args.pcap_enable)->default_value(false),         "Enable S1AP PCAP")
     ("pcap.filename", bpo::value<string>(&args->mme_args.s1ap_args.pcap_filename)->default_value("/tmp/epc.pcap"), "PCAP filename")
 
+    // A dedicated [mme_sm] section (mirroring [mbms_gw_sm]'s pattern), not
+    // new keys inside [mme] -- keeps interface-specific config namespaced
+    // consistently with the MBMS-GW side and avoids further overloading [mme].
+    ("mme_sm.sm_bind_addr", bpo::value<string>(&args->mme_args.sm_args.sm_bind_addr)->default_value("0.0.0.0"), "Sm interface bind address")
+    ("mme_sm.sm_bind_port", bpo::value<uint16_t>(&args->mme_args.sm_args.sm_bind_port)->default_value(2123), "Sm interface bind port (MUST stay 2123 for spec-compliant interop, TS 29.274 sec 4.2.1.1)")
+
+    // A dedicated [mme_sbc] section, same namespacing rationale as [mme_sm] above --
+    // this is the CBC-facing Public Warning System origination interface (SBc-AP).
+    ("mme_sbc.sbc_bind_addr", bpo::value<string>(&args->mme_args.sbc_args.sbc_bind_addr)->default_value("0.0.0.0"), "SBc-AP interface bind address")
+    ("mme_sbc.sbc_bind_port", bpo::value<uint16_t>(&args->mme_args.sbc_args.sbc_bind_port)->default_value(29168), "SBc-AP interface bind port (registered SCTP port, TS 29.168)")
+    ("mme_sbc.bridge_socket_path", bpo::value<string>(&args->mme_args.sbc_args.bridge_socket_path)->default_value("/tmp/srsepc_sbc_bridge.sock"), "Local AF_UNIX SOCK_STREAM bridge socket, used by mbms-control-portal in place of real SCTP (see sbc.h)")
+
+    // A dedicated [mme_m3] section, same namespacing rationale as [mme_sm]/[mme_sbc] above -- the MCE (eNB)-facing
+    // MBMS session control interface (M3AP, TS 36.444). TS 36.444 itself doesn't specify a port, but 36444 is
+    // IANA-registered to "m3ap"/SCTP (confirmed against the IANA Service Name and Port Number Registry) --
+    // still configurable here rather than hardcoded, since that's a registered default, not a TS 36.444 mandate.
+    ("mme_m3.m3_bind_addr", bpo::value<string>(&args->mme_args.m3ap_args.bind_addr)->default_value("0.0.0.0"), "M3AP interface bind address")
+    ("mme_m3.m3_bind_port", bpo::value<uint16_t>(&args->mme_args.m3ap_args.bind_port)->default_value(srsepc::M3_PORT_DEFAULT), "M3AP interface bind port (IANA-registered default, see project notes)")
+
     ("log.nas_level",           bpo::value<string>(&args->log_args.nas_level),        "MME NAS  log level")
     ("log.nas_hex_limit",       bpo::value<int>(&args->log_args.nas_hex_limit),       "MME NAS log hex dump limit")
     ("log.s1ap_level",          bpo::value<string>(&args->log_args.s1ap_level),       "MME S1AP log level")

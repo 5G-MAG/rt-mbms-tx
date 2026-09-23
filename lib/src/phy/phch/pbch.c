@@ -97,6 +97,104 @@ int srsran_pbch_cp(cf_t* input, cf_t* output, srsran_cell_t cell, bool put)
   }
 }
 
+/* TS 36.211 clause 6.6.4.1: PBCH CAS repetition for FeMBMS dedicated carriers.
+ *
+ * cinit = 2^13*(N_ID^cell+1)*(N_symb^DL*ns'+l'+1) + 2^4*N_ID^cell + N_symb^DL*ns'+l'
+ * theta(k,l') = e^(j*pi*c(2k)/2) * e^(j*pi*c(2k+1)),  k = subcarrier in PBCH 72-band
+ *
+ * Table 6.6.4.1-1 (Normal CP):
+ *   src l=0 → (ns'=0, l'=4)      src l=2 → (ns'=1, l'=5)
+ *   src l=1 → (ns'=1, l'=4)      src l=3 → (ns'=0, l'=3), (ns'=1, l'=6)
+ *
+ * Table 6.6.4.1-1 (Extended CP):
+ *   src l=0 → "-" (no entry)      src l=2 → (ns'=1, l'=4)
+ *   src l=1 → (ns'=0, l'=3)       src l=3 → (ns'=1, l'=5)
+ */
+#define PBCH_CAS_NOF_SC 72
+
+typedef struct { uint32_t src_l, dst_ns, dst_l; } pbch_cas_map_t;
+static const pbch_cas_map_t PBCH_CAS_MAP_NCP[5] = {
+    {0, 0, 4}, {1, 1, 4}, {2, 1, 5}, {3, 0, 3}, {3, 1, 6}
+};
+static const pbch_cas_map_t PBCH_CAS_MAP_ECP[3] = {
+    {1, 0, 3}, {2, 1, 4}, {3, 1, 5}
+};
+
+static void pbch_cas_gen_theta(uint32_t cell_id, uint32_t ns_prime, uint32_t l_prime,
+                                uint32_t n_symb_dl, cf_t* theta)
+{
+    uint32_t cinit = (1U << 13) * (cell_id + 1) * (n_symb_dl * ns_prime + l_prime + 1)
+                     + (1U << 4) * cell_id
+                     + n_symb_dl * ns_prime + l_prime;
+    srsran_sequence_t seq = {};
+    srsran_sequence_LTE_pr(&seq, 2 * PBCH_CAS_NOF_SC, cinit);
+    for (uint32_t k = 0; k < PBCH_CAS_NOF_SC; k++) {
+        /* θk,l' = e^(jπc(2k)/2) · e^(jπc(2k+1)):
+         *   c(2k)=0 → 1+j0;  c(2k)=1 → 0+j1;  then flip sign if c(2k+1)=1 */
+        float re = (seq.c[2 * k]     == 0) ? 1.0f : 0.0f;
+        float im = (seq.c[2 * k]     == 1) ? 1.0f : 0.0f;
+        if (seq.c[2 * k + 1] == 1) { re = -re; im = -im; }
+        theta[k] = re + _Complex_I * im;
+    }
+    srsran_sequence_free(&seq);
+}
+
+/**
+ * Puts or gets a CAS-repeated PBCH symbol block.
+ *
+ * sf_symbols: full subframe resource grid
+ * cell:       cell configuration
+ * put:        true = TX (write rotated copies), false = RX (read into cas_out)
+ * cas_out:    RX only — NCP: 5*PBCH_CAS_NOF_SC elements; ECP: 3*PBCH_CAS_NOF_SC elements
+ *
+ * Frame condition (checked by caller):
+ *   n_f mod 4 = 0 for N_RB^DL >= 25;  n_f mod 8 = 4 for 6 < N_RB^DL < 25.
+ * Applies only when cell.mbms_dedicated = true and cell.nof_prb > 6.
+ */
+static void pbch_cas_cp(cf_t* sf_symbols, srsran_cell_t cell, bool put, cf_t* cas_out)
+{
+    bool ncp = SRSRAN_CP_ISNORM(cell.cp);
+    const pbch_cas_map_t* map  = ncp ? PBCH_CAS_MAP_NCP : PBCH_CAS_MAP_ECP;
+    int                   nmap = ncp ? 5 : 3;
+
+    uint32_t n_symb_dl = SRSRAN_CP_NSYMB(cell.cp);   /* 7 NCP, 6 ECP */
+    uint32_t slot_re   = SRSRAN_SLOT_LEN_RE(cell.nof_prb, cell.cp);
+    uint32_t center    = cell.nof_prb * SRSRAN_NRE / 2 - 36;
+
+    cf_t theta[PBCH_CAS_NOF_SC];
+
+    for (int i = 0; i < nmap; i++) {
+        uint32_t src_l  = map[i].src_l;
+        uint32_t dst_ns = map[i].dst_ns;
+        uint32_t dst_lp = map[i].dst_l;
+
+        /* RS positions: NCP at l=0,4 (ports 0,1) and l=1 (ports 2,3);
+         *               ECP at l=0,3 (ports 0,1) — ports 2,3 not used for PBCH. */
+        bool src_has_rs = ncp ? (src_l == 0 || src_l == 1) : (src_l == 0 || src_l == 3);
+        bool dst_has_rs = ncp ? (dst_lp == 0 || dst_lp == 4) : (dst_lp == 0 || dst_lp == 3);
+
+        /* Source subcarriers in slot 1, symbol src_l. */
+        cf_t* src = sf_symbols + slot_re + src_l * cell.nof_prb * SRSRAN_NRE + center;
+        /* Destination subcarriers in slot dst_ns, symbol dst_lp. */
+        cf_t* dst = sf_symbols + dst_ns * slot_re + dst_lp * cell.nof_prb * SRSRAN_NRE + center;
+
+        pbch_cas_gen_theta(cell.id, dst_ns, dst_lp, n_symb_dl, theta);
+
+        for (uint32_t k = 0; k < PBCH_CAS_NOF_SC; k++) {
+            bool is_rs = ((k % 3) == (cell.id % 3));
+            if ((src_has_rs || dst_has_rs) && is_rs) {
+                continue;  /* Skip RS subcarrier — do not overwrite CS-RS. */
+            }
+            if (put) {
+                dst[k] = src[k] * theta[k];
+            } else if (cas_out) {
+                /* Conjugate-rotate for coherent soft combination. */
+                cas_out[i * PBCH_CAS_NOF_SC + k] = dst[k] * conjf(theta[k]);
+            }
+        }
+    }
+}
+
 /**
  * Puts PBCH in slot number 1
  *
@@ -127,6 +225,43 @@ int srsran_pbch_put(cf_t* pbch, cf_t* slot1_data, srsran_cell_t cell)
 int srsran_pbch_get(cf_t* slot1_data, cf_t* pbch, srsran_cell_t cell)
 {
   return srsran_pbch_cp(slot1_data, pbch, cell, false);
+}
+
+/**
+ * Writes phase-rotated PBCH CAS repetition symbols into sf_symbols.
+ *
+ * TS 36.211 clause 6.6.4.1. Call after srsran_pbch_encode on an FeMBMS dedicated carrier
+ * when cell.mbms_dedicated=true, cell.nof_prb>6, and the frame condition is satisfied:
+ *   n_f mod 4 = 0 for N_RB^DL >= 25;  n_f mod 8 = 4 for 6 < N_RB^DL < 25.
+ *
+ * @param[in,out] sf_symbols Full subframe resource grid (both slots).
+ * @param[in]     cell       Cell configuration.
+ */
+void srsran_pbch_put_cas_rep(cf_t* sf_symbols, srsran_cell_t cell)
+{
+  if (cell.mbms_dedicated && cell.nof_prb > 6) {
+    pbch_cas_cp(sf_symbols, cell, true, NULL);
+  }
+}
+
+/**
+ * Extracts conjugate-rotated PBCH CAS repetition symbols from sf_symbols.
+ *
+ * TS 36.211 clause 6.6.4.1. Returns 5 * PBCH_CAS_NOF_SC = 360 complex values for
+ * Normal CP, or 3 * PBCH_CAS_NOF_SC = 216 for Extended CP (fewer source/destination
+ * symbol pairs, see PBCH_CAS_MAP_NCP/PBCH_CAS_MAP_ECP), suitable for soft-combining
+ * with the main PBCH LLRs. The caller is responsible for channel equalization
+ * before combining.
+ *
+ * @param[in]  sf_symbols Full subframe resource grid.
+ * @param[in]  cell       Cell configuration.
+ * @param[out] cas_out    Output buffer: 360 (Normal CP) or 216 (Extended CP) complex elements.
+ */
+void srsran_pbch_get_cas_rep(cf_t* sf_symbols, srsran_cell_t cell, cf_t* cas_out)
+{
+  if (cell.mbms_dedicated && cell.nof_prb > 6 && cas_out) {
+    pbch_cas_cp(sf_symbols, cell, false, cas_out);
+  }
 }
 
 /** Initializes the PBCH transmitter and receiver.
@@ -332,13 +467,22 @@ void srsran_pbch_mib_mbms_unpack(uint8_t* msg, srsran_cell_t* cell, uint32_t* sf
       cell->nof_prb = override_prb;
   }
 
+  /* Always advance msg past sfn bits to keep alignment for subsequent fields. */
+  uint32_t sfn_bits = srsran_bit_pack(&msg, 6);
   if (sfn) {
-    *sfn = srsran_bit_pack(&msg, 6) << 4;
+    *sfn = sfn_bits << 4;
   }
 
+  /* bits [9-10]: additionalNonMBSFNSubframes-r14 — always advance. */
+  uint32_t add_non_mbsfn = srsran_bit_pack(&msg, 2);
   if (additional_non_mbsfn_subframes) {
-    *additional_non_mbsfn_subframes = *msg++;
+    *additional_non_mbsfn_subframes = add_non_mbsfn;
   }
+
+  /* bits [11-12]: semiStaticCFI-MBMS-r16 — INTEGER(0..3), TS 36.213 §9.1.3: 0 = derive CFI
+   * from PCFICH, 1/2/3 directly ARE the CFI value. cell->semi_static_cfi already stores
+   * exactly this convention (see phy_common.h) -- decode it verbatim, no remapping. */
+  cell->semi_static_cfi = srsran_bit_pack(&msg, 2);
 }
 
 /**
@@ -368,7 +512,9 @@ void srsran_pbch_mib_mbms_pack(srsran_cell_t* cell, uint32_t sfn, uint32_t addit
     DEBUG("Packing MIB MBMS sfn=%d -> %d", sfn, sfn>>4);
   srsran_bit_unpack(sfn >> 4, &msg, 6);
 
-  *msg = additional_non_mbsfn_subframes;
+  srsran_bit_unpack(additional_non_mbsfn_subframes, &msg, 2);
+  /* bits [11-12]: semiStaticCFI-MBMS-r16 — INTEGER(0..3), see _unpack()'s comment above. */
+  srsran_bit_unpack(cell->semi_static_cfi, &msg, 2);
 }
 /**
  * Packs MIB to PBCH message.
@@ -620,7 +766,8 @@ int srsran_pbch_decode(srsran_pbch_t*         q,
 int srsran_pbch_encode(srsran_pbch_t* q,
                        uint8_t        bch_payload[SRSRAN_BCH_PAYLOAD_LEN],
                        cf_t*          sf_symbols[SRSRAN_MAX_PORTS],
-                       uint32_t       frame_idx)
+                       uint32_t       frame_idx,
+                       uint32_t       sfn)
 {
   int   i;
   int   nof_bits;
@@ -663,6 +810,27 @@ int srsran_pbch_encode(srsran_pbch_t* q,
     for (i = 0; i < q->cell.nof_ports; i++) {
       srsran_pbch_put(q->symbols[i], &sf_symbols[i][SRSRAN_SLOT_LEN_RE(q->cell.nof_prb, q->cell.cp)], q->cell);
     }
+
+    /* TS 36.211 clause 6.6.4.1: CAS repetition for FeMBMS dedicated carriers (nof_prb > 6).
+     * N_RB^DL >= 25: every frame with n_f mod 4 = 0.
+     * 6 < N_RB^DL < 25: every frame with n_f mod 8 = 4.
+     * CAS-muting (CR 0577) awareness is checked here, not left to the caller: the only
+     * production caller (enb_dl.c put_mib) already gates correctly before ever calling
+     * this public API, but a muted frame must not get CAS-rep symbols regardless of who
+     * calls srsran_pbch_encode, since muted frames are MBSFN data, not CAS. */
+    bool put_cas = q->cell.mbms_dedicated && q->cell.nof_prb > 6;
+    if (put_cas) {
+      put_cas = (q->cell.nof_prb >= 25) ? (sfn % 4 == 0) : (sfn % 8 == 4);
+    }
+    if (put_cas && q->cell.cas_muting) {
+      put_cas = sfn % (16u * (uint32_t)q->cell.n_cas) < 4u * (uint32_t)q->cell.k_cas;
+    }
+    if (put_cas) {
+      for (i = 0; i < q->cell.nof_ports; i++) {
+        srsran_pbch_put_cas_rep(sf_symbols[i], q->cell);
+      }
+    }
+
     return SRSRAN_SUCCESS;
   } else {
     return SRSRAN_ERROR_INVALID_INPUTS;

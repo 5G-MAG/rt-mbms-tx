@@ -36,6 +36,7 @@ class mac_dummy : public mac_interface_rrc
 {
 public:
   int  cell_cfg(const std::vector<sched_interface::cell_cfg_t>& cell_cfg) override { return 0; }
+  void set_sib_lens(uint32_t enb_cc_idx, const sched_interface::cell_cfg_sib_t* sibs) override {}
   int  ue_cfg(uint16_t rnti, const sched_interface::ue_cfg_t* cfg) override { return 0; }
   int  ue_rem(uint16_t rnti) override { return 0; }
   int  ue_set_crnti(uint16_t temp_crnti, uint16_t crnti, const sched_interface::ue_cfg_t& cfg) override { return 0; }
@@ -111,6 +112,9 @@ class phy_dummy : public phy_interface_rrc_lte
 {
 public:
   void configure_mbsfn(srsran::sib2_mbms_t* sib2, srsran::sib13_t* sib13, const srsran::mcch_msg_t& mcch) override {}
+  void set_cell_cas_muting_cfg(bool cas_muting, uint8_t k_cas, uint8_t n_cas, uint8_t additional_non_mbsfn_subframes) override
+  {
+  }
   void set_config(uint16_t rnti, const phy_rrc_cfg_list_t& dedicated_list) override {}
   void complete_config(uint16_t rnti) override{};
 };

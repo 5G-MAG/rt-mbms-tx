@@ -100,6 +100,7 @@ enb_stack_lte::enb_stack_lte(srslog::sink& log_sink) :
   rlc(rlc_logger),
   gtpu(&task_sched, gtpu_logger, &rx_sockets),
   s1ap(&task_sched, s1ap_logger, &rx_sockets),
+  m3ap(&task_sched, s1ap_logger, &rx_sockets),
   rrc(&task_sched, bearers),
   mac_pcap(),
   pending_stack_metrics(64)
@@ -196,11 +197,16 @@ int enb_stack_lte::init(const stack_args_t&      args_,
     stack_logger.error("Couldn't initialize S1AP");
     return SRSRAN_ERROR;
   }
+  if (m3ap.init(args.m3ap, &rrc) != SRSRAN_SUCCESS) {
+    stack_logger.error("Couldn't initialize M3AP");
+    return SRSRAN_ERROR;
+  }
 
   gtpu_args_t gtpu_args;
   gtpu_args.embms_enable                 = args.embms.enable;
   gtpu_args.embms_m1u_multiaddr          = args.embms.m1u_multiaddr;
   gtpu_args.embms_m1u_if_addr            = args.embms.m1u_if_addr;
+  gtpu_args.embms_session_teids          = args.embms.session_teids;
   gtpu_args.mme_addr                     = args.s1ap.mme_addr;
   gtpu_args.gtp_bind_addr                = args.s1ap.gtp_bind_addr;
   gtpu_args.indirect_tunnel_timeout_msec = args.gtpu_indirect_tunnel_timeout_msec;
@@ -241,6 +247,7 @@ void enb_stack_lte::stop_impl()
   rx_sockets.stop();
 
   s1ap.stop();
+  m3ap.stop();
   gtpu.stop();
   mac.stop();
   rlc.stop();

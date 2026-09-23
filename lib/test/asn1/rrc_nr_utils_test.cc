@@ -125,7 +125,7 @@ int make_phy_harq_ack_cfg_test()
 
 int make_phy_coreset_cfg_test()
 {
-  ctrl_res_set_s ctrl_res_set       = {};
+  ctrl_res_set_s ctrl_res_set;
   ctrl_res_set.ctrl_res_set_id      = 1;
   ctrl_res_set.precoder_granularity = ctrl_res_set_s::precoder_granularity_opts::same_as_reg_bundle;
   ctrl_res_set.dur                  = 1;
@@ -164,7 +164,7 @@ int make_phy_search_space_cfg_test()
   //    searchSpaceType: common (0)
   //        common
   //            dci-Format0-0-AndFormat1-0
-  search_space_s search_space                                 = {};
+  search_space_s search_space;
   search_space.search_space_id                                = 1;
   search_space.ctrl_res_set_id_present                        = true;
   search_space.ctrl_res_set_id                                = 1;
@@ -217,7 +217,7 @@ int make_phy_search_space_cfg_test()
   //                ue-Specific
   //                    dci-Formats: formats0-0-And-1-0 (0)
 
-  search_space_s search_space_2                                 = {};
+  search_space_s search_space_2;
   search_space_2.search_space_id                                = 2;
   search_space_2.ctrl_res_set_id_present                        = true;
   search_space_2.ctrl_res_set_id                                = 2;

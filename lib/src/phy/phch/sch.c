@@ -245,7 +245,9 @@ static int encode_tb_off(srsran_sch_t*           q,
                          uint32_t                nof_e_bits,
                          uint8_t*                data,
                          uint8_t*                e_bits,
-                         uint32_t                w_offset)
+                         uint32_t                w_offset,
+                         uint32_t                e_min,
+                         uint32_t                n_cb_cap)
 {
   uint32_t i;
   uint32_t cb_len = 0, rp = 0, wp = 0, rlen = 0, n_e = 0;
@@ -330,8 +332,23 @@ static int encode_tb_off(srsran_sch_t*           q,
       }
       DEBUG("RM cblen_idx=%d, n_e=%d, wp=%d, nof_e_bits=%d", cblen_idx, n_e, wp, nof_e_bits);
 
-      /* Rate matching */
-      if (srsran_rm_turbo_tx_lut(softbuffer->buffer_b[i],
+      /* Rate matching. e_min>0 selects the MCH time-interleaving path (TS
+       * 36.212 §5.1.4.1.2, rv_idx up to 15) instead of the standard rv<4 LUT -
+       * see srsran_rm_turbo_tx_mch's doc comment in rm_turbo.c. */
+      if (e_min > 0) {
+        if (srsran_rm_turbo_tx_mch(q->cb_in,
+                                   q->parity_bits,
+                                   &e_bits[(wp + w_offset) / 8],
+                                   cblen_idx,
+                                   n_e,
+                                   (wp + w_offset) % 8,
+                                   rv,
+                                   e_min,
+                                   n_cb_cap)) {
+          ERROR("Error in MCH rate matching");
+          return SRSRAN_ERROR;
+        }
+      } else if (srsran_rm_turbo_tx_lut(softbuffer->buffer_b[i],
                                  q->cb_in,
                                  q->parity_bits,
                                  &e_bits[(wp + w_offset) / 8],
@@ -363,9 +380,11 @@ static int encode_tb(srsran_sch_t*           q,
                      uint32_t                rv,
                      uint32_t                nof_e_bits,
                      uint8_t*                data,
-                     uint8_t*                e_bits)
+                     uint8_t*                e_bits,
+                     uint32_t                e_min,
+                     uint32_t                n_cb_cap)
 {
-  return encode_tb_off(q, soft_buffer, cb_segm, Qm, rv, nof_e_bits, data, e_bits, 0);
+  return encode_tb_off(q, soft_buffer, cb_segm, Qm, rv, nof_e_bits, data, e_bits, 0, e_min, n_cb_cap);
 }
 
 bool decode_tb_cb(srsran_sch_t*           q,
@@ -375,7 +394,9 @@ bool decode_tb_cb(srsran_sch_t*           q,
                   uint32_t                rv,
                   uint32_t                nof_e_bits,
                   void*                   e_bits,
-                  uint8_t*                data)
+                  uint8_t*                data,
+                  uint32_t                e_min,
+                  uint32_t                n_cb_cap)
 {
   int8_t*  e_bits_b = e_bits;
   int16_t* e_bits_s = e_bits;
@@ -386,6 +407,21 @@ bool decode_tb_cb(srsran_sch_t*           q,
   }
 
   q->avg_iterations = 0;
+
+  /* Precompute each CB's kept-data offset into `data` via a running
+   * accumulator (mirrors encode_tb_off's `rp` accumulation). Using
+   * cb_idx*rlen instead would misplace CBs whenever C1/C2 are both nonzero
+   * (K1 != K2, i.e. a mixed codeblock-size split). */
+  uint32_t cb_data_offset[SRSRAN_MAX_CODEBLOCKS];
+  {
+    uint32_t off = 0;
+    for (int i = 0; i < cb_segm->C; i++) {
+      cb_data_offset[i] = off;
+      uint32_t cb_len_i  = i < cb_segm->C1 ? cb_segm->K1 : cb_segm->K2;
+      uint32_t rlen_i    = cb_segm->C == 1 ? cb_len_i : (cb_len_i - 24);
+      off += rlen_i;
+    }
+  }
 
   for (int cb_idx = 0; cb_idx < cb_segm->C; cb_idx++) {
     /* Do not process blocks with CRC Ok */
@@ -406,7 +442,16 @@ bool decode_tb_cb(srsran_sch_t*           q,
         rp   = (cb_segm->C - gamma) * n_e + (cb_idx - (cb_segm->C - gamma)) * n_e2;
       }
 
-      if (q->llr_is_8bit) {
+      /* e_min>0 selects the MCH time-interleaving path (TS 36.212 §5.1.4.1.2,
+       * rv_idx up to 15) instead of the standard rv<4 LUT - see
+       * srsran_rm_turbo_rx_mch's doc comment in rm_turbo.c. Not supported
+       * with 8-bit LLRs; PMCH (the only MCH caller) always uses 16-bit. */
+      if (e_min > 0) {
+        if (srsran_rm_turbo_rx_mch(&e_bits_s[rp], softbuffer->buffer_f[cb_idx], n_e2, cb_len_idx, rv, e_min, n_cb_cap)) {
+          ERROR("Error in MCH rate matching");
+          return SRSRAN_ERROR;
+        }
+      } else if (q->llr_is_8bit) {
         if (srsran_rm_turbo_rx_lut_8bit(&e_bits_b[rp], (int8_t*)softbuffer->buffer_f[cb_idx], n_e2, cb_len_idx, rv)) {
           ERROR("Error in rate matching");
           return SRSRAN_ERROR;
@@ -420,14 +465,25 @@ bool decode_tb_cb(srsran_sch_t*           q,
 
       srsran_tdec_new_cb(&q->decoder, cb_len);
 
+      /* The decoder always writes the full cb_len bits (its own trailing
+       * 24-bit CB-CRC included), but only rlen of those bits belong to
+       * `data` - for non-last CBs the next CB's write safely overlaps and
+       * overwrites that trailing 24 bits, but the last CB has no following
+       * write to absorb it, which would overflow `data` (sized for tbs+24
+       * bits total, matching decode_tb's tb-level CRC check). Stage the
+       * last CB in a scratch buffer and commit only its rlen bits. */
+      bool     last_cb_needs_scratch = ((uint32_t)cb_idx == cb_segm->C - 1) && (cb_segm->C > 1);
+      uint8_t  last_cb_buf[SRSRAN_TCOD_MAX_LEN_CB / 8];
+      uint8_t* cb_out = last_cb_needs_scratch ? last_cb_buf : &data[cb_data_offset[cb_idx] / 8];
+
       // Run iterations and use CRC for early stopping
       bool     early_stop = false;
       uint32_t cb_noi     = 0;
       do {
         if (q->llr_is_8bit) {
-          srsran_tdec_iteration_8bit(&q->decoder, (int8_t*)softbuffer->buffer_f[cb_idx], &data[cb_idx * rlen / 8]);
+          srsran_tdec_iteration_8bit(&q->decoder, (int8_t*)softbuffer->buffer_f[cb_idx], cb_out);
         } else {
-          srsran_tdec_iteration(&q->decoder, softbuffer->buffer_f[cb_idx], &data[cb_idx * rlen / 8]);
+          srsran_tdec_iteration(&q->decoder, softbuffer->buffer_f[cb_idx], cb_out);
         }
         q->avg_iterations++;
         cb_noi++;
@@ -444,7 +500,7 @@ bool decode_tb_cb(srsran_sch_t*           q,
         }
 
         // CRC is OK and ran the minimum number of iterations
-        if (!srsran_crc_checksum_byte(crc_ptr, &data[cb_idx * rlen / 8], len_crc) &&
+        if (!srsran_crc_checksum_byte(crc_ptr, cb_out, len_crc) &&
             (cb_noi >= SRSRAN_PDSCH_MIN_TDEC_ITERS)) {
           softbuffer->cb_crc[cb_idx] = true;
           early_stop                 = true;
@@ -454,6 +510,10 @@ bool decode_tb_cb(srsran_sch_t*           q,
         }
 
       } while (cb_noi < q->max_iterations && !early_stop);
+
+      if (last_cb_needs_scratch) {
+        memcpy(&data[cb_data_offset[cb_idx] / 8], last_cb_buf, rlen / 8 * sizeof(uint8_t));
+      }
 
       INFO("CB %d: rp=%d, n_e=%d, cb_len=%d, CRC=%s, rlen=%d, iterations=%d/%d",
            cb_idx,
@@ -469,7 +529,7 @@ bool decode_tb_cb(srsran_sch_t*           q,
       // Copy decoded data from previous transmissions
       uint32_t cb_len = cb_idx < cb_segm->C1 ? cb_segm->K1 : cb_segm->K2;
       uint32_t rlen   = cb_segm->C == 1 ? cb_len : (cb_len - 24);
-      memcpy(&data[cb_idx * rlen / 8], softbuffer->data[cb_idx], rlen / 8 * sizeof(uint8_t));
+      memcpy(&data[cb_data_offset[cb_idx] / 8], softbuffer->data[cb_idx], rlen / 8 * sizeof(uint8_t));
     }
   }
 
@@ -484,7 +544,7 @@ bool decode_tb_cb(srsran_sch_t*           q,
       if (softbuffer->cb_crc[i]) {
         uint32_t cb_len = i < cb_segm->C1 ? cb_segm->K1 : cb_segm->K2;
         uint32_t rlen   = cb_segm->C == 1 ? cb_len : (cb_len - 24);
-        memcpy(softbuffer->data[i], &data[i * rlen / 8], rlen / 8 * sizeof(uint8_t));
+        memcpy(softbuffer->data[i], &data[cb_data_offset[i] / 8], rlen / 8 * sizeof(uint8_t));
       }
     }
   }
@@ -513,7 +573,9 @@ static int decode_tb(srsran_sch_t*           q,
                      uint32_t                rv,
                      uint32_t                nof_e_bits,
                      int16_t*                e_bits,
-                     uint8_t*                data)
+                     uint8_t*                data,
+                     uint32_t                e_min,
+                     uint32_t                n_cb_cap)
 {
   // Check inputs
   if (q == NULL || data == NULL || softbuffer == NULL || e_bits == NULL || cb_segm == NULL || Qm == 0) {
@@ -545,7 +607,7 @@ static int decode_tb(srsran_sch_t*           q,
   }
 
   // Process Codeblocks
-  bool cb_crc_ok = decode_tb_cb(q, softbuffer, cb_segm, Qm, rv, nof_e_bits, e_bits, data);
+  bool cb_crc_ok = decode_tb_cb(q, softbuffer, cb_segm, Qm, rv, nof_e_bits, e_bits, data, e_min, n_cb_cap);
 
   // If any of the CBs CRC is KO
   if (!cb_crc_ok) {
@@ -605,7 +667,40 @@ int srsran_dlsch_decode2(srsran_sch_t*       q,
                    cfg->grant.tb[tb_idx].rv,
                    cfg->grant.tb[tb_idx].nof_bits,
                    e_bits,
-                   data);
+                   data,
+                   0,
+                   0);
+}
+
+/**
+ * TS 36.212 §5.1.4.1.2 decode for MCH configured with pmch-TimeInterleaving-N.
+ * Same shape as srsran_dlsch_decode, but takes an explicit rv_idx (0..N-1,
+ * this subframe's position within its own N-span - NOT a 0-3 HARQ rv) and
+ * e_min (see srsran_rm_turbo_rx_mch's doc comment in rm_turbo.c), and routes
+ * through the MCH-specific rate-matching path instead of the standard rv<4
+ * LUT. cfg->grant.tb[0].rv is ignored; pass rv_idx explicitly instead, since
+ * overloading the same field for two different semantics (HARQ rv vs.
+ * time-interleaving position) risked being a lot more confusing to a future
+ * reader than a second, explicit parameter is.
+ */
+int srsran_dlsch_decode_mch(srsran_sch_t*       q,
+                            srsran_pdsch_cfg_t* cfg,
+                            int16_t*            e_bits,
+                            uint8_t*            data,
+                            uint32_t            rv_idx,
+                            uint32_t            e_min,
+                            uint32_t            n_cb_cap)
+{
+  srsran_cbsegm_t cb_segm;
+  if (srsran_cbsegm(&cb_segm, (uint32_t)cfg->grant.tb[0].tbs)) {
+    ERROR("Error computing Codeword segmentation for TBS=%d", cfg->grant.tb[0].tbs);
+    return SRSRAN_ERROR;
+  }
+
+  uint32_t Qm = srsran_mod_bits_x_symbol(cfg->grant.tb[0].mod);
+
+  return decode_tb(
+      q, cfg->softbuffers.rx[0], &cb_segm, Qm, rv_idx, cfg->grant.tb[0].nof_bits, e_bits, data, e_min, n_cb_cap);
 }
 
 /**
@@ -652,7 +747,37 @@ int srsran_dlsch_encode2(srsran_sch_t*       q,
                    cfg->grant.tb[tb_idx].rv,
                    cfg->grant.tb[tb_idx].nof_bits,
                    data,
-                   e_bits);
+                   e_bits,
+                   0,
+                   0);
+}
+
+/**
+ * TS 36.212 §5.1.4.1.2 encode for MCH configured with pmch-TimeInterleaving-N.
+ * Same shape as srsran_dlsch_encode, but takes an explicit rv_idx (0..N-1,
+ * this subframe's position within its own N-span - NOT a 0-3 HARQ rv) and
+ * e_min (see srsran_rm_turbo_tx_mch's doc comment in rm_turbo.c). See
+ * srsran_dlsch_decode_mch's comment for why rv_idx is a separate explicit
+ * parameter instead of reusing cfg->grant.tb[0].rv.
+ */
+int srsran_dlsch_encode_mch(srsran_sch_t*       q,
+                            srsran_pdsch_cfg_t* cfg,
+                            uint8_t*            data,
+                            uint8_t*            e_bits,
+                            uint32_t            rv_idx,
+                            uint32_t            e_min,
+                            uint32_t            n_cb_cap)
+{
+  srsran_cbsegm_t cb_segm;
+  if (srsran_cbsegm(&cb_segm, (uint32_t)cfg->grant.tb[0].tbs)) {
+    ERROR("Error computing Codeword segmentation for TBS=%d", cfg->grant.tb[0].tbs);
+    return SRSRAN_ERROR;
+  }
+
+  uint32_t Qm = srsran_mod_bits_x_symbol(cfg->grant.tb[0].mod);
+
+  return encode_tb(
+      q, cfg->softbuffers.tx[0], &cb_segm, Qm, rv_idx, cfg->grant.tb[0].nof_bits, data, e_bits, e_min, n_cb_cap);
 }
 
 /* Compute the interleaving function on-the-fly, because it depends on number of RI bits
@@ -1187,7 +1312,8 @@ int srsran_ulsch_decode(srsran_sch_t*       q,
   // Decode ULSCH
   if (cb_segm.tbs > 0) {
     uint32_t G = nb_q / Qm - Q_prime_ri - Q_prime_cqi;
-    ret        = decode_tb(q, cfg->softbuffers.rx, &cb_segm, Qm, cfg->grant.tb.rv, G * Qm, &g_bits[e_offset], data);
+    ret =
+        decode_tb(q, cfg->softbuffers.rx, &cb_segm, Qm, cfg->grant.tb.rv, G * Qm, &g_bits[e_offset], data, 0, 0);
   }
   return ret;
 }
@@ -1286,8 +1412,18 @@ int srsran_ulsch_encode(srsran_sch_t*       q,
   // Encode UL-SCH
   if (cb_segm.tbs > 0) {
     uint32_t G = nb_q / Qm - Q_prime_ri - Q_prime_cqi;
-    ret        = encode_tb_off(
-        q, cfg->softbuffers.tx, &cb_segm, Qm, cfg->grant.tb.rv, G * Qm, data, &g_bits[e_offset / 8], e_offset % 8);
+    // n_cb_cap: 0 = no cap -- ULSCH has no PMCH-style soft-buffer limitation to apply here.
+    ret        = encode_tb_off(q,
+                         cfg->softbuffers.tx,
+                         &cb_segm,
+                         Qm,
+                         cfg->grant.tb.rv,
+                         G * Qm,
+                         data,
+                         &g_bits[e_offset / 8],
+                         e_offset % 8,
+                         0,
+                         0);
     if (ret) {
       return ret;
     }

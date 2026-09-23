@@ -301,14 +301,25 @@ int test_s1ap_tenb_mobility(test_event test_params)
   container.erab_info_list[0].value.erab_info_list_item().dl_forwarding_present = true;
   container.erab_info_list[0].value.erab_info_list_item().dl_forwarding.value =
       asn1::s1ap::dl_forwarding_opts::dl_forwarding_proposed;
+  // NOTE: this vector encodes a HandoverPreparationInformation/AS-Config whose sourceSystemInformationBlockType1
+  // is this fork's FeMBMS SIB1-MBMS-r14 struct (asn1::rrc::sib_type1_mbms_r14_s), matching how
+  // rrc::ue::rrc_mobility::start_ho_preparation() (rrc_mobility.cc) actually fills AS-Config in this codebase.
+  // It was regenerated from a live encode (see the "success"/"ho preparation failure" cases of
+  // test_s1ap_mobility() above, which pack an as_cfg with the current struct layout) after the addition of the
+  // mandatory CellSelectionInfo-MBMS-r14 fields (q-RxLevMin-r14) shifted the bit layout of sib_type1_mbms_r14_s.
   uint8_t ho_prep_container[] = {
-      0x0a, 0x10, 0x0b, 0x81, 0x80, 0x00, 0x01, 0x80, 0x00, 0xf3, 0x02, 0x08, 0x00, 0x00, 0x15, 0x80, 0x00, 0x14,
-      0x06, 0xa4, 0x02, 0xf0, 0x04, 0x04, 0xf0, 0x00, 0x14, 0x80, 0x4a, 0x00, 0x00, 0x00, 0x02, 0x12, 0x31, 0xb6,
-      0xf8, 0x3e, 0xa0, 0x6f, 0x05, 0xe4, 0x65, 0x14, 0x1d, 0x39, 0xd0, 0x54, 0x4c, 0x00, 0x02, 0x54, 0x00, 0x20,
-      0x04, 0x60, 0x00, 0x00, 0x00, 0x10, 0x01, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x02, 0x05, 0x00, 0x04, 0x14,
-      0x00, 0x67, 0x0d, 0xfb, 0xc4, 0x66, 0x06, 0x50, 0x0f, 0x00, 0x08, 0x00, 0x20, 0x80, 0x0c, 0x14, 0xca, 0x2d,
-      0x5c, 0xe1, 0x86, 0x35, 0x39, 0x80, 0x0e, 0x06, 0xa4, 0x40, 0x0f, 0x22, 0x78};
-  // 0a100b818000018000f3020800001580001406a402f00404f00014804a000000021231b6f83ea06f05e465141d39d0544c00025400200460000000100100c000000000020500041400670dfbc46606500f00080020800c14ca2d5ce1863539800e06a4400f2278
+      0x0a, 0x10, 0x10, 0xc9, 0x80, 0x00, 0x01, 0x80, 0x00, 0xf3, 0x02, 0x08,
+      0x00, 0x00, 0x10, 0x00, 0xe0, 0x10, 0x00, 0x15, 0xc0, 0x40, 0x00, 0x06,
+      0xa4, 0x02, 0x10, 0x20, 0x2c, 0x8a, 0x90, 0x00, 0x04, 0xf0, 0x00, 0x14,
+      0x70, 0x22, 0x46, 0x04, 0x00, 0x00, 0x42, 0x04, 0x10, 0x06, 0xb6, 0xdf,
+      0x07, 0xd4, 0x0c, 0xa0, 0xbc, 0x8c, 0xa2, 0x83, 0xa7, 0x39, 0x73, 0x30,
+      0xf4, 0x17, 0x97, 0x06, 0x66, 0x43, 0x06, 0x98, 0x00, 0x04, 0xc8, 0x10,
+      0x00, 0x1f, 0x00, 0x80, 0x11, 0x98, 0x00, 0x00, 0x08, 0x20, 0x02, 0x01,
+      0x00, 0x07, 0x00, 0x19, 0xb0, 0x10, 0xa0, 0xc0, 0x00, 0x50, 0x3c, 0x40,
+      0x01, 0x84, 0x10, 0x00, 0x00, 0x67, 0x0d, 0xfb, 0xc4, 0x40, 0x06, 0x50,
+      0x8f, 0x00, 0x08, 0x00, 0x00, 0x40, 0x0c, 0x14, 0xca, 0x2d, 0x5c, 0xe1,
+      0x86, 0x35, 0x39, 0x86, 0x0e, 0x06, 0xa4, 0x40, 0x08, 0x34, 0xf8};
+  // 0a1010c98000018000f3020800001000e0100015c0400006a40210202c8a900004f0001470224604000042041006b6df07d40ca0bc8ca283a7397330f4179706664306980004c810001f0080119800000820020100070019b010a0c000503c400184100000670dfbc44006508f00080000400c14ca2d5ce1863539860e06a4400834f8
   container.rrc_container.resize(sizeof(ho_prep_container));
   memcpy(container.rrc_container.data(), ho_prep_container, sizeof(ho_prep_container));
   asn1::s1ap::cause_c cause;
@@ -539,6 +550,50 @@ int test_intraenb_mobility(srsran::log_sink_spy& spy, test_event test_params)
   return SRSRAN_SUCCESS;
 }
 
+// Regression test for a dangling enb_cell_common_list& bug: rrc::generate_sibs() rebuilds and
+// swaps rrc::cell_common_list on every live SIB/eMBMS reconfigure (reconfigure_embms() below),
+// freeing the pre-rebuild enb_cell_common_list -- but a UE's mac_ctrl/ue_cell_list, constructed
+// during run_preamble() against that pre-rebuild list, used to keep a bare reference to it
+// (rrc_ue.h). Without the shared_ptr keep-alive (cell_common_list_keepalive), the intra-eNB
+// handover triggered below reads cell_common_list.get_pci() in
+// mac_controller::handle_intraenb_ho_cmd() (mac_controller.cc) through a dangling reference --
+// a heap-use-after-free under ASan, or silently wrong behavior in a release build.
+int test_intraenb_mobility_survives_sib_rebuild()
+{
+  printf("\n===== TEST: test_intraenb_mobility_survives_sib_rebuild() =====\n");
+  intraenb_mobility_tester     tester{test_event::success};
+  srsran::unique_byte_buffer_t pdu;
+
+  TESTASSERT(tester.generate_rrc_cfg() == SRSRAN_SUCCESS);
+  TESTASSERT(tester.setup_rrc() == SRSRAN_SUCCESS);
+  TESTASSERT(tester.run_preamble() == SRSRAN_SUCCESS);
+
+  // Force a live SIB rebuild (harmless params -- pmch_bandwidth=0 disables PMCH, but
+  // configure_mbsfn_sibs()/generate_sibs() still run unconditionally at the end) while this
+  // UE is already connected, mirroring what the eMBMS control-socket/portal does at runtime.
+  tester.rrc.reconfigure_embms(0, 0, 0, 0, 0, 0, 0, false, false, false, 0, 0, 0, 0, false, "");
+
+  tester.pdcp.last_sdu.sdu = nullptr;
+  tester.rlc.test_reset_all();
+  tester.phy.phy_cfg_set   = false;
+
+  /* Receive MeasReport from UE (PCI == 2), triggering an intra-eNB handover -- this is what
+   * reaches the dangling reference, via handle_intraenb_ho_cmd()'s cell_common_list.get_pci(). */
+  uint8_t meas_report[] = {0x08, 0x10, 0x38, 0x74, 0x00, 0x09, 0xBC, 0x80}; // PCI == 2
+  copy_msg_to_buffer(pdu, meas_report);
+  tester.rrc.write_pdu(tester.rnti, 1, std::move(pdu));
+  tester.tic();
+
+  TESTASSERT(tester.pdcp.last_sdu.sdu != nullptr);
+  asn1::rrc::dl_dcch_msg_s ho_cmd;
+  TESTASSERT(test_helpers::unpack_asn1(ho_cmd, srsran::make_span(tester.pdcp.last_sdu.sdu)));
+  auto& recfg_r8 = ho_cmd.msg.c1().rrc_conn_recfg().crit_exts.c1().rrc_conn_recfg_r8();
+  TESTASSERT(recfg_r8.mob_ctrl_info_present);
+  TESTASSERT(recfg_r8.mob_ctrl_info.target_pci == 2);
+
+  return SRSRAN_SUCCESS;
+}
+
 int main(int argc, char** argv)
 {
   // Setup the log spy to intercept error and warning log entries.
@@ -581,6 +636,7 @@ int main(int argc, char** argv)
   TESTASSERT(test_intraenb_mobility(*spy, test_event::concurrent_ho) == 0);
   TESTASSERT(test_intraenb_mobility(*spy, test_event::duplicate_crnti_ce) == 0);
   TESTASSERT(test_intraenb_mobility(*spy, test_event::success) == 0);
+  TESTASSERT(test_intraenb_mobility_survives_sib_rebuild() == 0);
 
   srslog::flush();
 

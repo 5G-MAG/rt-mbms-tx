@@ -345,14 +345,20 @@ struct mbms_notif_cfg_t {
 struct mbsfn_area_info_t {
   uint8_t mbsfn_area_id = 0;
   enum class region_len_t { s1, s2, nulltype } non_mbsfn_region_len;
-  enum class subcarrier_spacing_t { khz_7dot5, khz_2dot5, khz_1dot25, khz_0dot25, nulltype } subcarrier_spacing;
+  // khz_15 is the spec default (plain LTE numerology, no FeMBMS SCS override) and is also
+  // this field's zero/default-initialized value -- explicit, not accidental (a default- or
+  // brace-constructed mbsfn_area_info_t must resolve to "standard 15 kHz", not to khz_7dot5,
+  // which used to be the unnamed zero value here before khz_15 existed).
+  enum class subcarrier_spacing_t { khz_7dot5, khz_2dot5, khz_1dot25, khz_0dot37, khz_15, nulltype };
+  subcarrier_spacing_t subcarrier_spacing = subcarrier_spacing_t::khz_15;
+  enum class time_separation_t { sl2, sl4, nulltype } time_separation = time_separation_t::nulltype;
   uint8_t pmch_bandwidth = 0;
   uint8_t notif_ind = 0;
   struct mcch_cfg_t {
     enum class repeat_period_t { rf1, rf2, rf4, rf8, rf16, rf32, rf64, rf128, rf256, spare7, spare6, spare5, spare4, spare3, spare2, spare1, nulltype } mcch_repeat_period;
 
     uint8_t mcch_offset = 0;
-    enum class mod_period_t { rf1, rf2, rf4, rf8, rf16, rf32, rf64, rf128, rf512, rf1024, spare5, spare4, spare3, spare2, spare1, nulltype } mcch_mod_period;
+    enum class mod_period_t { rf1, rf2, rf4, rf8, rf16, rf32, rf64, rf128, rf256, rf512, rf1024, spare5, spare4, spare3, spare2, spare1, nulltype } mcch_mod_period;
     uint16_t sf_alloc_info = 0;
     bool sf_alloc_info_is_r16 = false;
     enum class sig_mcs_t { n2, n7, n13, n19, nulltype } sig_mcs;
@@ -391,7 +397,10 @@ struct pmch_info_t {
   // pmch_cfg_t
   uint16_t sf_alloc_end = 0;
   uint8_t  data_mcs     = 0;
-  enum class mch_sched_period_t { rf8, rf16, rf32, rf64, rf128, rf256, rf512, rf1024, nulltype } mch_sched_period;
+  /* Rel-19 adds rf4, rf7, rf14, rf28, rf53, rf56, rf108, rf112, rf212, rf424 (TS 36.331 §6.3.7) */
+  enum class mch_sched_period_t {
+    rf4, rf7, rf8, rf14, rf16, rf28, rf32, rf53, rf56, rf64, rf108, rf112, rf128, rf212, rf256, rf424, rf512, rf1024, nulltype
+  } mch_sched_period;
   // mbms_session_info_list
   struct mbms_session_info_t {
     bool    session_id_present = false;
@@ -402,24 +411,49 @@ struct pmch_info_t {
   uint32_t              nof_mbms_session_info;
   static const uint32_t max_session_per_pmch = 29;
   mbms_session_info_t   mbms_session_info_list[max_session_per_pmch];
+  /* Rel-19 LTE_terr_bcast_Ph2 extensions */
+  bool    use_mcs_table2      = false; /* pmch-MCS-Table-r19: use Table 11.1-2 (256QAM) */
+  uint8_t time_interleaving_n = 0;    /* pmch-TimeInterleaving-N-r19: NTimePMCH (0=absent) */
+  uint8_t time_interleaving_m = 0;    /* pmch-TimeInterleaving-M-r19: total MCH SFs per scheduling period */
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): override for the last of
+   * nof_mbms_session_info sessions. 0=absent/inherit main N (or main M); N-last also
+   * accepts 1 (n1 = no interleaving for the last session specifically). */
+  uint8_t time_interleaving_n_last_mtch = 0;
+  uint8_t time_interleaving_m_last_mtch = 0;
+  bool    cyclic_shift        = false; /* pmch-CyclicShiftAlpha-r19 present */
+  uint8_t cyclic_shift_alpha  = 0;    /* α: 1, 2, or 3 */
+  bool    freq_interleaving   = false; /* pmch-FreqInterleaving-r19 */
+  /* PMCH-SoftBufferSizeParameters-r19, mandatory sibling of time_interleaving_n/m
+   * whenever time_interleaving_n > 1 (TS 36.331): used to compute N_IR = floor(
+   * scaling_factor_beta * N_soft / M) for N_cb = min(floor(N_IR/C), K_w) soft-buffer
+   * capping (TS 36.212 §5.1.4.1.2). n_soft_ref_category is the plain UE category
+   * number (TS 36.306 Table 4.1-1 maps it to N_soft); scaling_factor_beta is kept as
+   * an exact num/den pair (not a float) so the later floor() divisions match the
+   * spec's integer arithmetic exactly. */
+  uint8_t n_soft_ref_category    = 4;
+  uint8_t scaling_factor_beta_num = 1;
+  uint8_t scaling_factor_beta_den = 1;
 };
 inline uint16_t enum_to_number(const pmch_info_t::mch_sched_period_t& mch_period)
 {
-  constexpr static uint16_t options[] = {8, 16, 32, 64, 128, 256, 512, 1024};
+  constexpr static uint16_t options[] = {4, 7, 8, 14, 16, 28, 32, 53, 56, 64, 108, 112, 128, 212, 256, 424, 512, 1024};
   return enum_to_number(options, (uint32_t)pmch_info_t::mch_sched_period_t::nulltype, (uint32_t)mch_period);
 }
 
 struct mcch_msg_t {
   uint32_t       nof_common_sf_alloc = 0;
   mbsfn_sf_cfg_t common_sf_alloc[8];
-  enum class common_sf_alloc_period_t { rf4, rf8, rf16, rf32, rf64, rf128, rf256, nulltype } common_sf_alloc_period;
+  /* Rel-19 adds rf7, rf14, rf28, rf53, rf56, rf108, rf112, rf212, rf424 */
+  enum class common_sf_alloc_period_t {
+    rf4, rf7, rf8, rf14, rf16, rf28, rf32, rf53, rf56, rf64, rf108, rf112, rf128, rf212, rf256, rf424, nulltype
+  } common_sf_alloc_period;
   uint32_t    nof_pmch_info;
   pmch_info_t pmch_info_list[15];
   // mbsfn_area_cfg_v930_ies non crit ext OPTIONAL
 };
 inline uint16_t enum_to_number(const mcch_msg_t::common_sf_alloc_period_t& alloc_period)
 {
-  constexpr static uint16_t options[] = {4, 8, 16, 32, 64, 128, 256};
+  constexpr static uint16_t options[] = {4, 7, 8, 14, 16, 28, 32, 53, 56, 64, 108, 112, 128, 212, 256, 424};
   return enum_to_number(options, (uint32_t)mcch_msg_t::common_sf_alloc_period_t::nulltype, (uint32_t)alloc_period);
 }
 

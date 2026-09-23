@@ -635,7 +635,7 @@ public:
 
     return 0;
   }
-  int get_mch_sched(uint32_t tti, bool is_mcch, dl_sched_list_t& dl_sched_res) override
+  int get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res) override
   {
     notify_get_mch_sched();
     return 0;

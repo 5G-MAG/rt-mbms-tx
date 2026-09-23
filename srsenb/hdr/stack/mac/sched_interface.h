@@ -253,8 +253,9 @@ public:
   /******************* Scheduler Control ****************************/
 
   /* Provides cell configuration including SIB periodicity, etc. */
-  virtual int cell_cfg(const std::vector<cell_cfg_t>& cell_cfg) = 0;
-  virtual int reset()                                           = 0;
+  virtual int  cell_cfg(const std::vector<cell_cfg_t>& cell_cfg)             = 0;
+  virtual void set_sib_lens(uint32_t enb_cc_idx, const cell_cfg_sib_t* sibs) = 0;
+  virtual int  reset()                                                      = 0;
 
   /* Manages UE scheduling context */
   virtual int  ue_cfg(uint16_t rnti, const ue_cfg_t& cfg) = 0;

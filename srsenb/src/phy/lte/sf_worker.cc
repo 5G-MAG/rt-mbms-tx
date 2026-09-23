@@ -163,7 +163,7 @@ void sf_worker::work_imp()
     return;
   }
 
-  srsran_mbsfn_cfg_t mbsfn_cfg;
+  srsran_mbsfn_cfg_t mbsfn_cfg = {};
   srsran_sf_t        sf_type = phy->is_mbsfn_sf(&mbsfn_cfg, tti_tx_dl) ? SRSRAN_SF_MBSFN : SRSRAN_SF_NORM;
 //  Error("TTI %d type %s", tti_tx_dl, sf_type == SRSRAN_SF_NORM ? "CAS" : "MBSFN");
 
@@ -202,8 +202,10 @@ void sf_worker::work_imp()
       return;
     }
   } else {
-    dl_grants[0].cfi = 0;//mbsfn_cfg.non_mbsfn_region_length;
-    if (stack->get_mch_sched(tti_tx_dl, mbsfn_cfg.is_mcch, dl_grants)) {
+    for (uint32_t cc = 0; cc < cc_workers.size(); cc++) {
+      dl_grants[cc].cfi = mbsfn_cfg.non_mbsfn_region_length;
+    }
+    if (stack->get_mch_sched(tti_tx_dl, mbsfn_cfg.is_mcch, mbsfn_cfg.pmch_idx, dl_grants)) {
       Error("Getting MCH packets from MAC");
       phy->worker_end(context, true, tx_buffer);
       return;
@@ -228,10 +230,27 @@ void sf_worker::work_imp()
 
   // Process DL
   for (uint32_t cc = 0; cc < cc_workers.size(); cc++) {
-    // Select CFI and make sure it is in the right range
+    // Select CFI; for MBSFN subframes on dedicated cells the control region is 0
     dl_sf.cfi = dl_grants[cc].cfi;
-    dl_sf.cfi = SRSRAN_MAX(dl_sf.cfi, 1);
+    if (sf_type != SRSRAN_SF_MBSFN) {
+      dl_sf.cfi = SRSRAN_MAX(dl_sf.cfi, 1);
+    }
     dl_sf.cfi = SRSRAN_MIN(dl_sf.cfi, 3);
+    /* semiStaticCFI-MBMS-r16: CAS subframes use a fixed CFI signalled in MIB-MBMS.
+     * Override the scheduler-selected CFI so PCFICH and PDCCH are consistent.
+     * Also applies to MBSFN subframes at 15 kHz: unlike the FeMBMS-dedicated SCS
+     * (1.25/2.5/7.5/0.37 kHz), which have no control-region concept at all and
+     * always use non_mbsfn_region_length=0, a 15 kHz MBSFN subframe shares the
+     * same control-region structure as CAS and must use the same signalled CFI -
+     * mirrors ue_dl.c's srsran_ue_dl_decode_fft_estimate(), which applies the
+     * semi-static CFI whenever sf_type!=MBSFN||subcarrier_spacing==15kHz. Without
+     * this, TX computed nof_re from non_mbsfn_region_length=0 (no control region)
+     * while RX computed it from the signalled CFI (control region reserved),
+     * desyncing the RE budget between TX and RX for every 15 kHz MTCH subframe. */
+    bool mbsfn_uses_cas_cfi = (sf_type == SRSRAN_SF_MBSFN) && (mbsfn_cfg.subcarrier_spacing == SRSRAN_SCS_15KHZ);
+    if ((sf_type == SRSRAN_SF_NORM || mbsfn_uses_cas_cfi) && phy->get_semi_static_cfi(cc) != 0) {
+      dl_sf.cfi = phy->get_semi_static_cfi(cc);
+    }
 
     cc_workers[cc]->work_dl(dl_sf, dl_grants[cc], ul_grants_tx[cc], &mbsfn_cfg);
   }

@@ -97,7 +97,8 @@ SRSRAN_API int srsran_pbch_decode(srsran_pbch_t*         q,
 SRSRAN_API int srsran_pbch_encode(srsran_pbch_t* q,
                                   uint8_t        bch_payload[SRSRAN_BCH_PAYLOAD_LEN],
                                   cf_t*          sf_symbols[SRSRAN_MAX_PORTS],
-                                  uint32_t       frame_idx);
+                                  uint32_t       frame_idx,
+                                  uint32_t       sfn);
 
 SRSRAN_API void srsran_pbch_decode_reset(srsran_pbch_t* q);
 
@@ -108,5 +109,9 @@ SRSRAN_API void srsran_pbch_mib_mbms_unpack(uint8_t* msg, srsran_cell_t* cell, u
 SRSRAN_API void srsran_pbch_mib_pack(srsran_cell_t* cell, uint32_t sfn, uint8_t* msg);
 
 SRSRAN_API void srsran_pbch_mib_mbms_pack(srsran_cell_t* cell, uint32_t sfn, uint32_t additional_non_mbsfn_subframes, uint8_t* msg);
+
+/* TS 36.211 clause 6.6.4.1: PBCH CAS repetition for FeMBMS dedicated carriers. */
+SRSRAN_API void srsran_pbch_put_cas_rep(cf_t* sf_symbols, srsran_cell_t cell);
+SRSRAN_API void srsran_pbch_get_cas_rep(cf_t* sf_symbols, srsran_cell_t cell, cf_t* cas_out);
 
 #endif // SRSRAN_PBCH_H

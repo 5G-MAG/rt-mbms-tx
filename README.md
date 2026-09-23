@@ -94,9 +94,13 @@ Note that running the eNodeB may require an SDR platform. Check the following tu
 
 ### Starting the MBMS-Gateway
 
+MBMS-GW no longer lives in this repo -- it now ships from its own standalone repo,
+`rt-mbms-gw` (submodules this repo for the shared code it still needs). Build and run it
+from there instead:
+
 ```
-cd build
-sudo ./srsepc/src/srsmbms
+cd rt-mbms-gw/build
+sudo ./mbms-gw/mbms-gw mbms-gw.conf.example
 ```
 
 The MBMS-GW receives multicast packets in one tunnel interface, which are packaged to GTP-U-Packets and sent to the eNodeB over another tunnel interface.

@@ -27,6 +27,7 @@
 #ifndef SRSRAN_ENB_STACK_LTE_H
 #define SRSRAN_ENB_STACK_LTE_H
 
+#include "m3ap/m3ap.h"
 #include "mac/mac.h"
 #include "rrc/rrc.h"
 #include "s1ap/s1ap.h"
@@ -105,9 +106,9 @@ public:
     return mac.push_pdu(tti, rnti, enb_cc_idx, nof_bytes, crc_res, grant_nof_prbs);
   }
   int get_dl_sched(uint32_t tti, dl_sched_list_t& dl_sched_res) final { return mac.get_dl_sched(tti, dl_sched_res); }
-  int get_mch_sched(uint32_t tti, bool is_mcch, dl_sched_list_t& dl_sched_res) final
+  int get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res) final
   {
-    return mac.get_mch_sched(tti, is_mcch, dl_sched_res);
+    return mac.get_mch_sched(tti, is_mcch, pmch_idx, dl_sched_res);
   }
   int  get_ul_sched(uint32_t tti, ul_sched_list_t& ul_sched_res) final { return mac.get_ul_sched(tti, ul_sched_res); }
   void set_sched_dl_tti_mask(uint8_t* tti_mask, uint32_t nof_sfs) final
@@ -142,6 +143,47 @@ public:
   void sgnb_release_ack(uint16_t eutra_rnti) final
   {
     x2_task_queue.push([this, eutra_rnti]() { rrc.sgnb_release_ack(eutra_rnti); });
+  }
+
+  void reload_embms_config(uint8_t            pmch_bandwidth,
+                           uint16_t           mcs,
+                           uint8_t            time_interleaving_n,
+                           uint8_t            time_interleaving_m,
+                           uint8_t            time_interleaving_n_last_mtch,
+                           uint8_t            time_interleaving_m_last_mtch,
+                           uint8_t            cyclic_shift_alpha,
+                           bool               freq_interleaving,
+                           bool               use_mcs_table2,
+                           bool               cas_muting,
+                           uint8_t            k_cas,
+                           uint8_t            n_cas,
+                           uint8_t            mch_sched_period_rf,
+                           uint8_t            nof_mbms_sessions,
+                           bool               time_separation_sl2,
+                           const std::string& subcarrier_spacing) override
+  {
+    std::string scs_copy = subcarrier_spacing;
+    enb_task_queue.push([this, pmch_bandwidth, mcs, time_interleaving_n, time_interleaving_m,
+                         time_interleaving_n_last_mtch, time_interleaving_m_last_mtch,
+                         cyclic_shift_alpha, freq_interleaving, use_mcs_table2,
+                         cas_muting, k_cas, n_cas, mch_sched_period_rf, nof_mbms_sessions,
+                         time_separation_sl2, scs_copy]() {
+      rrc.reconfigure_embms(pmch_bandwidth, mcs, time_interleaving_n, time_interleaving_m,
+                            time_interleaving_n_last_mtch, time_interleaving_m_last_mtch,
+                            cyclic_shift_alpha, freq_interleaving, use_mcs_table2,
+                            cas_muting, k_cas, n_cas, mch_sched_period_rf, nof_mbms_sessions,
+                            time_separation_sl2, scs_copy);
+    });
+  }
+
+  void reload_sib12(bool activate) override
+  {
+    enb_task_queue.push([this, activate]() { rrc.reload_sib12(activate); });
+  }
+
+  void set_q_rx_lev_min(int8_t value) override
+  {
+    enb_task_queue.push([this, value]() { rrc.set_q_rx_lev_min(value); });
   }
 
   // gtpu_interface_pdcp
@@ -187,6 +229,7 @@ private:
   srsenb::rrc  rrc;
   srsenb::gtpu gtpu;
   srsenb::s1ap s1ap;
+  srsenb::m3ap m3ap;
 
   // RAT-specific interfaces
   phy_interface_stack_lte* phy = nullptr;

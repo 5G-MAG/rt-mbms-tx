@@ -82,7 +82,18 @@ extern "C" {
 
 typedef enum { SRSRAN_CP_NORM = 0, SRSRAN_CP_EXT } srsran_cp_t;
 typedef enum { SRSRAN_SF_NORM = 0, SRSRAN_SF_MBSFN } srsran_sf_t;
-typedef enum { SRSRAN_SCS_15KHZ = 0, SRSRAN_SCS_7KHZ5, SRSRAN_SCS_1KHZ25  } srsran_scs_t;
+typedef enum {
+  SRSRAN_SCS_15KHZ  = 0,
+  SRSRAN_SCS_7KHZ5,
+  SRSRAN_SCS_1KHZ25,
+  SRSRAN_SCS_2KHZ5,
+  SRSRAN_SCS_370HZ,       /* 0.37 kHz OFDM baseline; CR 0548: Nu=82944 at Fs=30.72 MHz (75 PRB) */
+  SRSRAN_SCS_370HZ_SL4,  /* 0.37 kHz + RS type 1: k=12m'+stagger, stagger=3*(ns mod 4) */
+  SRSRAN_SCS_370HZ_SL2   /* 0.37 kHz + RS type 2: k=6m'+stagger,  stagger=3*(ns mod 2) */
+} srsran_scs_t;
+
+/* True for any of the three 0.37 kHz SCS variants */
+#define SRSRAN_SCS_IS_370HZ(scs) ((scs) == SRSRAN_SCS_370HZ || (scs) == SRSRAN_SCS_370HZ_SL4 || (scs) == SRSRAN_SCS_370HZ_SL2)
 
 #define SRSRAN_INVALID_RNTI 0x0 // TS 36.321 - Table 7.1-1 RNTI 0x0 isn't a valid DL RNTI
 #define SRSRAN_CRNTI_START 0x000B
@@ -109,7 +120,12 @@ typedef enum { SRSRAN_SCS_15KHZ = 0, SRSRAN_SCS_7KHZ5, SRSRAN_SCS_1KHZ25  } srsr
 #define SRSRAN_NRE 12
 #define SRSRAN_NRE_SCS_7KHZ5 24
 #define SRSRAN_NRE_SCS_1KHZ25 144
-#define SRSRAN_NRE_SCS(scs) (scs == SRSRAN_SCS_15KHZ ? SRSRAN_NRE : (scs == SRSRAN_SCS_7KHZ5 ? SRSRAN_NRE_SCS_7KHZ5 : SRSRAN_NRE_SCS_1KHZ25))
+#define SRSRAN_NRE_SCS_2KHZ5 72
+#define SRSRAN_NRE_SCS_370HZ 486
+#define SRSRAN_NRE_SCS(scs) (scs == SRSRAN_SCS_15KHZ ? SRSRAN_NRE : \
+                              (scs == SRSRAN_SCS_7KHZ5 ? SRSRAN_NRE_SCS_7KHZ5 : \
+                              (scs == SRSRAN_SCS_2KHZ5 ? SRSRAN_NRE_SCS_2KHZ5 : \
+                              (SRSRAN_SCS_IS_370HZ(scs) ? SRSRAN_NRE_SCS_370HZ  : SRSRAN_NRE_SCS_1KHZ25))))
 
 
 #define SRSRAN_SYMBOL_SZ_MAX 2048
@@ -126,10 +142,30 @@ typedef enum { SRSRAN_SCS_15KHZ = 0, SRSRAN_SCS_7KHZ5, SRSRAN_SCS_1KHZ25  } srsr
 
 #define SRSRAN_CP_SCS_7KHZ5_NSYMB  3
 #define SRSRAN_CP_SCS_1KHZ25_NSYMB 1
-#define SRSRAN_CP_MBSFN_LEN(scs) (scs == SRSRAN_SCS_1KHZ25 ? 6144 : (scs == SRSRAN_SCS_7KHZ5 ? 1024 : SRSRAN_CP_EXT_LEN))
+#define SRSRAN_CP_SCS_2KHZ5_NSYMB  2
+/* TS 36.211 Table 6.12-1: CP lengths in Ts units */
+#define SRSRAN_CP_MBSFN_LEN(scs) (scs == SRSRAN_SCS_1KHZ25 ? 6144 : \
+                                  (scs == SRSRAN_SCS_2KHZ5  ? 3072 : \
+                                  (SRSRAN_SCS_IS_370HZ(scs) ? 9216 : \
+                                  (scs == SRSRAN_SCS_7KHZ5  ? 1024 : SRSRAN_CP_EXT_LEN))))
 
-#define SRSRAN_MBSFN_NOF_SLOTS(scs) (scs == SRSRAN_SCS_1KHZ25 ? 1 : 2)
-#define SRSRAN_MBSFN_NOF_SYMBOLS(scs) (scs == SRSRAN_SCS_1KHZ25 ? SRSRAN_CP_SCS_1KHZ25_NSYMB : (scs == SRSRAN_SCS_7KHZ5 ? SRSRAN_CP_SCS_7KHZ5_NSYMB : SRSRAN_CP_EXT_NSYMB ))
+/* Number of logical slot iterations for PMCH RE mapping per 1 ms LTE subframe.
+ * 0.37 kHz: one 3 ms symbol straddles 3 subframes → 1 per subframe.
+ * 1.25 kHz: 1 symbol per subframe → 1 slot.
+ * 2.5 kHz: SRSRAN_MBSFN_NOF_SYMBOLS(2kHz5)=2 stores TOTAL symbols per subframe
+ *   (not per slot); the RE-mapping and nof_re loops must use nof_slots=1 and
+ *   iterate l=0..1 in the single virtual slot to avoid accessing symbol indices
+ *   2/3 (which do not exist), a buffer-overflow bug when nof_slots=2.
+ * 7.5 kHz: 3 symbols per 0.5 ms slot, 2 slots → nof_slots=2. */
+#define SRSRAN_MBSFN_NOF_SLOTS(scs) (SRSRAN_SCS_IS_370HZ(scs) ? 1 : \
+                                     (scs == SRSRAN_SCS_1KHZ25 ? 1 : \
+                                     (scs == SRSRAN_SCS_2KHZ5  ? 1 : 2)))
+/* Number of OFDM symbols carrying MBSFN data per logical slot (see MBSFN_NOF_SLOTS).
+ * For 2.5 kHz with nof_slots=1 this equals the TOTAL per-subframe symbol count (2). */
+#define SRSRAN_MBSFN_NOF_SYMBOLS(scs) (SRSRAN_SCS_IS_370HZ(scs) ? 1 : \
+                                       (scs == SRSRAN_SCS_1KHZ25 ? SRSRAN_CP_SCS_1KHZ25_NSYMB : \
+                                       (scs == SRSRAN_SCS_2KHZ5  ? SRSRAN_CP_SCS_2KHZ5_NSYMB  : \
+                                       (scs == SRSRAN_SCS_7KHZ5  ? SRSRAN_CP_SCS_7KHZ5_NSYMB  : SRSRAN_CP_EXT_NSYMB))))
 
 
 #define SRSRAN_CP_ISNORM(cp) (cp == SRSRAN_CP_NORM)
@@ -178,17 +214,24 @@ typedef enum { SRSRAN_SCS_15KHZ = 0, SRSRAN_SCS_7KHZ5, SRSRAN_SCS_1KHZ25  } srsr
 
 #define SRSRAN_NOF_CTRL_SYMBOLS(cell, cfi) (cfi + (cell.nof_prb < 10 ? 1 : 0))
 
-#define SRSRAN_SYMBOL_HAS_REF_MBSFN(l, s) ((l == 2 && s == 0) || (l == 0 && s == 1) || (l == 4 && s == 1))
+#define SRSRAN_SYMBOL_HAS_REF_MBSFN(l, s)       ((l == 2 && s == 0) || (l == 0 && s == 1) || (l == 4 && s == 1))
 #define SRSRAN_SYMBOL_HAS_REF_MBSFN_7KHZ5(l, s) ((l == 1 && s == 0) || (l == 0 && s == 1) || (l == 2 && s == 1))
 #define SRSRAN_SYMBOL_HAS_REF_MBSFN_1KHZ25(l, s) (true)
+#define SRSRAN_SYMBOL_HAS_REF_MBSFN_2KHZ5(l, s)  (true)
+/* TS 36.211 §6.10.2.2.4: SL4 type-1 RS occupy only l=0 per slot (pilot spacing 12 does not fit
+ * evenly in 6 symbols). SL2 type-2 and base 0.37 kHz have RS in every OFDM symbol. */
+#define SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ(l, s)      (true)
+#define SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ_SL2(l, s)  (true)
+#define SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ_SL4(l, s)  ((l) == 0)
 #define SRSRAN_SYMBOL_HAS_REF_MBSFN_SCS(l, s, scs) (scs == SRSRAN_SCS_15KHZ ? SRSRAN_SYMBOL_HAS_REF_MBSFN(l, s) : \
-    (scs == SRSRAN_SCS_7KHZ5 ? SRSRAN_SYMBOL_HAS_REF_MBSFN_7KHZ5(l, s) : SRSRAN_SYMBOL_HAS_REF_MBSFN_1KHZ25(l, s)))
+    (scs == SRSRAN_SCS_7KHZ5     ? SRSRAN_SYMBOL_HAS_REF_MBSFN_7KHZ5(l, s)       : \
+    (scs == SRSRAN_SCS_2KHZ5     ? SRSRAN_SYMBOL_HAS_REF_MBSFN_2KHZ5(l, s)       : \
+    (scs == SRSRAN_SCS_370HZ_SL4 ? SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ_SL4(l, s)   : \
+    (scs == SRSRAN_SCS_370HZ_SL2 ? SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ_SL2(l, s)   : \
+    (SRSRAN_SCS_IS_370HZ(scs)    ? SRSRAN_SYMBOL_HAS_REF_MBSFN_370HZ(l, s)        : \
+    SRSRAN_SYMBOL_HAS_REF_MBSFN_1KHZ25(l, s)))))))
 
 #define SRSRAN_SYMBOL_REF_OFFSET_MBSFN(l, s) ((l == 2 && s == 0) || (l == 0 && s == 1) || (l == 4 && s == 1))
-#define SRSRAN_SYMBOL_HAS_REF_MBSFN_7KHZ5(l, s) ((l == 1 && s == 0) || (l == 0 && s == 1) || (l == 2 && s == 1))
-#define SRSRAN_SYMBOL_HAS_REF_MBSFN_1KHZ25(l, s) (true)
-#define SRSRAN_SYMBOL_HAS_REF_MBSFN_SCS(l, s, scs) (scs == SRSRAN_SCS_15KHZ ? SRSRAN_SYMBOL_HAS_REF_MBSFN(l, s) : \
-    (scs == SRSRAN_SCS_7KHZ5 ? SRSRAN_SYMBOL_HAS_REF_MBSFN_7KHZ5(l, s) : SRSRAN_SYMBOL_HAS_REF_MBSFN_1KHZ25(l, s)))
 
 #define SRSRAN_NON_MBSFN_REGION_GUARD_LENGTH(non_mbsfn_region, symbol_sz)                                              \
   ((non_mbsfn_region == 1)                                                                                             \
@@ -198,7 +241,7 @@ typedef enum { SRSRAN_SCS_15KHZ = 0, SRSRAN_SCS_7KHZ5, SRSRAN_SCS_1KHZ25  } srsr
 #define SRSRAN_FDD_NOF_HARQ (FDD_HARQ_DELAY_DL_MS + FDD_HARQ_DELAY_UL_MS)
 #define SRSRAN_MAX_HARQ_PROC 15
 
-#define SRSRAN_NOF_LTE_BANDS 58
+#define SRSRAN_NOF_LTE_BANDS 64
 
 #define SRSRAN_DEFAULT_MAX_FRAMES_PBCH 500
 #define SRSRAN_DEFAULT_MAX_FRAMES_PSS 10
@@ -257,7 +300,21 @@ typedef struct {
   uint8_t mbsfn_mcs;
   bool    enable;
   bool    is_mcch;
-  srsran_scs_t        subcarrier_spacing;
+  srsran_scs_t subcarrier_spacing;
+  /* Rel-19 LTE_terr_bcast_Ph2 */
+  bool     use_mcs_table2;      /* use TS 36.213 Table 11.1-2 (256QAM) instead of Table 11.1-1 */
+  uint8_t  time_interleaving_n; /* NTimePMCH: TB spans this many subframes; 0/1 = disabled */
+  uint8_t  time_interleaving_m; /* MTimePMCH: scheduling period length in subframes; 4/8/16/32 */
+  uint32_t mch_subframe_idx;    /* 0-based index of this MCH subframe within the scheduling period */
+  bool     cyclic_shift;        /* pmch-CyclicShiftAlpha-r19 present (TS 36.211 §6.5.1) */
+  uint8_t  cyclic_shift_alpha;  /* α: 1, 2, or 3 */
+  bool     freq_interleaving;   /* pmch-FreqInterleaving-r19 (TS 36.211 §6.5.2) */
+  uint8_t  pmch_idx;            /* index into mcch.pmch_info_list[] for this subframe */
+  /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping) --
+   * see the matching fields' doc comment in pmch.h's srsran_pmch_cfg_t. */
+  uint8_t  n_soft_ref_category;
+  uint8_t  scaling_factor_beta_num;
+  uint8_t  scaling_factor_beta_den;
 } srsran_mbsfn_cfg_t;
 
 // Common cell constant properties that require object reconfiguration
@@ -272,6 +329,16 @@ typedef struct SRSRAN_API {
   bool                  mbms_dedicated;
   uint8_t               additional_non_mbms_frames;
   uint8_t               mbsfn_prb;
+  /* Rel-16 CAS muting (TS 36.211 CR 0577, §6.6.4, §6.11.1.2, §6.11.2.2):
+   * Period = 16*NCAS frames; KCAS ∈ {4..63} active-CAS frames per period (in steps of 4).
+   * Active (PSS/SSS/PBCH transmitted) when: nf % (16*n_cas) < 4*k_cas
+   * Muted (suppressed) when:               nf % (16*n_cas) >= 4*k_cas */
+  bool                  cas_muting;
+  uint8_t               k_cas;   /* KCAS: number of true-CAS groups per period (4..63) */
+  uint8_t               n_cas;   /* NCAS: 2, 4, 8, or 16 */
+  /* Rel-16: semiStaticCFI-MBMS-r16 (TS 36.331/36.213 §9.1.3, MIB-MBMS bits [11-12]):
+   * INTEGER(0..3). 0 = derive CFI from PCFICH; 1/2/3 directly ARE the CFI value. */
+  uint8_t               semi_static_cfi;   /* 0..3; 0 also doubles as "not yet decoded" on RX */
 } srsran_cell_t;
 
 // Common downlink properties that may change every subframe
@@ -479,6 +546,8 @@ SRSRAN_API int srsran_nof_prb(uint32_t symbol_sz);
 SRSRAN_API uint32_t srsran_max_cce(uint32_t nof_prb);
 
 SRSRAN_API int srsran_sampling_freq_hz(uint32_t nof_prb);
+
+SRSRAN_API int srsran_sampling_freq_hz_scs(uint32_t nof_prb, srsran_scs_t scs);
 
 SRSRAN_API void srsran_use_standard_symbol_size(bool enabled);
 

@@ -215,7 +215,7 @@ public:
                        uint32_t ul_nof_prbs) = 0;
 
   virtual int  get_dl_sched(uint32_t tti, dl_sched_list_t& dl_sched_res)                = 0;
-  virtual int  get_mch_sched(uint32_t tti, bool is_mcch, dl_sched_list_t& dl_sched_res) = 0;
+  virtual int  get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_list_t& dl_sched_res) = 0;
   virtual int  get_ul_sched(uint32_t tti, ul_sched_list_t& ul_sched_res)                = 0;
   virtual void set_sched_dl_tti_mask(uint8_t* tti_mask, uint32_t nof_sfs)               = 0;
 };
@@ -231,6 +231,15 @@ class mac_interface_rrc
 public:
   /* Provides cell configuration including SIB periodicity, etc. */
   virtual int cell_cfg(const std::vector<sched_interface::cell_cfg_t>& cell_cfg) = 0;
+
+  /**
+   * Re-pushes only the per-cell SIB length/periodicity table (e.g. after a post-init
+   * generate_sibs() rebuild changes a SIB's packed length, such as toggling cas_muting).
+   * Cheaper than cell_cfg(): does not touch PRACH/regs/CCE derivation or recreate the
+   * broadcast/RA schedulers, so it's safe to call frequently without perturbing unrelated
+   * unicast UE scheduling state. sibs must have exactly sched_interface::MAX_SIBS entries.
+   */
+  virtual void set_sib_lens(uint32_t enb_cc_idx, const sched_interface::cell_cfg_sib_t* sibs) = 0;
 
   /* Manages UE configuration context */
   virtual int ue_cfg(uint16_t rnti, const sched_interface::ue_cfg_t* cfg) = 0;

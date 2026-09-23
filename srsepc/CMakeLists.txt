@@ -47,6 +47,7 @@ link_directories(
 # Add subdirectories
 ########################################################################
 add_subdirectory(src)
+add_subdirectory(test)
 
 ########################################################################
 # Default configuration files

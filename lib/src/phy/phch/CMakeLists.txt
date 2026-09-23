@@ -20,4 +20,4 @@
 
 file(GLOB SOURCES "*.c")
 add_library(srsran_phch OBJECT ${SOURCES})
-#add_subdirectory(test)
+add_subdirectory(test)

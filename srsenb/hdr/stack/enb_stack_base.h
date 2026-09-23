@@ -23,6 +23,7 @@
 #define SRSRAN_ENB_STACK_BASE_H
 
 #include "srsran/interfaces/enb_interfaces.h"
+#include "srsran/interfaces/enb_m3ap_interfaces.h"
 #include "srsran/interfaces/enb_mac_interfaces.h"
 #include "srsran/interfaces/enb_s1ap_interfaces.h"
 #include "srsue/hdr/stack/upper/gw.h"
@@ -49,6 +50,42 @@ typedef struct {
   std::string m1u_multiaddr;
   std::string m1u_if_addr;
   uint16_t    mcs;
+  bool        cas_muting;
+  uint8_t     k_cas;
+  uint8_t     n_cas;
+  /* Rel-17 LTE_terr_bcast */
+  uint8_t     pmch_bandwidth;        /* pmch-Bandwidth-r17: 0=off, 30/35/40 PRBs (TS 36.331 §6.3.1) */
+  /* Rel-19 LTE_terr_bcast_Ph2 per-PMCH config */
+  uint8_t     cyclic_shift_alpha;   /* 0 = disabled, 1/2/3 = alpha1/2/3 (TS 36.211 §6.5.1) */
+  bool        freq_interleaving;    /* TS 36.211 §6.5.2 */
+  uint8_t     time_interleaving_n;  /* NTimePMCH: 0/1 = disabled, 2/4/8/16 (TS 36.213 §11.1) */
+  uint8_t     time_interleaving_m;  /* MTimePMCH: 4/8/16/32 subframes per period (TS 36.211 §6.5.3) */
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): lets the last MTCH
+   * session in nof_mbms_sessions differ from the main N/M above. 0 = absent/inherit
+   * main N (for N-last) or main M (for M-last); N-last also accepts 1 (n1 = disabled
+   * for the last session only, the one value the main N field cannot express). */
+  uint8_t     time_interleaving_n_last_mtch;
+  uint8_t     time_interleaving_m_last_mtch;
+  /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping), mandatory
+   * sibling of time_interleaving_n/m whenever time_interleaving_n > 1. Category is the
+   * plain UE category number (TS 36.306 Table 4.1-1); scaling_factor_beta is the RRC
+   * enum token name (one32nd/one5th/one3rd/three8th/five12th/onehalf/five8th/two3rd/
+   * five6th/one), converted to a num/den fraction in enb_cfg_parser.cc. */
+  uint16_t    n_soft_ref_category;  /* TS 36.306 UE DL category, default 4 */
+  std::string scaling_factor_beta;  /* "" = default "one" (num=1,den=1) */
+  bool        use_mcs_table2;       /* use TS 36.213 Table 11.1-2 (256QAM) */
+  uint8_t     mch_sched_period_rf;       /* PMCH scheduling period in radio frames (4/8/16/32/64) */
+  uint8_t     nof_mbms_sessions;         /* number of MBMS sessions (MTCH bearers) in the PMCH (1-8) */
+  bool        pmch_time_separation_sl2;  /* false=SL4 (default), true=SL2 (TS 36.211 §4.1 timeSeparation) */
+  std::string pmch_subcarrier_spacing;   /* "" (derive from sib.conf r9 SCS), or "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" */
+  uint8_t     additional_non_mbsfn_subframes; /* MIB-MBMS bits[9-10]: 0..3 non-MBSFN SFs after SF0 in active CAS frames (TS 36.331 §6.7.4.1) */
+  /* Comma-separated per-session GTP-U TEIDs for M1-U demux (e.g. "0xAAAAAAAA,0xAAAAAAAB"),
+   * index i (0-based) -> LCID i+1, matching rrc.cc's mbms_session_info_list[s].lc_ch_id.
+   * Empty (default) = legacy behavior: every M1-U packet goes to a single fixed bearer
+   * regardless of TEID. Must be kept consistent with the MBMS-GW's own per-session C-TEID
+   * config -- this eNB has no M2/M3AP to learn the mapping dynamically. See gtpu.h's
+   * m1u_handler. */
+  std::string session_teids;
 } embms_args_t;
 
 typedef struct {
@@ -74,6 +111,7 @@ typedef struct {
   uint32_t         gtpu_indirect_tunnel_timeout_msec;
   mac_args_t       mac;
   s1ap_args_t      s1ap;
+  m3ap_args_t      m3ap;
   pcap_args_t      mac_pcap;
   pcap_net_args_t  mac_pcap_net;
   pcap_args_t      s1ap_pcap;
@@ -97,6 +135,27 @@ public:
   virtual bool get_metrics(stack_metrics_t* metrics) = 0;
 
   virtual void tti_clock() = 0;
+
+  virtual void reload_embms_config(uint8_t            pmch_bandwidth,
+                                   uint16_t           mcs,
+                                   uint8_t            time_interleaving_n,
+                                   uint8_t            time_interleaving_m,
+                                   uint8_t            time_interleaving_n_last_mtch,
+                                   uint8_t            time_interleaving_m_last_mtch,
+                                   uint8_t            cyclic_shift_alpha,
+                                   bool               freq_interleaving,
+                                   bool               use_mcs_table2,
+                                   bool               cas_muting,
+                                   uint8_t            k_cas,
+                                   uint8_t            n_cas,
+                                   uint8_t            mch_sched_period_rf,
+                                   uint8_t            nof_mbms_sessions,
+                                   bool               time_separation_sl2,
+                                   const std::string& subcarrier_spacing) {}
+
+  virtual void reload_sib12(bool activate) {}
+
+  virtual void set_q_rx_lev_min(int8_t value) {}
 };
 
 } // namespace srsenb
