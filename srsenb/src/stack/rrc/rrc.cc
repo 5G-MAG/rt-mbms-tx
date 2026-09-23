@@ -1349,28 +1349,6 @@ void rrc::kill_warning(const asn1::s1ap::kill_request_ies_container& ies)
   clear_sib12();
 }
 
-void rrc::set_q_rx_lev_min(int8_t value)
-{
-  if (value < -70 || value > -22) {
-    logger.warning("set_q_rx_lev_min: value=%d out of range (must be -70..-22 dBm) — clamping", value);
-    value = (value < -70) ? -70 : -22;
-  }
-  cfg.sib1.q_rx_lev_min_r14 = value;
-
-  // Bump the value tag so already-idle UEs notice SIB1 changed and re-read it (TS 36.331
-  // §5.2.1.3), same as reload_sib12() above -- unlike reconfigure_embms()'s eMBMS-specific
-  // parameters (which UEs only re-read at the next MCCH/MTCH access anyway),
-  // q-RxLevMin-r14 is a cell-selection criterion idle UEs may otherwise never revisit.
-  cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
-  if (!cfg.sib_tag_state_file.empty()) {
-    FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
-    if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
-  }
-  generate_sibs();
-  update_mac_sib_cfg();
-  logger.info("q-RxLevMin-r14 updated to %d dBm", value);
-}
-
 void rrc::mbms_session_start(const std::string&    tmgi_key,
                               const srsran::tmgi_t& tmgi,
                               uint8_t               session_id,
@@ -1476,14 +1454,18 @@ void rrc::configure_mbsfn_sibs()
     }
   }
 
-  /* Serialize pmch-Bandwidth-r17 into OTA SIB13 as an r16 MBSFN area info extension.
-   * mbsfn_area_info_r16_s carries the r17 bandwidth field (n30/n35/n40 = 30/35/40 PRBs).
-   * Mirror the r9 MCCH config into the mandatory r16 fields so the extension is self-consistent.
-   * Always clear first so a transition from bandwidth>0 → 0 removes the stale extension. */
+  /* Serialize pmch-Bandwidth-r17 into OTA SIB13 via the dedicated MBSFN-AreaInfo-r17 wrapper
+   * (TS 36.331 §6.3.7 ASN1START: MBSFN-AreaInfo-r17 ::= SEQUENCE { mbsfn-AreaInfo-r17
+   * MBSFN-AreaInfo-r16, pmch-Bandwidth-r17 ENUMERATED{...}, ... } -- a self-contained entry
+   * with its own embedded copy of the r16 fields, not an in-place extension of
+   * mbsfn_area_info_r16_s itself, which has no extension groups of its own).
+   * Always clear both lists first so a transition from bandwidth>0 → 0 removes the stale entry. */
   {
     auto& sib13 = cfg.sibs[12].sib13_v920();
     sib13.mbsfn_area_info_list_r16_present = false;
     sib13.mbsfn_area_info_list_r16.resize(0);
+    sib13.mbsfn_area_info_list_r17_present = false;
+    sib13.mbsfn_area_info_list_r17.resize(0);
     sib13.ext = sib13.notif_cfg_v1430.is_present();
   }
   /* TS 36.331 §6.3.7 Rel-16: mbsfn_area_info_list_r16 must be present for all
@@ -1493,7 +1475,7 @@ void rrc::configure_mbsfn_sibs()
     using R16     = mbsfn_area_info_r16_s;
     using R16MCCH = R16::mcch_cfg_r16_s_;
     using R16SCS  = R16::subcarrier_spacing_mbms_r16_e_;
-    using R16BW   = R16::pmch_bandwidth_r17_e_;
+    using R17BW   = mbsfn_area_info_r17_s::pmch_bandwidth_r17_e_;
     using R16TS   = R16::time_separation_r16_e_;
 
     auto& sib13 = cfg.sibs[12].sib13_v920();
@@ -1502,6 +1484,25 @@ void rrc::configure_mbsfn_sibs()
     sib13.mbsfn_area_info_list_r16.resize(n);
 
     for (uint32_t i = 0; i < n; i++) {
+      /* 7.5 kHz and 1.25 kHz are legacy Rel-14 values (subcarrierSpacingMBMS-r14)
+       * -- unlike 2.5 kHz and 0.37 kHz (which have no r9/r14 representation and
+       * need the r16 extension populated below), these must be signalled via the
+       * original r14 field itself, not only via the newer r16 extension: this is
+       * the field a legacy-anchored receiver (or one that falls back to r9/r14
+       * for any reason) actually reads. Previously only r16 was updated from the
+       * operator override, leaving this field at sib.conf's static value. */
+      if (cfg.pmch_subcarrier_spacing == "khz7dot5") {
+        sib13.mbsfn_area_info_list_r9[i].ext                                  = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14_present = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14.value =
+            mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_opts::khz7dot5;
+      } else if (cfg.pmch_subcarrier_spacing == "khz1dot25") {
+        sib13.mbsfn_area_info_list_r9[i].ext                                  = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14_present = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14.value =
+            mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_opts::khz1dot25;
+      }
+
       const auto& r9  = sib13.mbsfn_area_info_list_r9[i];
       auto&       r16 = sib13.mbsfn_area_info_list_r16[i];
 
@@ -1588,68 +1589,49 @@ void rrc::configure_mbsfn_sibs()
       } else {
         r16.time_separation_r16_present = false;
       }
-
-      // pmch-Bandwidth-r17: 30/35/40 PRBs for 6/7/8 MHz FeMBMS channels
-      switch (cfg.pmch_bandwidth) {
-        case 30: r16.pmch_bandwidth_r17 = R16BW::n30; break;
-        case 35: r16.pmch_bandwidth_r17 = R16BW::n35; break;
-        case 40: r16.pmch_bandwidth_r17 = R16BW::n40; break;
-        default: r16.pmch_bandwidth_r17_present = false; continue;
-      }
-      r16.pmch_bandwidth_r17_present = true;
     }
     sib13.mbsfn_area_info_list_r16_present = true;
+
+    /* pmch-Bandwidth-r17: 30/35/40 PRBs for 6/7/8 MHz FeMBMS channels. Lives in the separate
+     * MBSFN-AreaInfoList-r17 (each entry embeds a full copy of its r16 counterpart, per the
+     * spec's own struct shape), not folded into mbsfn_area_info_list_r16 above. Only emitted
+     * when an override bandwidth is actually configured. */
+    R17BW::options r17bw_opt;
+    switch (cfg.pmch_bandwidth) {
+      case 30: r17bw_opt = R17BW::n30; break;
+      case 35: r17bw_opt = R17BW::n35; break;
+      case 40: r17bw_opt = R17BW::n40; break;
+      default: r17bw_opt = R17BW::nulltype; break;
+    }
+    if (r17bw_opt != R17BW::nulltype) {
+      sib13.mbsfn_area_info_list_r17.resize(n);
+      for (uint32_t i = 0; i < n; i++) {
+        sib13.mbsfn_area_info_list_r17[i].mbsfn_area_info_r17 = sib13.mbsfn_area_info_list_r16[i];
+        sib13.mbsfn_area_info_list_r17[i].pmch_bandwidth_r17  = r17bw_opt;
+      }
+      sib13.mbsfn_area_info_list_r17_present = true;
+    }
     logger.info("SIB13: added mbsfn_area_info_list_r16: pmch_bandwidth_r17=%d PRBs, time_separation=%s, scs_override=%s",
                 cfg.pmch_bandwidth,
                 cfg.pmch_time_separation_sl2 ? "SL2" : "SL4(default)",
                 cfg.pmch_subcarrier_spacing.empty() ? "(from-r9)" : cfg.pmch_subcarrier_spacing.c_str());
-  }
 
-  /* MBMS-ROM-Info-r16 (TS 36.331 §6.3.7 Rel-16): advertise channel params for ROM receivers.
-   * Derive EARFCN and BW from cell config; SCS from pmch_subcarrier_spacing if set. */
-  {
-    using ROM    = asn1::rrc::mbms_rom_info_r16_s;
-    using ROMSCS = ROM::subcarrier_spacing_r16_e_;
-    using ROMBW  = ROM::bw_r16_e_;
-    auto& sib13  = cfg.sibs[12].sib13_v920();
-    sib13.mbms_rom_info_list_r16_present = false;
-    sib13.mbms_rom_info_list_r16.resize(0);
-
-    if (sib13.mbsfn_area_info_list_r9.size() > 0 && !cfg.cell_list.empty()) {
-      ROM ri{};
-      ri.rom_freq_r16 = cfg.cell_list[0].dl_earfcn;
-
-      /* Map nof_prb → BW enum (standard values only) */
-      switch (cfg.cell.nof_prb) {
-        case 6:   ri.bw_r16 = ROMBW::n6;   break;
-        case 15:  ri.bw_r16 = ROMBW::n15;  break;
-        case 25:  ri.bw_r16 = ROMBW::n25;  break;
-        case 50:  ri.bw_r16 = ROMBW::n50;  break;
-        case 75:  ri.bw_r16 = ROMBW::n75;  break;
-        case 100: ri.bw_r16 = ROMBW::n100; break;
-        default:  ri.bw_r16 = ROMBW::n25;  break;
-      }
-
-      /* Map pmch SCS to ROM SCS enum when set (khz15 is implicit default, omit to save bits) */
-      if (!cfg.pmch_subcarrier_spacing.empty() && cfg.pmch_subcarrier_spacing != "khz15") {
-        ri.subcarrier_spacing_r16_present = true;
-        if      (cfg.pmch_subcarrier_spacing == "khz7dot5")  ri.subcarrier_spacing_r16 = ROMSCS::khz7dot5;
-        else if (cfg.pmch_subcarrier_spacing == "khz1dot25") ri.subcarrier_spacing_r16 = ROMSCS::khz1dot25;
-        else                                                  ri.subcarrier_spacing_r16 = ROMSCS::khz15;
-      }
-
-      sib13.ext = true;
-      sib13.mbms_rom_info_list_r16.push_back(ri);
-      sib13.mbms_rom_info_list_r16_present = true;
-      /* Mirror to SIB1-MBMS embedded copy */
-      cfg.sib1.sib_type13_r14.ext = true;
-      cfg.sib1.sib_type13_r14.mbms_rom_info_list_r16.push_back(ri);
-      cfg.sib1.sib_type13_r14.mbms_rom_info_list_r16_present = true;
-      logger.info("SIB13: MBMS-ROM-Info-r16: EARFCN=%u BW=%uPRB%s", ri.rom_freq_r16, cfg.cell.nof_prb,
-                  ri.subcarrier_spacing_r16_present
-                      ? std::string(" SCS=") + ri.subcarrier_spacing_r16.to_string()
-                      : "");
-    }
+    /* SIB13 is broadcast two independent ways: as its own scheduled SI message
+     * (cfg.sibs[12], populated above) and embedded directly inside SIB1-MBMS
+     * (cfg.sib1.sib_type13_r14) -- see TS 36.331 SystemInformationBlockType1-MBMS-r14's
+     * sib-Type13-r14 field. Both are parsed independently from the same static
+     * sib.conf at startup (enb_cfg_parser.cc calls parse_sib13() twice), so both start
+     * with the same content, but only cfg.sibs[12] was being updated with the operator's
+     * --embms.subcarrier_spacing override above -- cfg.sib1.sib_type13_r14 was silently
+     * left at its stale, sib.conf-only value. Since SIB1-MBMS (and its embedded SIB13)
+     * is received far more often than the standalone SI window, mirror the corrected
+     * mbsfn-AreaInfo content into it too. */
+    cfg.sib1.sib_type13_r14.ext                             = sib13.ext;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r9         = sib13.mbsfn_area_info_list_r9;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r16_present = sib13.mbsfn_area_info_list_r16_present;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r16        = sib13.mbsfn_area_info_list_r16;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r17_present = sib13.mbsfn_area_info_list_r17_present;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r17        = sib13.mbsfn_area_info_list_r17;
   }
 
   srsran::mcch_msg_t mcch_t;
@@ -2099,6 +2081,21 @@ int rrc::pack_mcch()
                 cfg.pmch_time_interleaving_n, cfg.pmch_time_interleaving_m,
                 cfg.pmch_time_interleaving_n_last_mtch, cfg.pmch_time_interleaving_m_last_mtch,
                 (int)cfg.pmch_use_mcs_table2);
+
+    /* Per TS 36.331 V19.3.0 field description (§6.3.7, shared by both the r12 and v1900
+     * variants of PMCH-InfoListExt, and the only UE-facing behavioural text that exists for
+     * this IE -- §5.8.2.4 explicitly has no separate procedural rule): "IE PMCH-InfoListExt
+     * includes additional PMCHs, i.e. extends the PMCH list". There is no spec-defined
+     * mechanism for the same PMCH to appear in both pmch-InfoList-r9 and pmch-InfoListExt-v1900
+     * as a "richer version of the same entry" -- a receiver is only told to treat every
+     * InfoListExt entry as an additional, distinct PMCH. The r9 entry built above was staged
+     * purely to compute/reuse the shared MCS/scheduling-period/session-list values; clear it
+     * here so this PMCH (which this project only ever configures one of per area) is described
+     * exactly once, via v1900, when Phase 2 parameters apply to it -- not duplicated as two
+     * PMCHs advertising the same TMGI/session content, which no spec text sanctions.
+     * Trade-off: a hypothetical Rel-9..Rel-18-only receiver would see zero PMCHs on a cell
+     * with any Phase 2 feature enabled, rather than a legacy-only view of the same PMCH. */
+    area_cfg_r9.pmch_info_list_r9.resize(0);
     } // if (has_phase2) -- v1900 content
   } // if (has_phase2 || cfg.cell.mbms_dedicated) -- v1430/v1610 chain
 

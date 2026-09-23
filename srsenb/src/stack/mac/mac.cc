@@ -898,10 +898,32 @@ int mac::get_mch_sched(uint32_t tti, bool is_mcch, uint8_t pmch_idx, dl_sched_li
   }
 
   sched_interface::dl_pdu_mch_t& m = mch_per_pmch[pmch_idx];
+
+  /* TS 36.331 §6.3.7 / TS 36.321 §6.5: the MCH scheduling period's own boundary
+   * (fn_in_scheduling_period wrapping to 0) is NOT guaranteed to coincide with, or follow, this
+   * frame's MCCH occasion - mcch-Offset/sf-AllocInfo can legally place MCCH later in the frame
+   * than the period's first data subframe. The schedule (mtch_sched[]/stop,
+   * current_sf_allocation_num) used to only reset on is_mcch==true, so whenever MCCH's physical
+   * subframe fell AFTER the first data subframe of a new period, that first data subframe was
+   * built from the PREVIOUS period's stale current_sf_allocation_num/mtch_stop - overrunning
+   * mtch_stop and falling into the "no active grant" (rnti=0, data=nullptr) branch below for what
+   * should have been a fresh, real transmission. Detect the period boundary directly (independent
+   * of is_mcch) and (re)build the schedule exactly once per period instance, whichever event -
+   * MCCH or the first data subframe - comes first chronologically within the boundary frame. */
+  {
+    uint32_t sched_period_rf         = enum_to_number(this->mcch.pmch_info_list[pmch_idx].mch_sched_period);
+    uint32_t sfn                     = tti / 10u;
+    uint32_t fn_in_scheduling_period = sched_period_rf ? (sfn % sched_period_rf) : 0u;
+    uint32_t period_sfn_base         = sfn - fn_in_scheduling_period;
+    if (mch_period_start_sfn_base[pmch_idx] != period_sfn_base) {
+      build_mch_sched(per_sf_tbs, pmch_idx);
+      m.current_sf_allocation_num         = 1;
+      mch_period_start_sfn_base[pmch_idx] = period_sfn_base;
+    }
+  }
+
   if (is_mcch) {
-    build_mch_sched(per_sf_tbs, pmch_idx);
-    m.mcch_payload              = mcch_payload_buffer;
-    m.current_sf_allocation_num = 1;
+    m.mcch_payload = mcch_payload_buffer;
     logger.info("MCH Sched Info: LCID: %d, Stop: %d, tti is %d ",
                 m.mtch_sched[0].lcid,
                 m.mtch_sched[m.num_mtch_sched - 1].stop,

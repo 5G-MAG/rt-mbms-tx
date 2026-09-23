@@ -39,6 +39,51 @@
 
 #define MAX_PMCH_RE(scs) (SRSRAN_MBSFN_NOF_SLOTS(scs) * SRSRAN_MBSFN_NOF_SYMBOLS(scs) * SRSRAN_NRE_SCS(scs))
 
+/* PMCH_RE_DUMP fires on nearly every MBSFN subframe (~90% density) - left
+ * unrestricted it fills a size-capped /tmp within seconds. PMCH_RE_DUMP_TTI,
+ * if set, restricts the dump to that one tti so a live TX/RX comparison run
+ * only ever writes a handful of files. */
+static bool pmch_re_dump_enabled(uint32_t tti)
+{
+  if (!getenv("PMCH_RE_DUMP")) {
+    return false;
+  }
+  const char* target = getenv("PMCH_RE_DUMP_TTI");
+  if (target) {
+    return (uint32_t)atoi(target) == tti;
+  }
+  /* Dynamic filter: /tmp/pmch_dump_tti holds the target tti, re-read per call
+   * so it can be set AFTER launch, once the current run's failing ttis are
+   * known (the failing positions depend on a runtime phase established at
+   * sync, so they cannot be predicted before the process starts). Absent
+   * file = dump nothing; PMCH_RE_DUMP=1 alone is inert until the file is
+   * written. The per-subframe fopen only happens in diagnostic runs (env
+   * gate above), never in normal operation. */
+  FILE* f = fopen("/tmp/pmch_dump_tti", "r");
+  if (f) {
+    unsigned t  = 0;
+    bool     ok = (fscanf(f, "%u", &t) == 1);
+    fclose(f);
+    if (ok && t == tti) {
+      return true;
+    }
+  }
+  /* Subframe-modulo mode: /tmp/pmch_dump_sfmod holds K -> match tti%10==K.
+   * Used to continuously dump every sf-K subframe's TX bits: filenames wrap
+   * every 10240 ttis, so this is bounded at ~1024 distinct files that simply
+   * get overwritten each wrap - it cannot flood /tmp the way an unfiltered
+   * dump can. Lets a watcher grab the TX bits for whatever tti the RX just
+   * reported a (tti-drifting) CRC failure on, within the one-wrap window. */
+  f = fopen("/tmp/pmch_dump_sfmod", "r");
+  if (f) {
+    unsigned k  = 0;
+    bool     ok = (fscanf(f, "%u", &k) == 1);
+    fclose(f);
+    return ok && (tti % 10u) == k;
+  }
+  return false;
+}
+
 /* Rel-19 adds 256QAM for PMCH (TS 36.213 Table 11.1-2). */
 const static srsran_mod_t modulations[5] = {
     SRSRAN_MOD_BPSK, SRSRAN_MOD_QPSK, SRSRAN_MOD_16QAM, SRSRAN_MOD_64QAM, SRSRAN_MOD_256QAM
@@ -778,7 +823,7 @@ int srsran_pmch_decode(srsran_pmch_t*         q,
         /* DIAG (PMCH_RE_DUMP): see modem repo's copy for the full comment. This app
          * (srsenb, TX-only) never actually calls this decode path at runtime; kept
          * mirrored here for consistency. */
-        if (getenv("PMCH_RE_DUMP") && i == 0 && j == 0 && sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
+        if (pmch_re_dump_enabled(sf->tti) && i == 0 && j == 0 && sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
           uint32_t dump_n = SRSRAN_NRE_SCS(sf->subcarrier_spacing) * q->cell.nof_prb;
           char     fn[128];
           snprintf(fn, sizeof(fn), "/tmp/pmch_rx_fullce_tti%u.bin", sf->tti);
@@ -811,7 +856,7 @@ int srsran_pmch_decode(srsran_pmch_t*         q,
      * srsran_pmch_encode above. Dumps the post-equalization data symbols (same
      * point TX dumps its post-modulation symbols) so the two can be diffed
      * directly for the same tti. */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (pmch_re_dump_enabled(sf->tti)) {
       char fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_rx_sym_tti%u.bin", sf->tti);
       FILE* fsym = fopen(fn, "wb");
@@ -910,7 +955,7 @@ int srsran_pmch_decode(srsran_pmch_t*         q,
      * post-anti-cyclic-shift - i.e. immediately before dlsch_decode) so they can be
      * hard-thresholded and diffed bit-for-bit against TX's scrambled bit dump for
      * the same tti. */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (pmch_re_dump_enabled(sf->tti)) {
       char fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_rx_llr_tti%u.bin", sf->tti);
       FILE* fllr = fopen(fn, "wb");
@@ -1023,14 +1068,13 @@ void srsran_configure_pmch(srsran_pmch_cfg_t* pmch_cfg, srsran_cell_t* cell, srs
   if (mbsfn_cfg->time_interleaving_n > 1) {
     int base_tbs = pmch_cfg->pdsch_cfg.grant.tb[0].tbs;
     int scaled   = base_tbs * (int)mbsfn_cfg->time_interleaving_n;
-    /* Round to the nearest valid TBS table entry. TX and RX must use the same
-     * rounding so that CB segmentation operates on identical total sizes. */
-    int tbs_idx  = srsran_ra_tbs_to_table_idx((uint32_t)scaled, pmch_cfg->pdsch_cfg.grant.nof_prb,
-                                               SRSRAN_RA_NOF_TBS_IDX - 1);
-    if (tbs_idx >= (int)SRSRAN_RA_NOF_TBS_IDX) tbs_idx = (int)SRSRAN_RA_NOF_TBS_IDX - 1;
-    if (tbs_idx < 0) tbs_idx = 0;
-    pmch_cfg->pdsch_cfg.grant.tb[0].tbs = srsran_ra_tbs_from_idx((uint32_t)tbs_idx,
-                                                                   pmch_cfg->pdsch_cfg.grant.nof_prb);
+    /* TS 36.213 j40 §11.1: round the TI-scaled TBS to the closest valid TBS in the
+     * UNION of Table 7.1.7.2.1-1 (one layer) and the 2/3/4-layer translation tables
+     * 7.1.7.2.2-1 / 7.1.7.2.4-1 / 7.1.7.2.5-1 (ties round up) -- NOT the one-layer
+     * table alone. Must be identical to the RX (rt-mbms-modem) so CB segmentation
+     * operates on the same total size. */
+    pmch_cfg->pdsch_cfg.grant.tb[0].tbs =
+        (int)srsran_ra_tbs_round_pmch_ti((uint32_t)scaled, pmch_cfg->pdsch_cfg.grant.nof_prb);
   }
   pmch_cfg->pdsch_cfg.grant.nof_tb     = 1;
   pmch_cfg->pdsch_cfg.grant.nof_layers = 1;
@@ -1234,7 +1278,7 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
      * (post-scramble, pre-modulation), one file per tti so a specific subframe's
      * TX-side data can be diffed against the matching RX-side dump (see the
      * decode()-side PMCH_RE_DUMP block below) for the same tti. */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (pmch_re_dump_enabled(sf->tti)) {
       char fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_tx_sym_tti%u.bin", sf->tti);
       FILE* fsym = fopen(fn, "wb");
@@ -1273,7 +1317,7 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
      * q->d dump (both are compacted "data RE only" arrays using the same pmch_cp
      * pilot-skip pattern) -- unlike the full-grid sf_symbols dump below, which
      * includes RS REs the RX-side compacted arrays never see. */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (pmch_re_dump_enabled(sf->tti)) {
       char fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_tx_datasym_tti%u.bin", sf->tti);
       FILE* fds = fopen(fn, "wb");
@@ -1291,7 +1335,7 @@ int srsran_pmch_encode(srsran_pmch_t*      q,
      * diffing the same tti's TX-side pre-IFFT grid against RX's post-FFT grid directly -
      * meant to isolate an FFT-window/CP-timing or RE-to-subcarrier-mapping mismatch
      * from anything in reference-signal/channel-estimation (already fixed separately). */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (pmch_re_dump_enabled(sf->tti)) {
       uint32_t dump_n = SRSRAN_NRE_SCS(sf->subcarrier_spacing) * q->cell.nof_prb;
       char     fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_tx_preifft_tti%u.bin", sf->tti);

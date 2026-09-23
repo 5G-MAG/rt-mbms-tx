@@ -154,8 +154,6 @@ public:
                                    const std::string& subcarrier_spacing) {}
 
   virtual void reload_sib12(bool activate) {}
-
-  virtual void set_q_rx_lev_min(int8_t value) {}
 };
 
 } // namespace srsenb

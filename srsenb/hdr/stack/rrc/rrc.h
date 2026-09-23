@@ -110,11 +110,6 @@ public:
                          bool               time_separation_sl2,
                          const std::string& subcarrier_spacing);
   void reload_sib12(bool activate);
-  // Live-reconfigures q-RxLevMin-r14 (TS 36.331 §6.2.2, SIB1-MBMS cellSelectionInfo-r14),
-  // previously only settable via config file + restart. Range -70..-22 dBm; out-of-range
-  // values are clamped with a warning, mirroring reconfigure_embms()'s own validation style.
-  void set_q_rx_lev_min(int8_t value);
-
   // Real per-session MBMS state, driven by M3AP (srsenb/hdr/stack/m3ap/m3ap.h) instead of the
   // static nof_mbms_sessions/fabricated-TMGI loop reconfigure_embms()/pack_mcch() otherwise fall
   // back to. tmgi_key mirrors the MME's own "mcc:mnc:serviceid"-style string key so log lines and

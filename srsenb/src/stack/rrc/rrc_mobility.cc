@@ -379,7 +379,13 @@ bool rrc::ue::rrc_mobility::start_ho_preparation(uint32_t target_eci,
   hoprep_r8.as_cfg.source_mib.phich_cfg.phich_res.value =
       (asn1::rrc::phich_cfg_s::phich_res_e_::options)rrc_enb->cfg.cell.phich_resources;
   hoprep_r8.as_cfg.source_mib.sys_frame_num.from_number(0); // NOTE: The TS says this can go empty
-  hoprep_r8.as_cfg.source_sib_type1 = src_cell_cfg->sib1;
+  // AS-Config's sourceSystemInformationBlockType1 is spec'd as the standard
+  // SystemInformationBlockType1 (TS 36.331 AS-Config), not SystemInformationBlockType1-MBMS --
+  // src_cell_cfg->sib1 is the latter (this eNB is MBMS-dedicated) and the two share no
+  // compatible field layout, so there's no meaningful value to copy here. Left
+  // default/empty: this handover-preparation path requires an existing UE RRC context, which
+  // never exists on an MBMS-dedicated, receive-only broadcast cell (no uplink UEs), so it's
+  // unreachable in practice for this deployment.
   hoprep_r8.as_cfg.source_sib_type2 = src_cell_cfg->sib2;
   asn1::number_to_enum(hoprep_r8.as_cfg.ant_info_common.ant_ports_count, rrc_enb->cfg.cell.nof_ports);
   hoprep_r8.as_cfg.source_dl_carrier_freq = src_cell_cfg->cell_cfg.dl_earfcn;

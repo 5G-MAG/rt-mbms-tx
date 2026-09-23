@@ -42,18 +42,24 @@ bc_sched::bc_sched(const sched_cell_params_t& cfg_, srsenb::rrc_interface_mac* r
 void bc_sched::dl_sched(sf_sched* tti_sched)
 {
   current_tti = tti_sched->get_tti_tx_dl();
-  /* MBMS-dedicated cells prefer PDCCH Format 4 (AL16, aggr_idx=4) for SIB/paging
-   * robustness; normal cells use AL4 (aggr_idx=2). AL16 needs 16 contiguous CCEs
-   * (1<<4), which a narrow cell only has at a high enough CFI -- e.g. a 25 PRB
-   * cell provides just 4/13/21 CCEs at CFI=1/2/3 respectively (nof_cce_table),
-   * so AL16 is only actually usable at CFI=3. Blindly requesting it regardless
-   * of the cell's *effective* CFI (the semiStaticCFI-MBMS-r16 override when
-   * configured, since that's what's really transmitted on CAS subframes --
-   * see semi_static_cfi's own assignment in enb_cfg_parser.cc for why; otherwise
-   * the scheduler's own max_nof_ctrl_symbols ceiling) makes bc_sched::alloc_sibs
-   * unconditionally fail with no_cch_space forever whenever that CFI doesn't
-   * provide enough CCEs -- SIB1/paging never gets broadcast at all, silently.
-   * Pick the highest aggregation level that actually fits instead. */
+  /* TS 36.213 v19.4.0 9.1.1: on an MBMS-dedicated cell, a UE monitors a
+   * common search space for MBMS reception at aggregation level L=16 with a
+   * single PDCCH candidate -- both the level and the "single candidate" part
+   * are spec-mandated, not implementation choices. AL16 needs 16 contiguous
+   * CCEs (1<<4), which a narrow cell only has at a high enough CFI -- e.g. a
+   * 25 PRB cell provides just 4/13/21 CCEs at CFI=1/2/3 respectively
+   * (nof_cce_table), so AL16 is only actually usable at CFI=3. Blindly
+   * requesting it regardless of the cell's *effective* CFI (the
+   * semiStaticCFI-MBMS-r16 override when configured, since that's what's
+   * really transmitted on CAS subframes -- see semi_static_cfi's own
+   * assignment in enb_cfg_parser.cc for why; otherwise the scheduler's own
+   * max_nof_ctrl_symbols ceiling) makes bc_sched::alloc_sibs unconditionally
+   * fail with no_cch_space forever whenever that CFI doesn't provide enough
+   * CCEs -- SIB1/paging never gets broadcast at all, silently. Pick the
+   * highest aggregation level that actually fits instead; alloc_sibs()'s own
+   * round-robin (see below) is what enforces the "single candidate" part by
+   * giving every concurrently-pending SI message a fair turn at it over
+   * successive CAS occasions, rather than lowering the aggregation level. */
   if (cc_cfg->cfg.cell.mbms_dedicated) {
     uint32_t effective_cfi = (cc_cfg->cfg.cell.semi_static_cfi != 0) ? cc_cfg->cfg.cell.semi_static_cfi
                                                                       : cc_cfg->sched_cfg->max_nof_ctrl_symbols;
@@ -129,31 +135,48 @@ void bc_sched::alloc_sibs(sf_sched* tti_sched)
   uint32_t current_sf_idx = tti_sched->get_tti_tx_dl().sf_idx();
   uint32_t current_sfn    = tti_sched->get_tti_tx_dl().sfn();
 
-  for (uint32_t sib_idx = 0; sib_idx < pending_sibs.size(); sib_idx++) {
+  /* MBMS-dedicated cells only have a CAS (cell-acquisition subframe) occasion
+   * in SF0 every 40ms (nof_prb>=25: sfn%4==0; narrower cells sfn%8==4) -- SIBs
+   * are never delivered on any other subframe, unlike a normal cell's greedy
+   * within-window scheduling below. additionalNonMBSFNSubframes is a distinct
+   * mechanism (used for e.g. MCCH change notifications, TS 36.331's own
+   * notificationSF-Index-r9 description) and is *not* an extra pool of SI
+   * message capacity, despite alloc_sibs() previously treating it as one. */
+  bool mbms_sf_active = true;
+  if (cc_cfg->cfg.cell.mbms_dedicated) {
+    uint32_t nof_prb   = cc_cfg->cfg.cell.nof_prb;
+    bool is_cas_sfn    = (nof_prb >= 25u) ? (current_sfn % 4u == 0u) : (current_sfn % 8u == 4u);
+    bool sfn_is_active = is_cas_sfn;
+    if (is_cas_sfn && cc_cfg->cfg.cell.cas_muting) {
+      uint32_t n_cas = (uint32_t)cc_cfg->cfg.cell.n_cas;
+      uint32_t k_cas = (uint32_t)cc_cfg->cfg.cell.k_cas;
+      sfn_is_active  = current_sfn % (16u * n_cas) < 4u * k_cas;
+    }
+    mbms_sf_active = sfn_is_active && current_sf_idx == 0;
+  }
+  if (!mbms_sf_active) {
+    return;
+  }
+
+  /* TS 36.213 9.1.1: the MBMS common search space provides a *single* PDCCH
+   * candidate at AL16 in that one CAS occasion -- at most one SI message's
+   * DCI can ever fit there. A SIB with an always-open window (e.g. SIB2)
+   * would otherwise win that one candidate every single occasion in the
+   * fixed sib_idx-ascending order below, starving every other concurrently-
+   * pending SI message (including a dynamically-activated SIB12 CMAS/PWS
+   * alert) via no_sch_space forever, since the retry loop below only retries
+   * on coderate, not on CCE exhaustion. Round-robin which sib_idx gets first
+   * attempt each occasion instead, so every pending SI message eventually
+   * gets a turn at that one candidate. For non-MBMS-dedicated cells this is
+   * a no-op in practice: they have more than one CCE opportunity per
+   * subframe, so the first successful nrbgs attempt below is not the only
+   * chance remaining sib_idx values get in the same subframe. */
+  for (uint32_t attempt = 0; attempt < pending_sibs.size(); attempt++) {
+    uint32_t     sib_idx     = (next_sib_priority_idx + attempt) % pending_sibs.size();
     sched_sib_t& pending_sib = pending_sibs[sib_idx];
     // Check if SIB is configured and within window
     if (cc_cfg->cfg.sibs[sib_idx].len == 0 or not pending_sib.is_in_window or pending_sib.n_tx >= 4) {
       continue;
-    }
-
-    /* MBMS-dedicated cells: SIBs may only be scheduled in active CAS frames, in
-     * SF0..SF(additionalNonMBSFNSubframes).  CAS period is 4 frames for wide
-     * cells (nof_prb >= 25) and 8 frames for narrow cells (nof_prb < 25).
-     * Muted CAS frames are excluded.
-     * Non-MBMS cells: schedule greedily within the SI window (existing behaviour). */
-    if (cc_cfg->cfg.cell.mbms_dedicated) {
-      uint32_t nof_prb   = cc_cfg->cfg.cell.nof_prb;
-      bool is_cas_sfn    = (nof_prb >= 25u) ? (current_sfn % 4u == 0u) : (current_sfn % 8u == 4u);
-      bool sfn_is_active = is_cas_sfn;
-      if (is_cas_sfn && cc_cfg->cfg.cell.cas_muting) {
-        uint32_t n_cas = (uint32_t)cc_cfg->cfg.cell.n_cas;
-        uint32_t k_cas = (uint32_t)cc_cfg->cfg.cell.k_cas;
-        sfn_is_active  = current_sfn % (16u * n_cas) < 4u * k_cas;
-      }
-      uint32_t max_add_sf = (uint32_t)cc_cfg->cfg.cell.additional_non_mbms_frames;
-      if (!sfn_is_active || current_sf_idx > max_add_sf) {
-        continue;
-      }
     }
 
     // Attempt PDSCH grants with increasing number of RBGs
@@ -175,8 +198,17 @@ void bc_sched::alloc_sibs(sf_sched* tti_sched)
                      sib_idx,
                      cc_cfg->cfg.sibs[sib_idx].len,
                      to_string(ret));
+      continue;
     }
+    // Won this occasion's one candidate -- give the next SI message first
+    // priority next occasion, and stop (nothing else can fit here anyway).
+    next_sib_priority_idx = (sib_idx + 1) % pending_sibs.size();
+    return;
   }
+  // Nobody was eligible/fit this occasion -- still rotate, so a SIB that
+  // repeatedly fails (e.g. coderate) doesn't also block others from ever
+  // getting first attempt.
+  next_sib_priority_idx = (next_sib_priority_idx + 1) % pending_sibs.size();
 }
 
 void bc_sched::alloc_paging(sf_sched* tti_sched)

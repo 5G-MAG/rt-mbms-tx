@@ -561,6 +561,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=maybe-uninitialized")
 # vendored library's own headers.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include array")
 
+# Same transitive-include gap as above, this time for <cstdint> - rrc_nr_config.h
+# uses uint8_t/uint32_t without including it directly, relying on it being
+# pulled in transitively via another header on the libstdc++ this was
+# originally built against. Not true on newer libstdc++; force it in.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include cstdint")
+
 # block_test.c's tx[SRSRAN_FEC_BLOCK_MAX_NOF_BITS] (11 bytes) write at
 # `tx[i]` for i < block_size is flagged as "writing into a region of size 0"
 # under GCC 15 -O3 - verified false positive (main() only ever calls
@@ -592,6 +598,22 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=missing-field-initializers")
 # analyzer loses track of the size through several layers of inlined generic
 # std::copy/__copy_move_a* calls and assumes a smaller, stale bound.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=array-bounds")
+
+# Same array-bounds false-positive class also hit in srsue's rrc_nr.cc
+# (std::array<float,5> access in phy_common::reset_measurements, inlined into
+# reset() - the index is always a compile-time constant < 5, GCC's bounds
+# tracking loses this through the inlining). -Wno-error= alone wasn't enough
+# here (a later -Werror in a per-target flag re-promotes it), so fully
+# disable the warning class for this build rather than just its error status.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-array-bounds")
+
+# Same asn1::dyn_array<T>::operator=/resize false-positive class as above,
+# this time tripping -Wstringop-overread instead of -Warray-bounds for a
+# different instantiation (T=ngap_nr::associated_qos_flow_item_s). Same root
+# cause: GCC's static analyzer loses the size invariant through the inlined
+# resize()-then-copy() sequence. Full disable, not just -Wno-error=, for the
+# same ordering-safety reason as -Wno-array-bounds above.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-stringop-overread")
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU")
   # Increase inlining limit to allow gcc compilation on e.g. RPi2

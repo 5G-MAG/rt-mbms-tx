@@ -1056,7 +1056,9 @@ static int estimate_port_mbsfn(srsran_chest_dl_t*     q,
   /* DIAG (PMCH_RE_DUMP): see modem repo's copy of this function for the full comment.
    * This app (srsenb, TX-only) never actually calls this decode path at runtime;
    * kept mirrored here for consistency. */
-  if (getenv("PMCH_RE_DUMP") && sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
+  if (getenv("PMCH_RE_DUMP") &&
+      (!getenv("PMCH_RE_DUMP_TTI") || (uint32_t)atoi(getenv("PMCH_RE_DUMP_TTI")) == sf->tti) &&
+      sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
     char fn[160];
     snprintf(fn, sizeof(fn), "/tmp/pmch_rx_pilotest_tti%u.bin", sf->tti);
     FILE* fp = fopen(fn, "wb");

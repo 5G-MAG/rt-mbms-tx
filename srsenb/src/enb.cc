@@ -337,23 +337,6 @@ void enb::reload_sib12(bool activate)
   }
 }
 
-int8_t enb::get_q_rx_lev_min() const
-{
-  std::lock_guard<std::mutex> lock(embms_cfg_mutex);
-  return q_rx_lev_min;
-}
-
-void enb::set_q_rx_lev_min(int8_t value)
-{
-  {
-    std::lock_guard<std::mutex> lock(embms_cfg_mutex);
-    q_rx_lev_min = value;
-  }
-  if (eutra_stack) {
-    eutra_stack->set_q_rx_lev_min(value);
-  }
-}
-
 void enb::start_plot()
 {
   phy->start_plot();

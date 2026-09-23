@@ -428,7 +428,7 @@ static void put_refs(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf)
      * locally-generated sequences disagree here, no amount of over-the-air fidelity
      * would make the RX's pilot correlation succeed -- this checks that precondition
      * directly instead of assuming it. */
-    if (getenv("PMCH_RE_DUMP") && scs != SRSRAN_SCS_15KHZ) {
+    if (getenv("PMCH_RE_DUMP") && (!getenv("PMCH_RE_DUMP_TTI") || (uint32_t)atoi(getenv("PMCH_RE_DUMP_TTI")) == tti) && scs != SRSRAN_SCS_15KHZ) {
       uint32_t act_prb = q->cell.mbsfn_prb ? q->cell.mbsfn_prb : q->cell.nof_prb;
       uint32_t n        = srsran_refsignal_mbsfn_rs_per_symbol(scs) * act_prb;
       char     fn[128];
@@ -593,7 +593,8 @@ void srsran_enb_dl_gen_signal(srsran_enb_dl_t* q)
      * to whatever transmits it (ZMQ RF driver in the loopback test). Compared
      * directly against the raw captured IQ stream, with no IFFT reconstruction
      * or mirror-convention assumptions needed on the analysis side. */
-    if (getenv("PMCH_RE_DUMP")) {
+    if (getenv("PMCH_RE_DUMP") &&
+        (!getenv("PMCH_RE_DUMP_TTI") || (uint32_t)atoi(getenv("PMCH_RE_DUMP_TTI")) == q->dl_sf.tti)) {
       uint32_t sf_len = (uint32_t)SRSRAN_SF_LEN_PRB(q->cell.nof_prb);
       char     fn[128];
       snprintf(fn, sizeof(fn), "/tmp/pmch_tx_postifft_tti%u.bin", q->dl_sf.tti);

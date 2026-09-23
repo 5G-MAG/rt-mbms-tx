@@ -55,6 +55,10 @@ private:
   // IANA-registered to "m3ap"/SCTP (verified against the IANA Service Name and Port Number Registry,
   // registered 2011-02-07); TS 36.444 itself does not mandate a port for M3.
   static const int MME_PORT_DEFAULT = 36444;
+  // SCTP Payload Protocol Identifier for M3AP (IANA SCTP-PARAMETERS registry). Mirrors s1ap.h's
+  // own PPID constant - sctp_send_m3ap_pdu() must pass this via sctp_sendmsg() the same way
+  // s1ap's sctp_send_s1ap_pdu() does, not send with an unset (default 0) PPID.
+  static const int PPID = 39;
 
   rrc_interface_m3ap*         rrc = nullptr;
   m3ap_args_t                 args;

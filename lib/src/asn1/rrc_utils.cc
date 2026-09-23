@@ -1118,6 +1118,14 @@ mbsfn_area_info_t::mcch_cfg_t::mod_period_t from_mcch_mod_period_v1430(
       return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf8;
     case mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_opts::rf16:
       return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf16;
+    case mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_opts::rf32:
+      return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf32;
+    case mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_opts::rf64:
+      return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf64;
+    case mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_opts::rf128:
+      return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf128;
+    case mbsfn_area_info_r9_s::mcch_cfg_r14_s_::mcch_mod_period_v1430_opts::rf256:
+      return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::rf256;
     default:
       return mbsfn_area_info_t::mcch_cfg_t::mod_period_t::nulltype;
   };
@@ -1157,26 +1165,92 @@ mbsfn_area_info_t make_mbsfn_area_info(const asn1::rrc::mbsfn_area_info_r9_s& as
   return ret;
 }
 
+mbsfn_area_info_t::mcch_cfg_t::repeat_period_t from_mcch_repeat_period_r16(
+    mbsfn_area_info_r16_s::mcch_cfg_r16_s_::mcch_repeat_period_r16_opts::options val) {
+  using ASN1 = mbsfn_area_info_r16_s::mcch_cfg_r16_s_::mcch_repeat_period_r16_opts;
+  using RET  = mbsfn_area_info_t::mcch_cfg_t::repeat_period_t;
+  switch (val) {
+    case ASN1::rf1:   return RET::rf1;
+    case ASN1::rf2:   return RET::rf2;
+    case ASN1::rf4:   return RET::rf4;
+    case ASN1::rf8:   return RET::rf8;
+    case ASN1::rf16:  return RET::rf16;
+    case ASN1::rf32:  return RET::rf32;
+    case ASN1::rf64:  return RET::rf64;
+    case ASN1::rf128: return RET::rf128;
+    case ASN1::rf256: return RET::rf256;
+    default:          return RET::nulltype;
+  };
+}
+
+mbsfn_area_info_t::mcch_cfg_t::mod_period_t from_mcch_mod_period_r16(
+    mbsfn_area_info_r16_s::mcch_cfg_r16_s_::mcch_mod_period_r16_opts::options val) {
+  using ASN1 = mbsfn_area_info_r16_s::mcch_cfg_r16_s_::mcch_mod_period_r16_opts;
+  using RET  = mbsfn_area_info_t::mcch_cfg_t::mod_period_t;
+  switch (val) {
+    case ASN1::rf1:    return RET::rf1;
+    case ASN1::rf2:    return RET::rf2;
+    case ASN1::rf4:    return RET::rf4;
+    case ASN1::rf8:    return RET::rf8;
+    case ASN1::rf16:   return RET::rf16;
+    case ASN1::rf32:   return RET::rf32;
+    case ASN1::rf64:   return RET::rf64;
+    case ASN1::rf128:  return RET::rf128;
+    case ASN1::rf256:  return RET::rf256;
+    case ASN1::rf512:  return RET::rf512;
+    case ASN1::rf1024: return RET::rf1024;
+    default:           return RET::nulltype;
+  };
+}
+
+mbsfn_area_info_t::mcch_cfg_t::sig_mcs_t from_sig_mcs_r16(
+    mbsfn_area_info_r16_s::mcch_cfg_r16_s_::sig_mcs_r16_opts::options val) {
+  using ASN1 = mbsfn_area_info_r16_s::mcch_cfg_r16_s_::sig_mcs_r16_opts;
+  using RET  = mbsfn_area_info_t::mcch_cfg_t::sig_mcs_t;
+  switch (val) {
+    case ASN1::n2:  return RET::n2;
+    case ASN1::n7:  return RET::n7;
+    case ASN1::n13: return RET::n13;
+    case ASN1::n19: return RET::n19;
+    default:        return RET::nulltype;
+  };
+}
+
+mbsfn_area_info_t::time_separation_t from_time_separation_r16(
+    mbsfn_area_info_r16_s::time_separation_r16_opts::options val) {
+  using ASN1 = mbsfn_area_info_r16_s::time_separation_r16_opts;
+  using RET  = mbsfn_area_info_t::time_separation_t;
+  switch (val) {
+    case ASN1::s12: return RET::sl2;
+    case ASN1::s14: return RET::sl4;
+    default:        return RET::nulltype;
+  };
+}
+
 mbsfn_area_info_t make_mbsfn_area_info(const asn1::rrc::mbsfn_area_info_r16_s& asn1_type)
 {
   mbsfn_area_info_t ret{};
   ret.mbsfn_area_id        = asn1_type.mbsfn_area_id_r16;
   ret.notif_ind            = asn1_type.notif_ind_r16;
-  ret.mcch_cfg.mcch_repeat_period =
-      (mbsfn_area_info_t::mcch_cfg_t::repeat_period_t)asn1_type.mcch_cfg_r16.mcch_repeat_period_r16.value;
+  ret.mcch_cfg.mcch_repeat_period = from_mcch_repeat_period_r16(asn1_type.mcch_cfg_r16.mcch_repeat_period_r16.value);
   ret.mcch_cfg.mcch_offset = asn1_type.mcch_cfg_r16.mcch_offset_r16;
-  ret.mcch_cfg.mcch_mod_period =
-      (mbsfn_area_info_t::mcch_cfg_t::mod_period_t)asn1_type.mcch_cfg_r16.mcch_mod_period_r16.value;
+  ret.mcch_cfg.mcch_mod_period = from_mcch_mod_period_r16(asn1_type.mcch_cfg_r16.mcch_mod_period_r16.value);
   ret.mcch_cfg.sf_alloc_info = asn1_type.mcch_cfg_r16.sf_alloc_info_r16.to_number();
   ret.mcch_cfg.sf_alloc_info_is_r16 = true;
-  ret.mcch_cfg.sig_mcs       = (mbsfn_area_info_t::mcch_cfg_t::sig_mcs_t)asn1_type.mcch_cfg_r16.sig_mcs_r16.value;
+  ret.mcch_cfg.sig_mcs       = from_sig_mcs_r16(asn1_type.mcch_cfg_r16.sig_mcs_r16.value);
   ret.subcarrier_spacing = from_subcarrier_spacing_mbms_r16_opts(asn1_type.subcarrier_spacing_mbms_r16.value);
   if (asn1_type.time_separation_r16_present) {
-    ret.time_separation = (mbsfn_area_info_t::time_separation_t)asn1_type.time_separation_r16.value;
+    ret.time_separation = from_time_separation_r16(asn1_type.time_separation_r16.value);
   }
-  if (asn1_type.pmch_bandwidth_r17_present) {
-    ret.pmch_bandwidth = asn1_type.pmch_bandwidth_r17.to_number();
-  }
+  // No pmch-Bandwidth-r17 here -- MBSFN-AreaInfo-r16 doesn't carry it (see the wrapper
+  // overload below); this overload only ever sees a bare r16 entry.
+  return ret;
+}
+
+mbsfn_area_info_t make_mbsfn_area_info(const asn1::rrc::mbsfn_area_info_r17_s& asn1_type)
+{
+  mbsfn_area_info_t ret = make_mbsfn_area_info(asn1_type.mbsfn_area_info_r17);
+  ret.pmch_bandwidth = asn1_type.pmch_bandwidth_r17.to_number();
   return ret;
 }
 
@@ -1223,6 +1297,16 @@ static pmch_info_t::mch_sched_period_t asn1_mch_period_r12_tx(uint8_t v)
     case 6: return P::rf256;
     case 7: return P::rf512;
     case 8: return P::rf1024;
+    default: return P::nulltype;
+  }
+}
+
+static pmch_info_t::mch_sched_period_t asn1_mch_period_v1430_tx(uint8_t v)
+{
+  using P = pmch_info_t::mch_sched_period_t;
+  switch (v) {
+    case 0: return P::rf1;
+    case 1: return P::rf2;
     default: return P::nulltype;
   }
 }
@@ -1317,6 +1401,14 @@ static pmch_info_t make_pmch_info_ext_r19_tx(const asn1::rrc::pmch_info_ext_r19_
     ret.use_mcs_table2 = true;
   }
   ret.mch_sched_period = asn1_mch_period_r12_tx(asn1_type.pmch_cfg_r19.mch_sched_period_r12.value);
+  /* Spec (TS 36.331, mch-SchedulingPeriod field description): "In case
+   * mch-SchedulingPeriod-v1430 or mch-SchedulingPeriod-v1900 is configured, the UE
+   * shall ignore mch-SchedulingPeriod-r12." Apply v1430 first, v1900 (checked below,
+   * inside pmch_tfi_cfg_r19) last, so the newest present extension wins if a sender
+   * were to (incorrectly) set more than one. */
+  if (asn1_type.pmch_cfg_r19.mch_sched_period_v1430_present) {
+    ret.mch_sched_period = asn1_mch_period_v1430_tx(asn1_type.pmch_cfg_r19.mch_sched_period_v1430.value);
+  }
 
   if (asn1_type.pmch_tfi_cfg_r19_present) {
     const auto& tfi = asn1_type.pmch_tfi_cfg_r19;
@@ -1397,6 +1489,45 @@ pmch_info_t make_pmch_info(const asn1::rrc::pmch_info_r9_s& asn1_type)
   return ret;
 }
 
+/* PMCH-InfoExt-r12: a genuinely additional PMCH (own full PMCH-Config-r12 + own
+ * session list), not an overlay of an existing r9 entry -- see the comment at
+ * make_mcch_msg()'s v1900 handling below for the spec citation. Caller appends
+ * this to the PMCH list. */
+static pmch_info_t make_pmch_info_ext_r12_tx(const asn1::rrc::pmch_info_ext_r12_s& asn1_type)
+{
+  pmch_info_t ret{};
+  ret.sf_alloc_end = asn1_type.pmch_cfg_r12.sf_alloc_end_r12;
+  using mcs_types  = asn1::rrc::pmch_cfg_r12_s::data_mcs_r12_c_::types;
+  if (asn1_type.pmch_cfg_r12.data_mcs_r12.type() == mcs_types::normal_r12) {
+    ret.data_mcs = asn1_type.pmch_cfg_r12.data_mcs_r12.normal_r12();
+  } else {
+    ret.data_mcs       = asn1_type.pmch_cfg_r12.data_mcs_r12.higer_order_r12();
+    ret.use_mcs_table2 = true;
+  }
+  ret.mch_sched_period = asn1_mch_period_r12_tx(asn1_type.pmch_cfg_r12.mch_sched_period_r12.value);
+  /* See identical precedence note in make_pmch_info_ext_r19_tx() above. */
+  if (asn1_type.pmch_cfg_r12.mch_sched_period_v1430_present) {
+    ret.mch_sched_period = asn1_mch_period_v1430_tx(asn1_type.pmch_cfg_r12.mch_sched_period_v1430.value);
+  }
+
+  ret.nof_mbms_session_info = asn1_type.mbms_session_info_list_r12.size();
+  for (uint32_t i = 0; i < ret.nof_mbms_session_info; ++i) {
+    const auto& asn1item    = asn1_type.mbms_session_info_list_r12[i];
+    auto&       item        = ret.mbms_session_info_list[i];
+    item.session_id_present = asn1item.session_id_r9_present;
+    item.lc_ch_id           = asn1item.lc_ch_id_r9;
+    item.session_id         = asn1item.session_id_r9[0];
+    item.tmgi.plmn_id_type  = (tmgi_t::plmn_id_type_t)asn1item.tmgi_r9.plmn_id_r9.type().value;
+    if (item.tmgi.plmn_id_type == tmgi_t::plmn_id_type_t::plmn_idx) {
+      item.tmgi.plmn_id.plmn_idx = asn1item.tmgi_r9.plmn_id_r9.plmn_idx_r9();
+    } else {
+      item.tmgi.plmn_id.explicit_value = make_plmn_id_t(asn1item.tmgi_r9.plmn_id_r9.explicit_value_r9());
+    }
+    memcpy(item.tmgi.serviced_id, &asn1item.tmgi_r9.service_id_r9[0], 3);
+  }
+  return ret;
+}
+
 mcch_msg_t make_mcch_msg(const asn1::rrc::mcch_msg_s& asn1_type)
 {
   mcch_msg_t msg{};
@@ -1426,14 +1557,61 @@ mcch_msg_t make_mcch_msg(const asn1::rrc::mcch_msg_s& asn1_type)
   // Parse Rel-19 Phase 2 PMCH extension (v1900)
   if (r9.non_crit_ext_present && r9.non_crit_ext.non_crit_ext_present) {
     const auto& v1250 = r9.non_crit_ext.non_crit_ext;
-    if (v1250.non_crit_ext_present && v1250.non_crit_ext.non_crit_ext_present) {
-      const auto& v1610 = v1250.non_crit_ext.non_crit_ext;
-      if (v1610.non_crit_ext_present) {
-        const auto& v1900 = v1610.non_crit_ext;
-        if (v1900.pmch_info_list_ext_v1900_present) {
-          for (const auto& ext_pmch : v1900.pmch_info_list_ext_v1900) {
-            if (msg.nof_pmch_info >= 15) break;
-            msg.pmch_info_list[msg.nof_pmch_info++] = make_pmch_info_ext_r19_tx(ext_pmch);
+
+    // PMCH-InfoListExt-r12: genuinely additional PMCHs beyond the r9 list (each entry
+    // is a full standalone PMCH-Config-r12 + own session list -- see make_pmch_info_ext_r12_tx).
+    if (v1250.pmch_info_list_ext_r12_present) {
+      for (size_t i = 0; i < v1250.pmch_info_list_ext_r12.size() && msg.nof_pmch_info < 15; ++i) {
+        msg.pmch_info_list[msg.nof_pmch_info++] = make_pmch_info_ext_r12_tx(v1250.pmch_info_list_ext_r12[i]);
+      }
+    }
+
+    if (v1250.non_crit_ext_present) {
+      const auto& v1430 = v1250.non_crit_ext;
+
+      // commonSF-Alloc-v1430: mandatory (no presence bit) whenever v1430-IEs is present at
+      // all (spec has no OPTIONAL on this field) -- extends the r9 pattern with sf #4/#9.
+      if (v1430.common_sf_alloc_r14.size() > 0) {
+        const auto& sf_alloc_v1430 = v1430.common_sf_alloc_r14[0].sf_alloc_v1430;
+        if (sf_alloc_v1430.type().value ==
+            asn1::rrc::mbsfn_sf_cfg_v1430_s::sf_alloc_v1430_c_::types_opts::one_frame_v1430) {
+          msg.common_sf_alloc_v1430_present = true;
+          uint8_t bits                      = sf_alloc_v1430.one_frame_v1430().to_number();
+          msg.common_sf_alloc_v1430_sf4     = (bits & 0x2u) != 0;
+          msg.common_sf_alloc_v1430_sf9     = (bits & 0x1u) != 0;
+        }
+        // four_frames_v1430 variant: same known limitation as four_frames_v1610 below.
+      }
+
+      if (v1430.non_crit_ext_present) {
+        const auto& v1610 = v1430.non_crit_ext;
+
+        if (v1610.common_sf_alloc_v1610_present && v1610.common_sf_alloc_v1610.size() > 0) {
+          const auto& sf_alloc_v1610 = v1610.common_sf_alloc_v1610[0].sf_alloc_v1610;
+          if (sf_alloc_v1610.type().value ==
+              asn1::rrc::mbsfn_sf_cfg_v1610_s::sf_alloc_v1610_c_::types_opts::one_frame_v1610) {
+            msg.common_sf_alloc_v1610_present = true;
+            uint8_t bits                      = sf_alloc_v1610.one_frame_v1610().to_number();
+            msg.common_sf_alloc_v1610_sf0     = (bits & 0x2u) != 0;
+            msg.common_sf_alloc_v1610_sf5     = (bits & 0x1u) != 0;
+          }
+          // four_frames_v1610 variant: never sent by this project's own TX, and its
+          // bit semantics for this extension aren't documented/verified here - left
+          // unhandled (common_sf_alloc_v1610_present stays false) rather than guessed.
+        }
+
+        if (v1610.non_crit_ext_present) {
+          const auto& v1900 = v1610.non_crit_ext;
+          if (v1900.pmch_info_list_ext_v1900_present) {
+            /* PMCH-InfoListExt-v1900[i] is a genuinely additional PMCH -- same "additional
+             * PMCHs" append semantics as PMCH-InfoListExt-r12 above (TS 36.331 V19.3.0
+             * §6.3.7 field description, the only UE-facing behavioural text for this IE per
+             * §5.8.2.4). rrc.cc's pack_mcch() clears pmch_info_list_r9 when Phase 2 features
+             * are used, so this PMCH is described exactly once and append is correct here. */
+            for (const auto& ext_pmch : v1900.pmch_info_list_ext_v1900) {
+              if (msg.nof_pmch_info >= 15) break;
+              msg.pmch_info_list[msg.nof_pmch_info++] = make_pmch_info_ext_r19_tx(ext_pmch);
+            }
           }
         }
       }
@@ -1451,6 +1629,14 @@ sib13_t make_sib13(const asn1::rrc::sib_type13_r9_s& asn1_type)
     sib13.nof_mbsfn_area_info = asn1_type.mbsfn_area_info_list_r16.size();
     for (uint32_t i = 0; i < sib13.nof_mbsfn_area_info; i++) {
       sib13.mbsfn_area_info_list[i] = make_mbsfn_area_info(asn1_type.mbsfn_area_info_list_r16[i]);
+    }
+    // mbsfn-AreaInfoList-r17 entries embed a full copy of their r16 counterpart plus
+    // pmch-Bandwidth-r17 (TS 36.331 §6.3.7); correlate by list position with r16 and prefer
+    // the r17-derived result (adds the bandwidth field) wherever an entry exists.
+    if (asn1_type.mbsfn_area_info_list_r17_present) {
+      for (uint32_t i = 0; i < asn1_type.mbsfn_area_info_list_r17.size() && i < sib13.nof_mbsfn_area_info; i++) {
+        sib13.mbsfn_area_info_list[i] = make_mbsfn_area_info(asn1_type.mbsfn_area_info_list_r17[i]);
+      }
     }
   } else {
     sib13.nof_mbsfn_area_info = asn1_type.mbsfn_area_info_list_r9.size();

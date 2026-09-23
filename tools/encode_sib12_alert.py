@@ -127,7 +127,7 @@ def main():
         hex_str  = seg.hex().upper()
         print(f'# Segment {i} of {n_segs - 1} ---')
         print(f'sib12_alert = {{')
-        print(f'    message_identifier       = 0x1102;   # ETWS tsunami; change per 3GPP TS 23.041 §9.4.1.3.1')
+        print(f'    message_identifier       = 0x1101;   # ETWS tsunami; change per 3GPP TS 23.041 §9.4.1.2.2 Table 9.4.1.2.2-1')
         print(f'    serial_number            = 0x3000;   # geo-scope=cell, update number=0')
         print(f'    data_coding_scheme       = 0x{dcs:02X};')
         print(f'    warning_msg_segment_type = "{seg_type}";')

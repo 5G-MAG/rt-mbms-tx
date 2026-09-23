@@ -244,15 +244,23 @@ enable = false
 # mme_addr:              IP address of MME for M3 connection
 # mme_m3_port:           M3 port on the MME (IANA-registered default for
 #                        m3ap/SCTP; TS 36.444 itself does not mandate a port)
-# m3c_bind_addr:         Local IP address to bind for M3AP connection
+# m3c_bind_addr:         Local IP address to bind for M3AP connection. Left
+#                        unset/commented out, this falls back to the
+#                        compiled-in placeholder 192.168.3.1 (see
+#                        srsenb/src/main.cc), which almost never exists on
+#                        the actual host and fails to bind -- the eNB then
+#                        retries forever, every ~10s, logging only a bare
+#                        "bind(): Cannot assign requested address" with no
+#                        higher-level explanation. Set this explicitly,
+#                        matching gtp_bind_addr/s1c_bind_addr above.
 # mbms_service_area_id:  MBMS Service Area Identity this eNB serves
 #                        (TS 23.003 clause 15.3)
 #####################################################################
 [m3ap]
-#mme_addr = 127.0.1.100
-#mme_m3_port = 36444
-#m3c_bind_addr = 192.168.3.1
-#mbms_service_area_id = 1
+mme_addr = 127.0.1.100
+mme_m3_port = 36444
+m3c_bind_addr = 127.0.1.1
+mbms_service_area_id = 1
 
 
 

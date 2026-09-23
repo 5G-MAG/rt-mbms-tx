@@ -1964,11 +1964,6 @@ int parse_sib1_mbms(std::string filename, sib_type1_mbms_r14_s* data)
 
   sib1.add_field(make_asn1_enum_number_parser("si_window_length", &data->si_win_len_r14));
   sib1.add_field(new parser::field<uint8_t>("system_info_value_tag", &data->sys_info_value_tag_r14));
-  // Optional: q_rx_lev_min for cellSelectionInfo-r14 (TS 36.331 §6.3.7 Q-RxLevMin, range -70..-22).
-  // Default -60 (= -120 dBm RSRP) is used if absent from the config file.
-  bool  q_rx_lev_min_present = false;
-  auto* q_rx_lev_min_f = new parser::field<int8_t>("q_rx_lev_min", &data->q_rx_lev_min_r14, &q_rx_lev_min_present);
-  sib1.add_field(q_rx_lev_min_f);
 
   // sched_info subsection uses a custom field class
   parser::section sched_info("sched_info");

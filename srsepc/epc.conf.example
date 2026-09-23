@@ -92,15 +92,48 @@ sm_bind_port = 2123
 #####################################################################
 # M3AP interface (MME <-> MCE/eNB, MBMS session control, TS 36.444)
 #
-# m3_bind_addr: M3AP interface bind address
+# m3_bind_addr: M3AP interface bind address. MUST be a specific address,
+#               not 0.0.0.0 -- a wildcard bind lets the kernel pick an
+#               arbitrary local address (e.g. 127.0.0.1) as the source
+#               of the INIT-ACK reply, rather than mirroring back
+#               whatever address the eNB's INIT was sent to. srsenb's
+#               SCTP sockets subscribe to sctp_address_event, making
+#               them address-aware: they immediately ABORT the
+#               handshake the instant a reply arrives from an address
+#               they didn't send to, on every single retry, with
+#               connect() surfacing this to the eNB only as a bare
+#               "Connection timed out" (confirmed via tcpdump: a full
+#               INIT/INIT-ACK/ABORT cycle completes in microseconds --
+#               there is no timeout at the wire level at all, despite
+#               the misleading errno). S1AP is unaffected because its
+#               own mme_bind_addr (above) already uses a specific
+#               address, never 0.0.0.0.
 # m3_bind_port: M3AP interface bind port. TS 36.444 itself does not specify
 #               an SCTP port number for M3, but 36444 is IANA-registered to
 #               "m3ap"/SCTP (verified against the IANA Service Name and Port
 #               Number Registry, registered 2011-02-07).
 #####################################################################
 [mme_m3]
-m3_bind_addr = 0.0.0.0
+m3_bind_addr = 127.0.1.100
 m3_bind_port = 36444
+
+#####################################################################
+# SBc-AP interface (MME <-> CBC/CBE, Emergency Alerts, TS 29.168)
+#
+# sbc_bind_addr: SBc-AP interface bind address. Pinned to the same
+#                specific address as mme_sm/mme_m3/mme above (rather
+#                than the compiled-in 0.0.0.0 default) as a preventive
+#                measure -- see the m3_bind_addr comment above for the
+#                address-mismatch/ABORT failure mode a wildcard bind
+#                causes against any sctp_address_event-subscribed SCTP
+#                client. Only matters once something talks real SCTP
+#                to this interface rather than a mocked local bridge.
+# sbc_bind_port: SBc-AP interface bind port (IANA-registered SCTP port
+#                for sbc-ap, TS 29.168).
+#####################################################################
+[mme_sbc]
+sbc_bind_addr = 127.0.1.100
+sbc_bind_port = 29168
 
 ####################################################################
 # Log configuration

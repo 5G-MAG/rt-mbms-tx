@@ -165,8 +165,6 @@ public:
 
   void reload_embms_config();
   void reload_sib12(bool activate);
-  int8_t get_q_rx_lev_min() const;
-  void   set_q_rx_lev_min(int8_t value);
 
   // Thread-safe accessors for the live eMBMS config, shared between the SIGHUP/file-reload
   // path and the control_server socket (both may call set_embms_config() from different threads).
@@ -186,12 +184,6 @@ private:
   all_args_t         args    = {};
   std::atomic<bool>  started = {false};
   mutable std::mutex embms_cfg_mutex;
-  // Cache of the last q-RxLevMin-r14 value applied via set_q_rx_lev_min(), reported back by
-  // get_q_rx_lev_min() for the control socket's GET command. Reflects the last value set
-  // through this interface, not necessarily the sib.conf.mbsfn file's value if never
-  // live-updated -- same fire-and-forget caveat as embms_args_t above. Default -60 matches
-  // sib_type1_mbms_r14_s::q_rx_lev_min_r14's own struct default.
-  int8_t q_rx_lev_min = -60;
 
   phy_cfg_t    phy_cfg    = {};
   rrc_cfg_t    rrc_cfg    = {};

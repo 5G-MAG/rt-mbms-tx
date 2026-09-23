@@ -583,6 +583,7 @@ int cc_worker::encode_pmch(stack_interface_phy_lte::dl_sched_grant_t* grant, srs
   ZERO_OBJECT(pmch_cfg);
   srsran_configure_pmch(&pmch_cfg, &enb_dl.cell, mbsfn_cfg);
   srsran_ra_dl_compute_nof_re(&enb_dl.cell, &dl_sf, &pmch_cfg.pdsch_cfg.grant);
+
   pmch_cfg.cyclic_shift       = mbsfn_cfg->cyclic_shift;
   pmch_cfg.cyclic_shift_alpha = mbsfn_cfg->cyclic_shift_alpha;
   pmch_cfg.freq_interleaving  = mbsfn_cfg->freq_interleaving;

@@ -67,23 +67,6 @@ bool parse_bool(const std::string& v, bool& out)
   return false;
 }
 
-// Same rejection rules as parse_uint() above (leading/trailing junk, overflow), but signed --
-// needed for q_rx_lev_min (-70..-22 dBm).
-bool parse_int(const std::string& v, long min_val, long max_val, long& out)
-{
-  if (v.empty()) {
-    return false;
-  }
-  char*         endptr = nullptr;
-  errno              = 0;
-  long          val    = std::strtol(v.c_str(), &endptr, 10);
-  if (errno != 0 || endptr == v.c_str() || *endptr != '\0' || val < min_val || val > max_val) {
-    return false;
-  }
-  out = val;
-  return true;
-}
-
 } // namespace
 
 control_server::control_server(enb* enb_) : enb_ptr(enb_), logger(srslog::fetch_basic_logger("ENB")) {}
@@ -260,7 +243,6 @@ std::string control_server::handle_get() const
   oss << "embms.time_separation_sl2=" << (cfg.pmch_time_separation_sl2 ? "true" : "false") << "\n";
   oss << "embms.subcarrier_spacing=" << cfg.pmch_subcarrier_spacing << "\n";
   oss << "embms.session_teids=" << cfg.session_teids << "\n";
-  oss << "sib1.q_rx_lev_min=" << static_cast<int>(enb_ptr->get_q_rx_lev_min()) << "\n";
   return oss.str();
 }
 
@@ -379,12 +361,6 @@ std::string control_server::handle_set(const std::string& args) const
       cfg.pmch_time_separation_sl2 = bval;
     } else if (key == "embms.subcarrier_spacing") {
       cfg.pmch_subcarrier_spacing = val;
-    } else if (key == "sib1.q_rx_lev_min") {
-      long ival = 0;
-      if (!parse_int(val, -70, -22, ival)) {
-        return "ERROR invalid value for " + key + ": '" + val + "' (expected -70..-22)\n";
-      }
-      enb_ptr->set_q_rx_lev_min(static_cast<int8_t>(ival));
     } else {
       return "ERROR unknown key: " + key + "\n";
     }

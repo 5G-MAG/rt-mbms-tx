@@ -145,6 +145,14 @@ private:
   std::vector<sched_interface::cell_cfg_t> cell_config;
 
   sched_interface::dl_pdu_mch_t mch_per_pmch[15] = {};
+  /* Per-pmch "which MCH scheduling period instance we last (re)built the schedule for", keyed by
+   * sfn - fn_in_scheduling_period (that period's own start SFN) - see get_mch_sched()'s period-
+   * boundary detection for why this exists alongside the is_mcch-triggered reset. UINT32_MAX
+   * (never a valid sfn_base) means "not yet synced to any period". */
+  uint32_t mch_period_start_sfn_base[15] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                                             UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                                             UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                                             UINT32_MAX, UINT32_MAX, UINT32_MAX};
 
   /* Map of active UEs */
   static const uint16_t            FIRST_RNTI = 0x46;

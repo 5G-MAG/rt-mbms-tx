@@ -181,11 +181,6 @@ public:
     enb_task_queue.push([this, activate]() { rrc.reload_sib12(activate); });
   }
 
-  void set_q_rx_lev_min(int8_t value) override
-  {
-    enb_task_queue.push([this, value]() { rrc.set_q_rx_lev_min(value); });
-  }
-
   // gtpu_interface_pdcp
   void write_pdu(uint16_t rnti, uint32_t lcid, srsran::unique_byte_buffer_t pdu);
 

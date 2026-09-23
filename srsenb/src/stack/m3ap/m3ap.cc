@@ -22,6 +22,9 @@
 #include "srsenb/hdr/stack/m3ap/m3ap.h"
 #include "srsran/common/bcd_helpers.h"
 #include "srsran/common/standard_streams.h"
+#include <cerrno>
+#include <cstring>
+#include <unistd.h>
 
 using namespace asn1::m3ap;
 
@@ -40,8 +43,16 @@ int m3ap::init(const m3ap_args_t& args_, rrc_interface_m3ap* rrc_)
   rrc  = rrc_;
   args = args_;
 
-  mme_connect_timer    = task_sched.get_unique_timer();
-  auto mme_connect_run = [this](uint32_t tid) { connect_mme(); };
+  mme_connect_timer = task_sched.get_unique_timer();
+  /* mme_connect_timer is one-shot (srsran::unique_timer has no periodic mode) - without
+   * re-arming here on failure, a SECOND failed connection attempt (the one this very timer
+   * triggers) would silently give up on M3AP forever, never retrying again. */
+  auto mme_connect_run = [this](uint32_t tid) {
+    if (!connect_mme()) {
+      logger.warning("Failed to connect to MME for M3, will retry");
+      mme_connect_timer.run();
+    }
+  };
   mme_connect_timer.set(10000, mme_connect_run);
 
   m3setup_timeout = task_sched.get_unique_timer();
@@ -78,7 +89,12 @@ bool m3ap::connect_mme()
     return false;
   }
 
+  /* Every failure path below must close mme_socket before returning false: sctp_init_socket()
+   * above already opened it, and the next mme_connect_timer-triggered retry calls back into this
+   * same function, whose own sctp_init_socket() call refuses to re-init an already-open socket
+   * ("Socket is already open") - silently breaking every retry after the first failure. */
   if (not mme_socket.connect_to(args.mme_addr.c_str(), args.mme_m3_port ? args.mme_m3_port : MME_PORT_DEFAULT, &mme_addr)) {
+    mme_socket.close();
     return false;
   }
   logger.info("SCTP socket connected with MME for M3. fd=%d", mme_socket.fd());
@@ -91,6 +107,8 @@ bool m3ap::connect_mme()
                                         srsran::make_sctp_sdu_handler(logger, mme_task_queue, rx_callback));
 
   if (!setup_m3()) {
+    rx_socket_handler->remove_socket(mme_socket.fd());
+    mme_socket.close();
     return false;
   }
   m3setup_timeout.run();
@@ -140,7 +158,24 @@ bool m3ap::sctp_send_m3ap_pdu(const m3ap_pdu_c& pdu, const char* procedure_name)
   }
   buf->N_bytes = bref.distance_bytes();
 
-  ssize_t n_sent = sctp_send(mme_socket.fd(), buf->msg, buf->N_bytes, nullptr, 0);
+  /* sctp_sendmsg() with an explicit destination (mme_addr, populated by connect_to()'s own
+   * out-param), mirroring s1ap::sctp_send_s1ap_pdu()'s identical call exactly. A one-to-many
+   * (SOCK_SEQPACKET) SCTP socket's connect() does NOT necessarily leave an implicit "default
+   * peer" the way a one-to-one (SOCK_STREAM) socket's does - sending via plain sctp_send() with
+   * no destination (msg_name=NULL) was silently relying on that assumption and got EPIPE on
+   * every attempt (confirmed via strace: same behavior across many independent connection
+   * attempts, never transient), while s1ap's explicit-destination sctp_sendmsg() over the exact
+   * same connect()-then-send pattern, same process, same kernel, always works. */
+  ssize_t n_sent = sctp_sendmsg(mme_socket.fd(),
+                                buf->msg,
+                                buf->N_bytes,
+                                (struct sockaddr*)&mme_addr,
+                                sizeof(struct sockaddr_in),
+                                htonl(PPID),
+                                0,
+                                0,
+                                0,
+                                0);
   if (n_sent == -1) {
     logger.error("Failed to send %s. Error: %s", procedure_name, strerror(errno));
     return false;
@@ -156,6 +191,19 @@ bool m3ap::handle_mce_rx_msg(srsran::unique_byte_buffer_t pdu,
   if (flags & MSG_NOTIFICATION) {
     union sctp_notification* notification = (union sctp_notification*)pdu->msg;
     logger.info("M3 SCTP Notification %04x", notification->sn_header.sn_type);
+    if (getenv("M3AP_SCTP_DIAG")) {
+      if (notification->sn_header.sn_type == SCTP_REMOTE_ERROR) {
+        fprintf(stderr, "M3AP_SCTP_DIAG REMOTE_ERROR error_cause=0x%04x length=%u assoc=%d\n",
+                notification->sn_remote_error.sre_error, notification->sn_remote_error.sre_length,
+                notification->sn_remote_error.sre_assoc_id);
+      } else if (notification->sn_header.sn_type == SCTP_ASSOC_CHANGE) {
+        fprintf(stderr, "M3AP_SCTP_DIAG ASSOC_CHANGE state=%u error=0x%04x assoc=%d\n",
+                notification->sn_assoc_change.sac_state, notification->sn_assoc_change.sac_error,
+                notification->sn_assoc_change.sac_assoc_id);
+      } else if (notification->sn_header.sn_type == SCTP_SEND_FAILED) {
+        fprintf(stderr, "M3AP_SCTP_DIAG SEND_FAILED error=0x%04x\n", notification->sn_send_failed.ssf_error);
+      }
+    }
     if (notification->sn_header.sn_type == SCTP_SHUTDOWN_EVENT ||
         (notification->sn_header.sn_type == SCTP_PEER_ADDR_CHANGE &&
          notification->sn_paddr_change.spc_state == SCTP_ADDR_UNREACHABLE)) {

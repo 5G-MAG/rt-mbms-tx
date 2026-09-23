@@ -119,6 +119,8 @@ struct rrc_tester : public rrc_dummy {
     return std::count(next_erabs_failed_to_modify.begin(), next_erabs_failed_to_modify.end(), erab_id) == 0;
   }
   void release_ue(uint16_t rnti) override { last_released_rnti = rnti; }
+  void write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies) override {}
+  void kill_warning(const asn1::s1ap::kill_request_ies_container& ies) override {}
 
   uint16_t              last_released_rnti = SRSRAN_INVALID_RNTI;
   std::vector<uint16_t> next_erabs_failed_to_modify, last_erabs_modified;

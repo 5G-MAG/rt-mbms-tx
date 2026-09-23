@@ -19,6 +19,8 @@
  *
  */
 
+#include <cstdio>
+#include <cstdlib>
 #include "srsenb/hdr/phy/txrx.h"
 #include "srsran/common/threads.h"
 #include "srsran/phy/channel/channel.h"
@@ -201,19 +203,36 @@ void phy_common::configure_mbsfn(srsran::phy_cfg_mbsfn_t* cfg)
 
   /* build_mch_table()/build_mcch_table() derive mch_table/mcch_table from the
    * MBSFN config we just stored above. init() also has a call to these two
-   * functions, gated on mcch_configured - but init() runs at PHY startup,
-   * before RRC has ever called configure_mbsfn() (mcch_configured is still
-   * false there), so that call never fires. Without this, mcch_table stays
-   * permanently zero-initialized for the eNB's entire lifetime and
-   * is_mcch_subframe()'s "mcch_table[sf] > 0" check can never be true - the
-   * eNB broadcasts SIB13's MCCH schedule correctly (receivers compute the
-   * right subframes to listen on) but never actually transmits real MCCH
-   * content on any of them, silently falling through to regular MCH-data
-   * scheduling instead. Found via a receiver-side MCCH decode that always
-   * failed CRC despite SIB13 decoding correctly - PMCH_RE_DUMP dumps showed
-   * every single PMCH encode using the regular-MCH MCS, never MCCH's. */
-  build_mch_table();
-  build_mcch_table();
+   * functions, gated on mcch_configured - the *documented* assumption was
+   * that init() runs at PHY startup before RRC ever calls configure_mbsfn(),
+   * so that call was expected never to fire. That ordering is not actually
+   * guaranteed: RRC's own init() runs on a different thread and can reach
+   * configure_mbsfn() before PHY's init() has set `stack` (still nullptr at
+   * that point) - build_mch_table() unconditionally dereferences `stack`,
+   * so this was a real, timing-dependent null-pointer crash on eNB startup
+   * (reproduced: ~14/15 cold starts in one environment). Guarding on
+   * `stack` here and letting init()'s own mcch_configured-gated call catch
+   * up in the other ordering closes the gap symmetrically - mcch_configured
+   * is already true by the time this function returns either way, so
+   * whichever of the two call sites runs second will always find its own
+   * gate satisfied. init_pmch_ti_tx_bufs() doesn't touch `stack`, so it's
+   * safe unconditionally regardless of ordering.
+   *
+   * Without build_mch_table()/build_mcch_table() ever running at all (the
+   * original bug this comment used to describe, before the race above was
+   * found), mcch_table stays permanently zero-initialized for the eNB's
+   * entire lifetime and is_mcch_subframe()'s "mcch_table[sf] > 0" check can
+   * never be true - the eNB broadcasts SIB13's MCCH schedule correctly
+   * (receivers compute the right subframes to listen on) but never actually
+   * transmits real MCCH content on any of them, silently falling through to
+   * regular MCH-data scheduling instead. Found via a receiver-side MCCH
+   * decode that always failed CRC despite SIB13 decoding correctly -
+   * PMCH_RE_DUMP dumps showed every single PMCH encode using the
+   * regular-MCH MCS, never MCCH's. */
+  if (stack != nullptr) {
+    build_mch_table();
+    build_mcch_table();
+  }
   init_pmch_ti_tx_bufs();
 }
 
@@ -313,11 +332,11 @@ bool phy_common::is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
       cfg->mbsfn_area_id = area_info->mbsfn_area_id;
       /* MCCH in an MBMS-dedicated cell is never carried on a subframe with a real
        * PDCCH/non-MBSFN control region: every subcarrier_spacing_t value this
-       * function's own switch statement below can produce (SRSRAN_SCS_7KHZ5 for
-       * khz_7dot5, SRSRAN_SCS_1KHZ25 for everything else including khz_1dot25,
-       * khz_2dot5, khz_0dot37, and the ASN.1 "field not present"/nulltype value via
-       * that switch's default case) is a FeMBMS numerology with no PDCCH region at
-       * all - so non_mbsfn_region_length is always 0 here, unconditionally.
+       * function's own switch statement below can produce (khz_7dot5, khz_2dot5,
+       * khz_0dot37, khz_1dot25, and the ASN.1 "field not present"/nulltype value via
+       * that switch's default case, which also maps to 1.25 kHz) is a FeMBMS
+       * numerology with no PDCCH region at all - so non_mbsfn_region_length is
+       * always 0 here, unconditionally.
        * Previously this used a separate equality check against exactly
        * {khz_1dot25, khz_7dot5, khz_0dot37}, which did not cover khz_2dot5 or the
        * nulltype/not-present case the switch below already treats as 1.25 kHz -
@@ -335,14 +354,31 @@ bool phy_common::is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti)
        * rather than redesigned blind -- flagging, not fixing, until this can be
        * verified against a real 15 kHz MBMS-dedicated MCCH capture. */
       cfg->non_mbsfn_region_length = 0;
-      /* MCCH uses the same SCS as the PMCH data subframes. Without this, cc_worker
-       * sees subcarrier_spacing=0 (15 kHz) and defaults to 1.25 kHz for 7.5 kHz cells. */
+      /* MCCH and MTCH are both carried over the same PMCH, so they share the same
+       * subcarrier spacing - SCS is a property of the PMCH transmission itself, not
+       * of the logical channel mapped onto it. Mirrors the full mapping used below
+       * for PMCH data subframes (including 2.5kHz and 0.37kHz SL2/SL4), rather than
+       * a narrower, separate switch that silently defaulted those two to 1.25kHz. */
       switch (area_info->subcarrier_spacing) {
         case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_7dot5:
           cfg->subcarrier_spacing = SRSRAN_SCS_7KHZ5;
           break;
         case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_15:
           cfg->subcarrier_spacing = SRSRAN_SCS_15KHZ;
+          break;
+        case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_2dot5:
+          cfg->subcarrier_spacing = SRSRAN_SCS_2KHZ5;
+          break;
+        case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_0dot37:
+          switch (area_info->time_separation) {
+            case srsran::mbsfn_area_info_t::time_separation_t::sl2:
+              cfg->subcarrier_spacing = SRSRAN_SCS_370HZ_SL2;
+              break;
+            default:
+              /* sl4 is the spec default when time_separation is absent (TS 36.211 §4.1). */
+              cfg->subcarrier_spacing = SRSRAN_SCS_370HZ_SL4;
+              break;
+          }
           break;
         case srsran::mbsfn_area_info_t::subcarrier_spacing_t::khz_1dot25:
         default:
