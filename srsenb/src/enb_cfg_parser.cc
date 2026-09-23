@@ -1123,19 +1123,14 @@ int parse_cell_cfg(all_args_t* args_, srsran_cell_t* cell)
   cell->nof_ports  = args_->enb.nof_ports;
   cell->nof_prb    = args_->enb.n_prb;
   cell->mbsfn_prb    = (args_->stack.embms.pmch_bandwidth > 0) ? args_->stack.embms.pmch_bandwidth : args_->enb.n_prb;
-  if (cell->mbsfn_prb > cell->nof_prb) {
-    /* pmch_bandwidth is a sub-allocation within the carrier and can never
-     * exceed it; a value passing the {0,25,30,35,40} membership check in
-     * set_derived_args() further down can still exceed a smaller enb.n_prb
-     * (e.g. n_prb=25 with pmch_bandwidth=40), which would otherwise reach
-     * srsran_pmch_set_cell() and fail cell validation there instead. */
-    fprintf(stderr,
-            "Invalid embms.pmch_bandwidth=%u exceeds enb.n_prb=%u — clamping to %u\n",
-            cell->mbsfn_prb,
-            cell->nof_prb,
-            cell->nof_prb);
-    cell->mbsfn_prb = cell->nof_prb;
-  }
+  /* pmch_bandwidth may legitimately exceed enb.n_prb (e.g. n_prb=25 with
+   * pmch_bandwidth=40): FeMBMS extended coverage, a wide PMCH allocation over
+   * a narrower CAS/carrier. This used to be clamped down to n_prb here
+   * because srsran_cell_isvalid() rejected mbsfn_prb > nof_prb and the
+   * downstream MBSFN/PMCH buffer chain wasn't sized for it; both are now
+   * fixed (see srsran_cell_isvalid()'s and cc_worker.cc's doc comments), so
+   * the value passing the {0,25,30,35,40} membership check in
+   * set_derived_args() further down is used as configured. */
   cell->mbms_dedicated    = args_->stack.embms.mbms_dedicated;
   cell->cas_muting        = args_->stack.embms.cas_muting;
   cell->k_cas             = args_->stack.embms.k_cas;
@@ -1438,6 +1433,16 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
       bw = 0;
     }
     rrc_cfg_->pmch_bandwidth = bw;
+  }
+  {
+    /* sf-AllocInfo-r16 (TS 36.331 MBSFN-AreaInfo-r16): 10-bit MCCH subframe bitmap, first bit=SF0.
+     * 0 = not set (derive r16 from r9, no change). >0 must fit in 10 bits. */
+    uint16_t sfa16 = args_->stack.embms.sf_alloc_info_r16;
+    if (sfa16 > 0x3FFu) {
+      ERROR("embms.sf_alloc_info_r16 %u exceeds 10 bits (max 1023) — ignoring (deriving r16 from r9)", sfa16);
+      sfa16 = 0;
+    }
+    rrc_cfg_->sf_alloc_info_r16 = sfa16;
   }
   rrc_cfg_->pmch_cyclic_shift_alpha    = args_->stack.embms.cyclic_shift_alpha;
   rrc_cfg_->pmch_freq_interleaving     = args_->stack.embms.freq_interleaving;
@@ -2455,21 +2460,24 @@ int parse_sib15(const std::string& filename, sib_type15_r11_s* data)
       }
       data->mbms_sai_intra_freq_r11_present = n > 0;
     }
-    // Rel-14: FeMBMS carrier type (TS 36.331 §6.3.1 SystemInformationBlockType15-r11)
-    // Tells UEs what kind of carrier this is. Default fembms_ded for a dedicated broadcast carrier.
-    std::string carrier_type_str = "fembms_ded";
+    // Rel-14: FeMBMS carrier type (TS 36.331 §6.3.1 SystemInformationBlockType15-r11 /
+    // MBMS-CarrierType-r14). Accepts both the spec ASN.1 spellings (fembmsDedicated / fembmsMixed /
+    // mbms) and the historical snake_case tokens (fembms_ded / fembms_mixed) for backward
+    // compatibility. Default: dedicated broadcast carrier.
+    std::string carrier_type_str = "fembmsDedicated";
     if (s.exists("carrier_type")) {
       s.lookupValue("carrier_type", carrier_type_str);
     }
     data->ext = true;
     data->mbms_intra_freq_carrier_type_r14.set_present(true);
-    if (carrier_type_str == "fembms_mixed") {
+    if (carrier_type_str == "fembmsMixed" || carrier_type_str == "fembms_mixed") {
       data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
           mbms_carrier_type_r14_s::carrier_type_r14_opts::fembms_mixed;
     } else if (carrier_type_str == "mbms") {
       data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
           mbms_carrier_type_r14_s::carrier_type_r14_opts::mbms;
     } else {
+      // fembmsDedicated (spec) / fembms_ded (legacy) / anything else -> dedicated
       data->mbms_intra_freq_carrier_type_r14->carrier_type_r14.value =
           mbms_carrier_type_r14_s::carrier_type_r14_opts::fembms_ded;
     }

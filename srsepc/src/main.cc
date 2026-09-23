@@ -143,7 +143,8 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     // this is the CBC-facing Public Warning System origination interface (SBc-AP).
     ("mme_sbc.sbc_bind_addr", bpo::value<string>(&args->mme_args.sbc_args.sbc_bind_addr)->default_value("0.0.0.0"), "SBc-AP interface bind address")
     ("mme_sbc.sbc_bind_port", bpo::value<uint16_t>(&args->mme_args.sbc_args.sbc_bind_port)->default_value(29168), "SBc-AP interface bind port (registered SCTP port, TS 29.168)")
-    ("mme_sbc.bridge_socket_path", bpo::value<string>(&args->mme_args.sbc_args.bridge_socket_path)->default_value("/tmp/srsepc_sbc_bridge.sock"), "Local AF_UNIX SOCK_STREAM bridge socket, used by mbms-control-portal in place of real SCTP (see sbc.h)")
+    ("mme_sbc.bridge_bind_addr", bpo::value<string>(&args->mme_args.sbc_args.bridge_bind_addr)->default_value("127.0.0.1"), "SBc-AP portal bridge bind address (use an internal address for cross-container; unauthenticated and able to inject alerts, keep off untrusted networks)")
+    ("mme_sbc.bridge_port", bpo::value<uint16_t>(&args->mme_args.sbc_args.bridge_port)->default_value(2102), "SBc-AP portal bridge TCP port, used by rt-mbms-application-provider in place of real SCTP (see sbc.h)")
 
     // A dedicated [mme_m3] section, same namespacing rationale as [mme_sm]/[mme_sbc] above -- the MCE (eNB)-facing
     // MBMS session control interface (M3AP, TS 36.444). TS 36.444 itself doesn't specify a port, but 36444 is

@@ -24,12 +24,12 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <set>
 #include <sstream>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 namespace srsenb {
@@ -76,59 +76,58 @@ control_server::~control_server()
   stop();
 }
 
-bool control_server::start(const std::string& socket_path_)
+bool control_server::start(const std::string& bind_addr_, uint16_t port_)
 {
-  socket_path = socket_path_;
+  bind_addr = bind_addr_;
+  port      = port_;
 
-  listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd < 0) {
     logger.error("control_server: failed to create socket: %s", strerror(errno));
     return false;
   }
 
-  // Remove a stale socket file left over from an unclean prior shutdown.
-  unlink(socket_path.c_str());
+  // Allow immediate rebind after a restart (avoid TIME_WAIT on the control port).
+  int one = 1;
+  setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
-  struct sockaddr_un addr;
+  struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  if (socket_path.size() >= sizeof(addr.sun_path)) {
-    logger.error("control_server: socket path too long: %s", socket_path.c_str());
+  addr.sin_family = AF_INET;
+  addr.sin_port   = htons(port);
+  if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+    logger.error("control_server: invalid bind address: %s", bind_addr.c_str());
     close(listen_fd);
     listen_fd = -1;
     return false;
   }
-  std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
   if (bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-    logger.error("control_server: failed to bind %s: %s", socket_path.c_str(), strerror(errno));
+    logger.error("control_server: failed to bind %s:%u: %s", bind_addr.c_str(), port, strerror(errno));
     close(listen_fd);
     listen_fd = -1;
-    return false;
-  }
-
-  // Real filesystem-path socket (not Linux abstract-namespace) specifically so it can be
-  // chmod'd: this endpoint can change live broadcast parameters and abstract-namespace
-  // sockets have no filesystem permission model at all.
-  if (chmod(socket_path.c_str(), 0600) < 0) {
-    logger.error("control_server: failed to chmod %s: %s", socket_path.c_str(), strerror(errno));
-    close(listen_fd);
-    listen_fd = -1;
-    unlink(socket_path.c_str());
     return false;
   }
 
   if (listen(listen_fd, 4) < 0) {
-    logger.error("control_server: failed to listen on %s: %s", socket_path.c_str(), strerror(errno));
+    logger.error("control_server: failed to listen on %s:%u: %s", bind_addr.c_str(), port, strerror(errno));
     close(listen_fd);
     listen_fd = -1;
-    unlink(socket_path.c_str());
     return false;
   }
 
   running.store(true);
   worker = std::thread(&control_server::accept_loop, this);
-  logger.info("control_server: listening on %s", socket_path.c_str());
+  logger.info("control_server: listening on tcp %s:%u", bind_addr.c_str(), port);
+  // SECURITY: unlike the previous AF_UNIX socket (chmod 0600), a TCP control endpoint has no
+  // filesystem permission model and this line protocol has no authentication of its own. Anyone
+  // who can reach this port can change live RF/broadcast parameters. Keep it on loopback or a
+  // trusted management network (e.g. an internal Docker network) and firewall it accordingly.
+  if (bind_addr != "127.0.0.1" && bind_addr != "localhost") {
+    logger.warning("control_server: bound to %s:%u (not loopback) -- this TCP control endpoint has NO "
+                   "authentication; restrict it to a trusted management network and firewall it.",
+                   bind_addr.c_str(), port);
+  }
   return true;
 }
 
@@ -145,7 +144,6 @@ void control_server::stop()
     close(listen_fd);
     listen_fd = -1;
   }
-  unlink(socket_path.c_str());
 }
 
 void control_server::accept_loop()

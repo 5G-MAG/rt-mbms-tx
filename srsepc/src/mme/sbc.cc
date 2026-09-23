@@ -23,9 +23,8 @@
 #include "srsepc/hdr/mme/s1ap.h"
 #include "srsran/common/network_utils.h"
 #include "srsran/common/standard_streams.h"
+#include <arpa/inet.h>
 #include <cstdlib>
-#include <sys/stat.h>
-#include <sys/un.h>
 
 namespace srsepc {
 
@@ -71,8 +70,8 @@ bool sbc::init(const sbc_args_t& args)
 
   m_logger.info("SBc-AP Initialized. Bind addr: %s, port: %d", args.sbc_bind_addr.c_str(), args.sbc_bind_port);
   srsran::console("SBc-AP Initialized. Bind addr: %s, port: %d\n", args.sbc_bind_addr.c_str(), args.sbc_bind_port);
-  m_logger.info("SBc-AP local bridge listening on %s", args.bridge_socket_path.c_str());
-  srsran::console("SBc-AP local bridge listening on %s\n", args.bridge_socket_path.c_str());
+  m_logger.info("SBc-AP portal bridge listening on tcp %s:%u", args.bridge_bind_addr.c_str(), args.bridge_port);
+  srsran::console("SBc-AP portal bridge listening on tcp %s:%u\n", args.bridge_bind_addr.c_str(), args.bridge_port);
   return true;
 }
 
@@ -84,7 +83,6 @@ void sbc::stop()
   }
   if (m_bridge_fd != -1) {
     close(m_bridge_fd);
-    unlink(m_sbc_args.bridge_socket_path.c_str());
     m_bridge_fd = -1;
   }
 }
@@ -101,30 +99,40 @@ int sbc::get_bridge()
 
 int sbc::bridge_listen()
 {
-  // Local-only control-plane socket (see file header). AF_UNIX SOCK_STREAM, matching the
-  // existing srsenb control_server.cc pattern this mirrors -- SOCK_SEQPACKET was tried first,
-  // but Node's `net` module only creates SOCK_STREAM Unix sockets, and Linux rejects a
-  // connect() between mismatched AF_UNIX socket types (EPROTOTYPE). Message framing is done
-  // by connection lifetime instead of by datagram boundaries: the client half-closes its
-  // write side (shutdown/end) right after writing the request, so handle_bridge_connection()
-  // can simply read() in a loop until EOF to know the whole request has arrived.
-  unlink(m_sbc_args.bridge_socket_path.c_str()); // remove a stale socket file from a prior run
-
-  int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  // Portal-facing control-plane socket (see file header). TCP (AF_INET/SOCK_STREAM) so the
+  // control portal can run in a separate container/host. Message framing is done by connection
+  // lifetime rather than datagram boundaries: the client half-closes its write side
+  // (shutdown/end) right after writing the request, so handle_bridge_connection() can simply
+  // read() in a loop until EOF to know the whole request has arrived.
+  int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd == -1) {
-    srsran::console("Could not create SBc-AP bridge Unix socket\n");
+    srsran::console("Could not create SBc-AP bridge TCP socket\n");
     return -1;
   }
 
-  struct sockaddr_un addr;
+  // Allow immediate rebind after a restart (avoid TIME_WAIT on the bridge port).
+  int one = 1;
+  setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  struct sockaddr_in addr;
   bzero(&addr, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, m_sbc_args.bridge_socket_path.c_str(), sizeof(addr.sun_path) - 1);
+  addr.sin_family = AF_INET;
+  addr.sin_port   = htons(m_sbc_args.bridge_port);
+  if (inet_pton(AF_INET, m_sbc_args.bridge_bind_addr.c_str(), &addr.sin_addr) != 1) {
+    close(sock_fd);
+    m_logger.error("Invalid SBc-AP bridge bind address: %s", m_sbc_args.bridge_bind_addr.c_str());
+    srsran::console("Invalid SBc-AP bridge bind address: %s\n", m_sbc_args.bridge_bind_addr.c_str());
+    return -1;
+  }
 
   if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
     close(sock_fd);
-    m_logger.error("Error binding SBc-AP bridge socket at %s", m_sbc_args.bridge_socket_path.c_str());
-    srsran::console("Error binding SBc-AP bridge socket at %s\n", m_sbc_args.bridge_socket_path.c_str());
+    m_logger.error("Error binding SBc-AP bridge socket at %s:%u",
+                   m_sbc_args.bridge_bind_addr.c_str(),
+                   m_sbc_args.bridge_port);
+    srsran::console("Error binding SBc-AP bridge socket at %s:%u\n",
+                    m_sbc_args.bridge_bind_addr.c_str(),
+                    m_sbc_args.bridge_port);
     return -1;
   }
 
@@ -135,26 +143,16 @@ int sbc::bridge_listen()
     return -1;
   }
 
-  // srsepc typically runs as root (needed for SPGW's TUN device), but the bridge's only real
-  // client -- mbms-control-portal -- deliberately runs as a normal user (see that repo's own
-  // rationale for avoiding CAP_NET_RAW-as-root). A freshly bind()'d AF_UNIX socket file is
-  // owned by the creating (root) user/group with no write bit for anyone else, so a plain
-  // user's connect() fails with EACCES. Making it world-writable would let ANY local user
-  // forge emergency alerts, which is a real risk, not a shortcut worth taking -- instead,
-  // when launched via `sudo`, chown the socket to the original invoking user (SUDO_UID/
-  // SUDO_GID, which sudo always sets) and restrict it to that user with 0660. If not running
-  // under sudo (e.g. a non-privileged test setup), leave ownership/mode as the OS default.
-  const char* sudo_uid = getenv("SUDO_UID");
-  const char* sudo_gid = getenv("SUDO_GID");
-  if (sudo_uid != nullptr && sudo_gid != nullptr) {
-    uid_t uid = (uid_t)atoi(sudo_uid);
-    gid_t gid = (gid_t)atoi(sudo_gid);
-    if (chown(m_sbc_args.bridge_socket_path.c_str(), uid, gid) != 0) {
-      m_logger.error("Could not chown SBc-AP bridge socket to uid=%d gid=%d: %s", uid, gid, strerror(errno));
-    }
-  }
-  if (chmod(m_sbc_args.bridge_socket_path.c_str(), 0660) != 0) {
-    m_logger.error("Could not chmod SBc-AP bridge socket: %s", strerror(errno));
+  // SECURITY: the AF_UNIX version restricted access with filesystem ownership/permissions (0660,
+  // chown'd to the invoking user under sudo). A TCP endpoint has no such model and this bridge
+  // can inject emergency-alert (Write-Replace Warning) PDUs, so anyone who can reach it can forge
+  // public warnings. Keep bridge_bind_addr on loopback or a trusted management network and
+  // firewall it. The default is loopback.
+  if (m_sbc_args.bridge_bind_addr != "127.0.0.1" && m_sbc_args.bridge_bind_addr != "localhost") {
+    m_logger.warning("SBc-AP bridge bound to %s:%u (not loopback) -- this TCP endpoint can inject emergency "
+                     "alerts and has NO authentication; restrict it to a trusted management network.",
+                     m_sbc_args.bridge_bind_addr.c_str(),
+                     m_sbc_args.bridge_port);
   }
 
   return sock_fd;
@@ -269,7 +267,7 @@ void sbc::handle_sbc_rx_pdu(srsran::byte_buffer_t* pdu, struct sctp_sndrcvinfo* 
 
 void sbc::handle_bridge_connection()
 {
-  struct sockaddr_un peer_addr;
+  struct sockaddr_in peer_addr;
   socklen_t          peer_len = sizeof(peer_addr);
   int                conn_fd  = accept(m_bridge_fd, (struct sockaddr*)&peer_addr, &peer_len);
   if (conn_fd == -1) {

@@ -1219,80 +1219,117 @@ void rrc::reload_sib12(bool activate)
       return;
     }
     install_sib12(sib12_data);
+    activate_warning_broadcast();
   } else {
-    clear_sib12();
+    clear_warning_sibs();
+  }
+}
+
+bool rrc::add_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt)
+{
+  // Already scheduled? (generate_sibs() maps each sched_info entry to its own SI message.)
+  for (uint32_t i = 0; i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
+    for (uint32_t j = 0; j < cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14.size(); j++) {
+      if (cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14[j].value == sib_opt) {
+        return false;
+      }
+    }
+  }
+  sched_info_mbms_r14_s new_si;
+  new_si.si_periodicity_r14.value = sched_info_mbms_r14_s::si_periodicity_r14_opts::rf16;
+  sib_type_mbms_r14_e sib_enum;
+  sib_enum.value = sib_opt;
+  new_si.sib_map_info_r14.push_back(sib_enum);
+  cfg.sib1.sched_info_list_mbms_r14.push_back(new_si);
+  return true;
+}
+
+void rrc::remove_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt)
+{
+  sched_info_list_mbms_r14_l new_list;
+  for (uint32_t i = 0; i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
+    const sched_info_mbms_r14_s& si = cfg.sib1.sched_info_list_mbms_r14[i];
+    bool has_sib = false;
+    for (uint32_t j = 0; j < si.sib_map_info_r14.size(); j++) {
+      if (si.sib_map_info_r14[j].value == sib_opt) {
+        has_sib = true;
+        break;
+      }
+    }
+    if (!has_sib) {
+      new_list.push_back(si);
+    }
+  }
+  cfg.sib1.sched_info_list_mbms_r14 = new_list;
+}
+
+void rrc::regenerate_si()
+{
+  cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
+  if (!cfg.sib_tag_state_file.empty()) {
+    FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
+    if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
+  }
+  generate_sibs();
+  update_mac_sib_cfg();
+}
+
+// SIB10 = ETWS primary notification (TS 36.331 SystemInformationBlockType10). cfg.sibs[] is
+// indexed by (SIB number - 1), matching generate_sibs()'s to_number()-1 lookup, so SIB10 lives
+// at cfg.sibs[9].
+void rrc::install_sib10(const asn1::rrc::sib_type10_s& sib10_data)
+{
+  cfg.sibs[9].set_sib10() = sib10_data;
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type10)) {
+    sib10_sched_added_ = true;
+  }
+}
+
+// SIB11 = ETWS secondary notification (TS 36.331 SystemInformationBlockType11), at cfg.sibs[10].
+void rrc::install_sib11(const asn1::rrc::sib_type11_s& sib11_data)
+{
+  cfg.sibs[10].set_sib11() = sib11_data;
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type11)) {
+    sib11_sched_added_ = true;
   }
 }
 
 void rrc::install_sib12(const asn1::rrc::sib_type12_r9_s& sib12_data)
 {
   cfg.sibs[11].set_sib12_v920() = sib12_data;
-
-  // Add SIB12 to sched_info if not already present
-  bool found = false;
-  for (uint32_t i = 0; !found && i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
-    for (uint32_t j = 0; j < cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14.size(); j++) {
-      if (cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14[j].value ==
-          sib_type_mbms_r14_opts::sib_type12_v920) {
-        found = true;
-        break;
-      }
-    }
-  }
-  if (!found) {
-    sched_info_mbms_r14_s new_si;
-    new_si.si_periodicity_r14.value = sched_info_mbms_r14_s::si_periodicity_r14_opts::rf16;
-    sib_type_mbms_r14_e sib12_enum;
-    sib12_enum.value = sib_type_mbms_r14_opts::sib_type12_v920;
-    new_si.sib_map_info_r14.push_back(sib12_enum);
-    cfg.sib1.sched_info_list_mbms_r14.push_back(new_si);
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type12_v920)) {
     sib12_sched_added_ = true;
   }
-
-  cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
-  if (!cfg.sib_tag_state_file.empty()) {
-    FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
-    if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
-  }
-  generate_sibs();
-  update_mac_sib_cfg();
-  etws_paging_active_.store(true);
-  etws_paging_count_.store(64);
-  logger.warning("SIB12 emergency alert activated — 64 ETWS paging broadcasts scheduled");
 }
 
-void rrc::clear_sib12()
+void rrc::activate_warning_broadcast()
+{
+  regenerate_si();
+  etws_paging_active_.store(true);
+  etws_paging_count_.store(64);
+  logger.warning("Emergency alert activated — 64 ETWS paging broadcasts scheduled");
+}
+
+void rrc::clear_warning_sibs()
 {
   etws_paging_active_.store(false);
   etws_paging_count_.store(0);
 
+  if (sib10_sched_added_) {
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type10);
+    sib10_sched_added_ = false;
+  }
+  if (sib11_sched_added_) {
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type11);
+    sib11_sched_added_ = false;
+  }
   if (sib12_sched_added_) {
-    sched_info_list_mbms_r14_l new_list;
-    for (uint32_t i = 0; i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
-      const sched_info_mbms_r14_s& si = cfg.sib1.sched_info_list_mbms_r14[i];
-      bool has_sib12 = false;
-      for (uint32_t j = 0; j < si.sib_map_info_r14.size(); j++) {
-        if (si.sib_map_info_r14[j].value == sib_type_mbms_r14_opts::sib_type12_v920) {
-          has_sib12 = true;
-          break;
-        }
-      }
-      if (!has_sib12) {
-        new_list.push_back(si);
-      }
-    }
-    cfg.sib1.sched_info_list_mbms_r14 = new_list;
-    sib12_sched_added_                 = false;
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type12_v920);
+    sib12_sched_added_ = false;
   }
 
-  cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
-  if (!cfg.sib_tag_state_file.empty()) {
-    FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
-    if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
-  }
-  generate_sibs();
-  update_mac_sib_cfg();
-  logger.warning("SIB12 emergency alert cancelled");
+  regenerate_si();
+  logger.warning("Emergency alert cancelled");
 }
 
 void rrc::write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies)
@@ -1308,6 +1345,50 @@ void rrc::write_replace_warning(const asn1::s1ap::write_replace_warning_request_
         "write_replace_warning: Warning-Message-Contents is %d bytes; multi-segment SIB12 chunking is not "
         "implemented, sending as a single (possibly oversized for some cells) segment",
         (int)ies.warning_msg_contents.value.size());
+  }
+
+  // Select the warning SIB(s) by alert type. Per TS 36.413 §9.1.13.1 the Warning Type IE is present
+  // only for ETWS; CMAS/PWS instead carries Data Coding Scheme + Warning Message Contents and no
+  // Warning Type. So warning_type_present is the canonical ETWS discriminator at the S1AP layer
+  // (equivalent to, and more robust than, matching the Message-Identifier against the ETWS ranges
+  // in TS 23.041 §9.4.1.2.2). ETWS -> SIB10 (+ SIB11 if a message body is present); CMAS -> SIB12.
+  if (ies.warning_type_present) {
+    // SIB10 -- ETWS primary notification (msg id, serial number, warning type, security info).
+    asn1::rrc::sib_type10_s sib10_data = {};
+    sib10_data.msg_id.from_number(ies.msg_id.value.to_number());
+    sib10_data.serial_num.from_number(ies.serial_num.value.to_number());
+    // Warning Type is a fixed 2-octet IE in both S1AP and SIB10; carried through verbatim.
+    memcpy(sib10_data.warning_type.data(), ies.warning_type.value.data(), sib10_data.warning_type.size());
+    if (ies.warning_security_info_present) {
+      // SIB10's 'dummy' field is the R9 warningSecurityInformation (renamed 'dummy' in later
+      // releases); carry the 50-octet ETWS security/timestamp info through untouched when present.
+      sib10_data.dummy_present = true;
+      memcpy(sib10_data.dummy.data(), ies.warning_security_info.value.data(), sib10_data.dummy.size());
+    }
+    install_sib10(sib10_data);
+
+    // SIB11 -- ETWS secondary notification, only when a message body is supplied. Single-segment
+    // only for now (see the multi-segment note above); mirrors the SIB12/CMAS handling below.
+    if (ies.warning_msg_contents_present) {
+      asn1::rrc::sib_type11_s sib11_data = {};
+      sib11_data.msg_id.from_number(ies.msg_id.value.to_number());
+      sib11_data.serial_num.from_number(ies.serial_num.value.to_number());
+      sib11_data.warning_msg_segment_type.value =
+          asn1::rrc::sib_type11_s::warning_msg_segment_type_opts::last_segment;
+      sib11_data.warning_msg_segment_num = 0;
+      sib11_data.warning_msg_segment.resize(ies.warning_msg_contents.value.size());
+      memcpy(sib11_data.warning_msg_segment.data(),
+             ies.warning_msg_contents.value.data(),
+             ies.warning_msg_contents.value.size());
+      if (ies.data_coding_scheme_present) {
+        sib11_data.data_coding_scheme[0]      = (uint8_t)ies.data_coding_scheme.value.to_number();
+        sib11_data.data_coding_scheme_present = true;
+      }
+      install_sib11(sib11_data);
+    }
+
+    activate_warning_broadcast();
+    return;
   }
 
   asn1::rrc::sib_type12_r9_s sib12_data = {};
@@ -1339,14 +1420,16 @@ void rrc::write_replace_warning(const asn1::s1ap::write_replace_warning_request_
   }
 
   install_sib12(sib12_data);
+  activate_warning_broadcast();
 }
 
 void rrc::kill_warning(const asn1::s1ap::kill_request_ies_container& ies)
 {
-  // This eNB only tracks a single active SIB12 slot (same model reload_sib12()/the file+SIGUSR1
+  // This eNB only tracks a single active alert slot (same model reload_sib12()/the file+SIGUSR1
   // path already uses) -- Kill-Request's own msg_id/serial_num aren't matched against a specific
-  // still-active alert, it just clears whatever is currently broadcasting.
-  clear_sib12();
+  // still-active alert, it just clears whatever is currently broadcasting (SIB10/11 for ETWS or
+  // SIB12 for CMAS).
+  clear_warning_sibs();
 }
 
 void rrc::mbms_session_start(const std::string&    tmgi_key,
@@ -1417,7 +1500,7 @@ void rrc::configure_mbsfn_sibs()
                                                           .mcch_cfg_r9.sig_mcs_r9.value;
     sibs13.mbsfn_area_info_list[i].mcch_cfg.sf_alloc_info =
         cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9[i].mcch_cfg_r9.sf_alloc_info_r9.to_number();
-    sibs13.mbsfn_area_info_list[i].mcch_cfg.mcch_repeat_period = 
+    sibs13.mbsfn_area_info_list[i].mcch_cfg.mcch_repeat_period =
       from_mcch_repeat_period_r9(cfg.sibs[12]
             .sib13_v920()
             .mbsfn_area_info_list_r9[i]
@@ -1451,6 +1534,16 @@ void rrc::configure_mbsfn_sibs()
     }
     if (cfg.pmch_time_separation_sl2) {
       sibs13.mbsfn_area_info_list[0].time_separation = TS::sl2;
+    }
+    /* sf-AllocInfo-r16 override (TS 36.331 MBSFN-AreaInfo-r16): when the operator gives the
+     * 10-bit value (first bit=SF0), the eNB's own MCCH subframe table (build_mcch_table, which
+     * keys off this struct's sf_alloc_info + sf_alloc_info_is_r16) must use the r16 mapping so it
+     * transmits MCCH on the same subframe the OTA r16 sf-AllocInfo (packed below) tells receivers.
+     * This is the only way to place MCCH on SF0/4/5/9, unreachable via the r9 6-bit field.
+     * Absent (0): make_mbsfn_area_info(r9) already set sf_alloc_info from r9 with is_r16=false. */
+    if (cfg.sf_alloc_info_r16 > 0) {
+      sibs13.mbsfn_area_info_list[0].mcch_cfg.sf_alloc_info        = cfg.sf_alloc_info_r16;
+      sibs13.mbsfn_area_info_list[0].mcch_cfg.sf_alloc_info_is_r16 = true;
     }
   }
 
@@ -1530,10 +1623,16 @@ void rrc::configure_mbsfn_sibs()
       }
 
       r16.mcch_cfg_r16.mcch_offset_r16 = r9.mcch_cfg_r9.mcch_offset_r9;
-      // R9 sf-AllocInfo is 6 bits (SF1,2,3,6,7,8 at bit positions 5..0 MSB-first).
-      // R16 sf-AllocInfo is 9 bits (SF1..9 at bit positions 8..0 MSB-first).
-      // Cannot use to_number()/from_number() directly — bit positions differ.
-      {
+      // sf-AllocInfo-r16 is a 10-bit field (TS 36.331 MBSFN-AreaInfo-r16), SF0..9 at bit
+      // positions 9..0 MSB-first (SF0=512, SF1=256, ... SF9=1) — this is exactly the layout
+      // the RX's generate_mcch_table_r16 (table[sf] = (alloc >> (9-sf)) & 1) decodes.
+      // The legacy r9 field is only 6 bits (SF1,2,3,6,7,8 at bit positions 5..0), so their
+      // bit positions differ — to_number()/from_number() cannot be used directly.
+      if (cfg.sf_alloc_info_r16 > 0) {
+        // Operator gave the 10-bit r16 value explicitly (lets MCCH sit on SF0/4/5/9,
+        // which the r9 field cannot express). Use it verbatim.
+        r16.mcch_cfg_r16.sf_alloc_info_r16.from_number(cfg.sf_alloc_info_r16);
+      } else {
         const uint32_t v9 = r9.mcch_cfg_r9.sf_alloc_info_r9.to_number(); // bits: SF1=32,SF2=16,SF3=8,SF6=4,SF7=2,SF8=1
         uint32_t v16 = 0;
         if (v9 & 32u) v16 |= 256u; // SF1 → r16 bit 8

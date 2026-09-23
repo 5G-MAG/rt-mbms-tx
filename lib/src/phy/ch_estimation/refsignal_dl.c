@@ -335,10 +335,16 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
        }
     }
 
-    /* For extended BW (mbsfn_prb < nof_prb), RS covers only the MBSFN allocation.
+    /* For extended BW (mbsfn_prb != nof_prb), RS covers only the MBSFN allocation.
      * pmch_cp writes data linearly from subcarrier 0, so RS must also be left-aligned
      * (starting at subcarrier 0, not centered) to stay consistent with data placement. */
     uint32_t act_prb_put = cell.mbsfn_prb ? cell.mbsfn_prb : cell.nof_prb;
+    /* Symbol stride (see SRSRAN_RE_IDX_MBSFN below) must match the actual MBSFN
+     * grid width the sf_symbols buffer/MBSFN IFFT are sized to -- max(nof_prb,
+     * mbsfn_prb), mirroring pmch_cp's identical fix in pmch.c. Using act_prb_put
+     * (the narrower populated-RE count) as the stride would corrupt adjacent
+     * symbols whenever mbsfn_prb > nof_prb (a wider PMCH than the carrier). */
+    uint32_t mbsfn_stride = SRSRAN_MAX(cell.nof_prb, cell.mbsfn_prb);
     /* ns must match the slot index used to select mbsfn_pilots (q->mbsfnr_signal.pilots[0][ns]
      * in the caller, e.g. enb_dl.c's put_refs): 40 ms period, 13 slots of 3 ms, with the first
      * slot (ns=0) absorbing the extra TTI (0..3) so that 4 + 3*12 = 40. A plain tti/3 does not
@@ -360,7 +366,7 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
       uint32_t total_pilots = (SRSRAN_NRE_SCS_370HZ * act_prb_put) / 12;
       for (i = 0; i < total_pilots; i++) {
         uint32_t k = 12 * i + stagger;
-        sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, 0, k, SRSRAN_SCS_370HZ)] =
+        sf_symbols[SRSRAN_RE_IDX_MBSFN(mbsfn_stride, 0, k, SRSRAN_SCS_370HZ)] =
           mbsfn_pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, 0, cell, scs)];
       }
     } else {
@@ -386,7 +392,7 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
            fidx    = srsran_refsignal_mbsfn_fidx(l, scs);
          }
          for (i = 0; i < srsran_refsignal_mbsfn_rs_per_symbol(scs) * act_prb_put; i++) {
-           sf_symbols[SRSRAN_RE_IDX_MBSFN(cell.nof_prb, nsymbol, fidx, scs)] =
+           sf_symbols[SRSRAN_RE_IDX_MBSFN(mbsfn_stride, nsymbol, fidx, scs)] =
             mbsfn_pilots[SRSRAN_REFSIGNAL_PILOT_IDX_MBSFN(i, l, cell, scs)];
            fidx += SRSRAN_NRE_SCS(scs) / srsran_refsignal_mbsfn_rs_per_symbol(scs);
          }

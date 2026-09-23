@@ -59,6 +59,14 @@ int m3ap::init(const m3ap_args_t& args_, rrc_interface_m3ap* rrc_)
   m3setup_timeout.set(5000, [this](uint32_t tid) {
     logger.warning("M3 Setup timed out, retrying");
     srsran::console("M3 Setup timed out, retrying\n");
+    // Deregister before closing: unique_socket::close() resets fd() to -1,
+    // and this fd is already registered with rx_socket_handler (from
+    // connect_mme()'s add_socket_handler() call) -- closing it first, or not
+    // removing it at all, leaves a stale, already-closed fd registered
+    // forever, which makes every subsequent select() in the socket manager's
+    // run_thread fail with EBADF until something else happens to overwrite
+    // that fd slot.
+    rx_socket_handler->remove_socket(mme_socket.fd());
     mme_socket.close();
     mme_connected = false;
     mme_connect_timer.run();
@@ -76,6 +84,7 @@ int m3ap::init(const m3ap_args_t& args_, rrc_interface_m3ap* rrc_)
 void m3ap::stop()
 {
   running = false;
+  rx_socket_handler->remove_socket(mme_socket.fd());
   mme_socket.close();
 }
 
@@ -209,9 +218,16 @@ bool m3ap::handle_mce_rx_msg(srsran::unique_byte_buffer_t pdu,
          notification->sn_paddr_change.spc_state == SCTP_ADDR_UNREACHABLE)) {
       logger.info("M3 SCTP association lost, will reconnect");
       srsran::console("M3 SCTP association lost, will reconnect\n");
+      // remove_socket() BEFORE close(): unique_socket::close() resets fd()
+      // to -1, so calling it first means remove_socket(mme_socket.fd())
+      // below removes fd=-1 (a silent no-op) instead of the real, still-
+      // registered fd -- leaving that fd stuck in the socket manager's
+      // total_fd_set even though its underlying OS descriptor is already
+      // closed, which makes every select() call in its run_thread fail with
+      // EBADF until something else happens to overwrite that fd slot.
+      rx_socket_handler->remove_socket(mme_socket.fd());
       mme_socket.close();
       mme_connected = false;
-      rx_socket_handler->remove_socket(mme_socket.fd());
       mme_connect_timer.run();
     }
     return true;
@@ -276,6 +292,9 @@ bool m3ap::handle_unsuccessful_outcome(const m3ap_pdu_c& pdu)
     logger.error("M3 Setup Failure. Cause: %s", fail.cause.to_string());
     srsran::console("M3 Setup Failure. Cause: %s\n", fail.cause.to_string());
     m3setup_timeout.stop();
+    // See the M3-association-lost handler above for why remove_socket()
+    // must come before close().
+    rx_socket_handler->remove_socket(mme_socket.fd());
     mme_socket.close();
     mme_connected = false;
     mme_connect_timer.run();

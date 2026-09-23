@@ -130,10 +130,21 @@ m3_bind_port = 36444
 #                to this interface rather than a mocked local bridge.
 # sbc_bind_port: SBc-AP interface bind port (IANA-registered SCTP port
 #                for sbc-ap, TS 29.168).
+#
+# bridge_bind_addr / bridge_port: the portal-facing TCP bridge the control
+#                portal connects to in place of real SCTP. Default
+#                127.0.0.1:2102 (loopback). Set bridge_bind_addr to an
+#                internal address (or 0.0.0.0) only when the portal runs in
+#                another container/host.
+#                SECURITY: this bridge is UNAUTHENTICATED and can inject
+#                emergency-alert (Write-Replace Warning) PDUs. Keep it on
+#                loopback or a trusted management network and firewall it.
 #####################################################################
 [mme_sbc]
 sbc_bind_addr = 127.0.1.100
 sbc_bind_port = 29168
+bridge_bind_addr = 127.0.0.1
+bridge_port = 2102
 
 ####################################################################
 # Log configuration

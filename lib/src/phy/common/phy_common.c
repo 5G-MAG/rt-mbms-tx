@@ -58,14 +58,17 @@ bool srsran_nofprb_isvalid(uint32_t nof_prb)
 
 bool srsran_cell_isvalid(srsran_cell_t* cell)
 {
-  /* mbsfn_prb (the PMCH-dedicated bandwidth) is a sub-allocation within the
-   * carrier and can never legitimately exceed nof_prb; 0 means "use the full
+  /* mbsfn_prb (the PMCH-dedicated bandwidth, pmch-Bandwidth-r17) may be
+   * narrower OR wider than nof_prb -- FeMBMS extended coverage allows a wide
+   * PMCH allocation over a narrower CAS/carrier. 0 means "use the full
    * carrier" (see the mbsfn_prb ? mbsfn_prb : nof_prb convention used
-   * throughout the MBSFN/PMCH code) and is always valid. Without this check,
-   * a cell with mbsfn_prb > nof_prb passes validation but later causes
-   * srsran_pmch_set_cell() to compute max_re from the oversized mbsfn_prb
-   * while PMCH's time-interleaving buffers stay sized from nof_prb at init
-   * time, overflowing them. */
+   * throughout the MBSFN/PMCH code) and is always valid. This used to require
+   * mbsfn_prb <= nof_prb: every downlink buffer/FFT plan reachable from the
+   * MBSFN/PMCH transmit path (srsran_enb_dl_init, srsran_enb_dl_set_cell,
+   * cc_worker's signal_buffer_tx/softbuffer, pmch_cp's and
+   * srsran_refsignal_mbsfn_put_sf's RE-mapping stride) is now sized/strided
+   * from max(nof_prb, mbsfn_prb) rather than nof_prb alone, so a wider PMCH
+   * no longer overflows them. */
   /* cas_muting's active/muted-frame gate (enb_dl.c put_sync/put_mib, phy_common.cc,
    * sched_carrier.cc) computes sfn % (16*n_cas); an n_cas of 0 (e.g. a bzero'd or
    * default-constructed cell struct with cas_muting left true) is a division by zero
@@ -74,7 +77,7 @@ bool srsran_cell_isvalid(srsran_cell_t* cell)
   bool n_cas_ok = !cell->cas_muting || cell->n_cas == 2 || cell->n_cas == 4 || cell->n_cas == 8 ||
                   cell->n_cas == 16;
   return srsran_cellid_isvalid(cell->id) && srsran_portid_isvalid(cell->nof_ports) &&
-         srsran_nofprb_isvalid(cell->nof_prb) && cell->mbsfn_prb <= cell->nof_prb && n_cas_ok;
+         srsran_nofprb_isvalid(cell->nof_prb) && n_cas_ok;
 }
 
 void srsran_cell_fprint(FILE* stream, srsran_cell_t* cell, uint32_t sfn)

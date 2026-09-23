@@ -202,7 +202,13 @@ int srsran_enb_dl_set_cell(srsran_enb_dl_t* q, srsran_cell_t cell)
         }
       }
 
-      if (srsran_ofdm_tx_set_prb_scs(&q->ifft_mbsfn, SRSRAN_CP_EXT, q->cell.nof_prb, SRSRAN_SCS_1KHZ25)) {
+      /* PMCH (cell.mbsfn_prb, via pmch-Bandwidth-r17) can be wider than the
+       * carrier itself for FeMBMS extended coverage -- the MBSFN grid's
+       * width/stride must cover whichever is wider, mirroring the
+       * SRSRAN_SCS_IS_370HZ branch in srsran_enb_dl_set_mbsfn_subcarrier_spacing()
+       * below, which already does this for that numerology. */
+      if (srsran_ofdm_tx_set_prb_scs(
+              &q->ifft_mbsfn, SRSRAN_CP_EXT, SRSRAN_MAX(q->cell.nof_prb, q->cell.mbsfn_prb), SRSRAN_SCS_1KHZ25)) {
         ERROR("Error re-planning ifft_mbsfn");
         return SRSRAN_ERROR;
       }

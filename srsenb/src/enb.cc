@@ -158,8 +158,10 @@ int enb::init(const all_args_t& args_)
   }
   if (eutra_stack && args.control.enable) {
     ctrl_server.reset(new control_server(this));
-    if (!ctrl_server->start(args.control.socket_path)) {
-      enb_log.error("Failed to start control server on %s", args.control.socket_path.c_str());
+    if (!ctrl_server->start(args.control.bind_addr, args.control.port)) {
+      enb_log.error("Failed to start control server on %s:%u",
+                    args.control.bind_addr.c_str(),
+                    args.control.port);
       ctrl_server.reset();
     }
   }

@@ -115,8 +115,9 @@ void parse_args(all_args_t* args, int argc, char* argv[])
 
     ("gui.enable",        bpo::value<bool>(&args->gui.enable)->default_value(false),          "Enable GUI plots")
 
-    ("control.enable",      bpo::value<bool>(&args->control.enable)->default_value(false), "Enable local Unix-domain control socket for live eMBMS reconfiguration")
-    ("control.socket_path", bpo::value<string>(&args->control.socket_path)->default_value("/tmp/srsenb_control.sock"), "Path of the control socket")
+    ("control.enable",    bpo::value<bool>(&args->control.enable)->default_value(false), "Enable the TCP control endpoint for live eMBMS reconfiguration")
+    ("control.bind_addr", bpo::value<string>(&args->control.bind_addr)->default_value("127.0.0.1"), "Control endpoint bind address (use an internal address for cross-container; unauthenticated, keep off untrusted networks)")
+    ("control.port",      bpo::value<uint16_t>(&args->control.port)->default_value(2100), "Control endpoint TCP port")
 
     /* Log section */
     ("log.rf_level",     bpo::value<string>(&args->rf.log_level),         "RF log level")
@@ -305,6 +306,7 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("embms.time_separation_sl2", bpo::value<bool>(&args->stack.embms.pmch_time_separation_sl2)->default_value(false), "0.37 kHz time separation: false=SL4 (default), true=SL2 (TS 36.211 §4.1 timeSeparation-r16).")
     ("embms.subcarrier_spacing", bpo::value<string>(&args->stack.embms.pmch_subcarrier_spacing)->default_value(""), "Override PMCH subcarrier spacing in SIB13 r16 extension: khz1dot25/khz2dot5/khz7dot5/khz0dot37. Required for 2.5 kHz and 0.37 kHz (not expressible via r9 SCS enum). Empty = derive from sib.conf subcarrier_spacing.")
     ("embms.additional_non_mbsfn_subframes", bpo::value<uint16_t>()->default_value(0)->notifier([args](uint16_t v) { args->stack.embms.additional_non_mbsfn_subframes = static_cast<uint8_t>(v); }), "MIB-MBMS additionalNonMBSFNSubframes-r14 (0..3): number of SFs after SF0 in active CAS frames reserved as non-MBSFN (TS 36.331 §6.7.4.1).")
+    ("embms.sf_alloc_info_r16", bpo::value<uint16_t>(&args->stack.embms.sf_alloc_info_r16)->default_value(0), "MCCH sf-AllocInfo-r16 (TS 36.331 MBSFN-AreaInfo-r16): 10-bit subframe bitmap, first bit=SF0 (SF0=512,SF1=256,SF2=128,SF3=64,SF4=32,SF5=16,SF6=8,SF7=4,SF8=2,SF9=1). Use to place MCCH on SF0/4/5/9 (not expressible via the r9 6-bit sf_alloc_info). 0 (default) = derive r16 from the r9 sib.conf value (no change).")
     ("embms.session_teids", bpo::value<string>(&args->stack.embms.session_teids)->default_value(""), "Comma-separated per-session GTP-U TEIDs for M1-U demux (e.g. \"0xAAAAAAAA,0xAAAAAAAB\"), index i -> LCID i+1. Empty (default) = legacy single-bearer behavior. Must match the MBMS-GW's own per-session C-TEID config.")
 
     // NR section

@@ -100,6 +100,7 @@ struct rrc_cfg_t {
   uint8_t                                                                                 nof_mbms_sessions;            /* number of MTCH sessions (default 1) */
   bool                                                                                    pmch_time_separation_sl2;     /* false=SL4 (default), true=SL2 (TS 36.211 §4.1) */
   std::string                                                                             pmch_subcarrier_spacing;      /* "" = derive from r9 SCS; "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" = override */
+  uint16_t                                                                                sf_alloc_info_r16 = 0;        /* MCCH sf-AllocInfo-r16 (10-bit, first bit SF0); 0 = derive from r9 (TS 36.331 MBSFN-AreaInfo-r16) */
   uint32_t                                                                                inactivity_timeout_ms;
   std::array<srsran::CIPHERING_ALGORITHM_ID_ENUM, srsran::CIPHERING_ALGORITHM_ID_N_ITEMS> eea_preference_list;
   std::array<srsran::INTEGRITY_ALGORITHM_ID_ENUM, srsran::INTEGRITY_ALGORITHM_ID_N_ITEMS> eia_preference_list;

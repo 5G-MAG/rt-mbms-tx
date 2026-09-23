@@ -285,13 +285,31 @@ private:
 
   std::atomic<bool>     etws_paging_active_{false};
   std::atomic<uint32_t> etws_paging_count_{0};
+  // "sched_added" == this alert path appended a sched_info_list_mbms_r14 entry for that SIB that a
+  // later clear_warning_sibs() must remove again. Set true on install, only ever reset by clear.
+  bool                  sib10_sched_added_ = false;
+  bool                  sib11_sched_added_ = false;
   bool                  sib12_sched_added_ = false;
 
-  // Shared by reload_sib12() (the existing file+SIGUSR1 path) and write_replace_warning()/
-  // kill_warning() (the new S1AP path) -- both ultimately just install or clear a SIB12,
-  // they only differ in where the sib_type12_r9_s comes from.
+  // Warning-SIB (Public Warning System) install/clear, shared by reload_sib12() (the file+SIGUSR1
+  // path) and write_replace_warning()/kill_warning() (the S1AP path). Which SIB is used depends on
+  // the alert type: CMAS/PWS -> SIB12 (TS 36.331 SystemInformationBlockType12-r9); ETWS -> SIB10
+  // (primary notification, carries the Warning Type) plus, when a message body is present, SIB11
+  // (secondary notification). The installers only populate cfg.sibs[]/the SI schedule; the caller
+  // then calls activate_warning_broadcast() once so a multi-SIB alert regenerates the SI a single
+  // time and starts one paging burst.
+  void install_sib10(const asn1::rrc::sib_type10_s& sib10_data);
+  void install_sib11(const asn1::rrc::sib_type11_s& sib11_data);
   void install_sib12(const asn1::rrc::sib_type12_r9_s& sib12_data);
-  void clear_sib12();
+  void activate_warning_broadcast();
+  void clear_warning_sibs();
+
+  // SI-schedule helpers shared by the install/clear paths above. add_ returns true iff it appended
+  // a new sched_info entry (i.e. the SIB was not already scheduled); remove_ drops any entry that
+  // schedules sib_opt. regenerate_si() bumps systemInfoValueTag, persists it, and rebuilds the SIBs.
+  bool add_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt);
+  void remove_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt);
+  void regenerate_si();
 
   void rem_user_thread(uint16_t rnti);
 };

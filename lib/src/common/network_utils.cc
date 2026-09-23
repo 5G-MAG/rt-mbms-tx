@@ -21,9 +21,13 @@
 
 #include "srsran/common/network_utils.h"
 
+#include <cerrno>
+#include <chrono>
+#include <cstring>
 #include <netinet/sctp.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h> // for the pipe
 
 #define rxSockError(fmt, ...) logger.error("RxSockets: " fmt, ##__VA_ARGS__)
@@ -459,7 +463,18 @@ socket_manager::remove_socket_unprotected(int fd, fd_set* total_fd_set, int* max
     return active_sockets.end();
   }
   auto it = active_sockets.find(fd);
-  it      = active_sockets.erase(it);
+  if (it == active_sockets.end()) {
+    // Can legitimately race against run_thread's own peer-closed detection
+    // (below, in the select loop) removing the same fd first -- e.g. an
+    // explicit remove_socket() request for a socket that the select loop
+    // has, in the meantime, already found closed by the peer and removed
+    // via the branch above. erase() on end() is undefined behaviour, so
+    // this must be a no-op, not a fallthrough into it.
+    rxSockWarn("Socket fd=%d to be removed has already been removed", fd);
+    FD_CLR(fd, total_fd_set);
+    return active_sockets.end();
+  }
+  it = active_sockets.erase(it);
   FD_CLR(fd, total_fd_set);
   // assumes ordering
   *max_fd = (active_sockets.empty()) ? pipefd[0] : std::max(pipefd[0], active_sockets.rbegin()->first);
@@ -483,7 +498,17 @@ void socket_manager::run_thread()
 
     // handle select return
     if (n == -1) {
-      rxSockError("Error from select(%d,...). Number of rx sockets: %d", max_fd + 1, (int)active_sockets.size() + 1);
+      // A genuinely bad fd in total_fd_set (e.g. EBADF) makes every future
+      // select() call fail identically -- with no backoff this was observed
+      // to spin as a tight, unthrottled loop, filling the log at the rate of
+      // one line per select() call (hundreds of MB within seconds). Report
+      // errno so the actual cause is visible, and throttle so any recurrence
+      // degrades gracefully instead of consuming a full core and the disk.
+      rxSockError("Error from select(%d,...): %s. Number of rx sockets: %d",
+                  max_fd + 1,
+                  strerror(errno),
+                  (int)active_sockets.size() + 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
       continue;
     }
     if (n == 0) {

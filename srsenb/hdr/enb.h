@@ -95,8 +95,9 @@ struct gui_args_t {
 };
 
 struct control_args_t {
-  bool        enable      = false;
-  std::string socket_path = "/tmp/srsenb_control.sock";
+  bool        enable    = false;
+  std::string bind_addr = "127.0.0.1"; // loopback by default; use an internal address for cross-container
+  uint16_t    port      = 2100;        // TCP control port the portal connects to
 };
 
 struct general_args_t {

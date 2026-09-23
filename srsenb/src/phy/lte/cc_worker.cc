@@ -19,6 +19,7 @@
  *
  */
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -94,6 +95,16 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
   srsran_cell_t cell    = phy_->get_cell(cc_idx);
   uint32_t      nof_prb = phy_->get_nof_prb(cc_idx);
   uint32_t      sf_len  = SRSRAN_SF_LEN_PRB(nof_prb);
+  // PMCH (the MBSFN/broadcast data channel) can be signalled wider than the
+  // carrier itself (cell.mbsfn_prb, via pmch-Bandwidth-r17) for FeMBMS
+  // extended coverage: a narrow CAS carrier with a wider PMCH allocation.
+  // Every downlink buffer/FFT plan sized for the carrier alone would
+  // overflow once PMCH's own RE-mapping (which already correctly uses
+  // mbsfn_prb) exceeds it, so downlink allocations are sized from whichever
+  // is wider. Uplink (signal_buffer_rx, enb_ul_*) has no MBSFN direction and
+  // stays sized by the carrier's own nof_prb.
+  uint32_t      dl_max_prb = std::max(nof_prb, static_cast<uint32_t>(cell.mbsfn_prb));
+  uint32_t      dl_sf_len  = SRSRAN_SF_LEN_PRB(dl_max_prb);
 
   // Init cell here
   for (uint32_t p = 0; p < phy->get_nof_ports(cc_idx); p++) {
@@ -103,14 +114,14 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
       return;
     }
     srsran_vec_cf_zero(signal_buffer_rx[p], 2 * sf_len);
-    signal_buffer_tx[p] = srsran_vec_cf_malloc(3 * 2 * sf_len);
+    signal_buffer_tx[p] = srsran_vec_cf_malloc(3 * 2 * dl_sf_len);
     if (!signal_buffer_tx[p]) {
       ERROR("Error allocating memory");
       return;
     }
-    srsran_vec_cf_zero(signal_buffer_tx[p], 3 * 2 * sf_len);
+    srsran_vec_cf_zero(signal_buffer_tx[p], 3 * 2 * dl_sf_len);
   }
-  if (srsran_enb_dl_init(&enb_dl, signal_buffer_tx, nof_prb)) {
+  if (srsran_enb_dl_init(&enb_dl, signal_buffer_tx, dl_max_prb)) {
     ERROR("Error initiating ENB DL (cc=%d)", cc_idx);
     return;
   }
@@ -143,7 +154,7 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     add_rnti(i);
   }
 
-  if (srsran_softbuffer_tx_init(&temp_mbsfn_softbuffer, nof_prb)) {
+  if (srsran_softbuffer_tx_init(&temp_mbsfn_softbuffer, dl_max_prb)) {
     ERROR("Error initiating soft buffer");
     exit(-1);
   }

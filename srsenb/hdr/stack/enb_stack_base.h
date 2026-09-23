@@ -78,6 +78,12 @@ typedef struct {
   uint8_t     nof_mbms_sessions;         /* number of MBMS sessions (MTCH bearers) in the PMCH (1-8) */
   bool        pmch_time_separation_sl2;  /* false=SL4 (default), true=SL2 (TS 36.211 §4.1 timeSeparation) */
   std::string pmch_subcarrier_spacing;   /* "" (derive from sib.conf r9 SCS), or "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" */
+  /* sf-AllocInfo-r16: 10-bit MCCH subframe allocation (TS 36.331 MBSFN-AreaInfo-r16), first bit = SF0.
+   * The legacy r9 sf_alloc_info (sib.conf, BIT STRING(6)) can only place MCCH on SF{1,2,3,6,7,8};
+   * a FeMBMS-dedicated cell may also use SF0/4/5/9, which only the r16 field can express. 0 (default)
+   * = not set: derive the r16 field from the r9 config as before (no behavior change). >0 = use this
+   * 10-bit value directly for the r16 sf-AllocInfo and the eNB's own MCCH subframe table. */
+  uint16_t    sf_alloc_info_r16 = 0;
   uint8_t     additional_non_mbsfn_subframes; /* MIB-MBMS bits[9-10]: 0..3 non-MBSFN SFs after SF0 in active CAS frames (TS 36.331 §6.7.4.1) */
   /* Comma-separated per-session GTP-U TEIDs for M1-U demux (e.g. "0xAAAAAAAA,0xAAAAAAAB"),
    * index i (0-based) -> LCID i+1, matching rrc.cc's mbms_session_info_list[s].lc_ch_id.

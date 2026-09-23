@@ -235,11 +235,12 @@ sib15 =
 {
     mbms_sai_intra_freq = [1];  // SAI=1; update to match your MBMS service configuration
 
-    // carrier_type: tells UEs what kind of MBMS carrier this is (Rel-14, TS 36.331 §6.3.1)
-    //   fembms_ded   — FeMBMS dedicated carrier (all subframes MBSFN, 5G Broadcast)
-    //   fembms_mixed — FeMBMS mixed carrier (some MBSFN, some unicast)
-    //   mbms         — legacy MBMS (pre-Rel-14)
-    carrier_type = "fembms_ded";
+    // carrier_type: tells UEs what kind of MBMS carrier this is (Rel-14, TS 36.331 §6.3.1,
+    // MBMS-CarrierType-r14). Spec ASN.1 spellings (legacy snake_case still accepted by the parser):
+    //   fembmsDedicated — FeMBMS dedicated carrier (all subframes MBSFN, 5G Broadcast) [was fembms_ded]
+    //   fembmsMixed     — FeMBMS mixed carrier (some MBSFN, some unicast)               [was fembms_mixed]
+    //   mbms            — legacy MBMS (pre-Rel-14)
+    carrier_type = "fembmsDedicated";
 };
 
 #####################################################################

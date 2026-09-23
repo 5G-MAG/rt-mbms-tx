@@ -228,7 +228,7 @@ void mme::run_thread()
       // SOCK_STREAM accept-based connection, not an already-established SCTP association
       // like sbc/s1mme/m3 above -- accept()+read()+dispatch()+close() happens inside
       // handle_bridge_connection() itself, mirroring the same one-shot request/response shape
-      // mbms-control-portal's own control-socket client already uses against srsenb.
+      // rt-mbms-application-provider's own control-socket client already uses against srsenb.
       if (sbc_br >= 0 && FD_ISSET(sbc_br, &m_set)) {
         m_sbc->handle_bridge_connection();
       }

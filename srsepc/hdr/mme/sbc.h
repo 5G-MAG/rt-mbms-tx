@@ -35,17 +35,17 @@
  *              s1ap_paging::send_paging() already does to broadcast to every
  *              connected eNB.
  *
- *              Local bridge: a second, local-only AF_UNIX SOCK_STREAM
- *              listener (mirroring mbms-control-portal's own existing
- *              control-socket pattern for srsenb, srsenb/src/control_server.cc:
- *              connect, write one already-encoded SBc-AP PDU, half-close the
- *              write side, read the response until the far end closes, then
- *              disconnect). SOCK_SEQPACKET was tried first since it preserves
- *              message boundaries the way real SCTP does, but Node's `net`
- *              module only creates SOCK_STREAM Unix sockets and Linux refuses
- *              a connect() across mismatched AF_UNIX socket types -- framing
- *              is done by connection lifetime instead (one request/response
- *              per connection). Added after a real end-to-end test found a genuine
+ *              Portal bridge: a second TCP (AF_INET/SOCK_STREAM) listener
+ *              (mirroring rt-mbms-application-provider's own existing control pattern
+ *              for srsenb, srsenb/src/control_server.cc: connect, write one
+ *              already-encoded SBc-AP PDU, half-close the write side, read the
+ *              response until the far end closes, then disconnect). Framing is
+ *              done by connection lifetime (one request/response per
+ *              connection) rather than message boundaries, and it binds to a
+ *              configurable address:port so the portal can run in a separate
+ *              container/host. NOTE: unauthenticated and able to inject
+ *              emergency-alert PDUs -- bind to loopback or a trusted
+ *              management network only. Added after a real end-to-end test found a genuine
  *              bug in the `sctp` npm package (sends a spurious ABORT right
  *              after receiving the SACK for its own data, confirmed via
  *              packet capture -- this MME side was never the problem). The
@@ -74,9 +74,10 @@
 namespace srsepc {
 
 typedef struct {
-  std::string sbc_bind_addr      = "0.0.0.0";
-  uint16_t    sbc_bind_port      = 29168; // Registered SCTP port for SBc-AP, per TS 29.168 clause 4 Annex A
-  std::string bridge_socket_path = "/tmp/srsepc_sbc_bridge.sock"; // local-only, portal-facing (see file header)
+  std::string sbc_bind_addr    = "0.0.0.0";
+  uint16_t    sbc_bind_port    = 29168; // Registered SCTP port for SBc-AP, per TS 29.168 clause 4 Annex A
+  std::string bridge_bind_addr = "127.0.0.1"; // portal-facing TCP bridge; loopback by default (see file header)
+  uint16_t    bridge_port      = 2102;        // TCP port the control portal connects to for SBc-AP
 } sbc_args_t;
 
 class sbc

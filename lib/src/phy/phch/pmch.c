@@ -531,14 +531,19 @@ static int pmch_cp(srsran_pmch_t* q, cf_t* input, cf_t* output, uint32_t lstart_
         }
         lend = SRSRAN_MBSFN_NOF_SYMBOLS(scs);
         lp   = l + s * SRSRAN_MBSFN_NOF_SYMBOLS(scs);
-        /* Symbol stride is nof_prb (full OFDM bandwidth), not prb_count (PMCH bandwidth).
-         * The sf_symbols buffer has nof_prb*NRE_SCS samples per symbol regardless of
-         * how many PRBs the PMCH occupies. Using prb_count here would corrupt adjacent
-         * symbols when mbsfn_prb < nof_prb (Rel-17 extended bandwidth cells). */
+        /* Symbol stride is the actual MBSFN grid width, not prb_count (PMCH's
+         * own populated bandwidth): the sf_symbols buffer/MBSFN IFFT are sized
+         * to max(nof_prb, mbsfn_prb) samples per symbol (enb_dl.c/cc_worker.cc),
+         * covering both a narrower PMCH (mbsfn_prb < nof_prb, the original
+         * Rel-17 extended-bandwidth case -- stride stays nof_prb, unchanged)
+         * and a wider one (mbsfn_prb > nof_prb -- stride must grow to match,
+         * or writes here spill into the next symbol's row). Using prb_count
+         * as the stride would corrupt adjacent symbols in the narrower case. */
+        uint32_t stride = SRSRAN_MAX(q->cell.nof_prb, q->cell.mbsfn_prb);
         if (put) {
-          out_ptr = &output[(lp * q->cell.nof_prb + n) * SRSRAN_NRE_SCS(scs)];
+          out_ptr = &output[(lp * stride + n) * SRSRAN_NRE_SCS(scs)];
         } else {
-          in_ptr = &input[(lp * q->cell.nof_prb + n) * SRSRAN_NRE_SCS(scs)];
+          in_ptr = &input[(lp * stride + n) * SRSRAN_NRE_SCS(scs)];
         }
         // This is a symbol in a normal PRB with or without references
         if (l >= lstart && l < lend) {
