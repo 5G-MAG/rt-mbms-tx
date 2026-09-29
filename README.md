@@ -100,7 +100,7 @@ srsran_install_configs.sh user
 After installation, adjust the enb, rr and epc configuration files to your frequency, bandwidth,
 TX gain, MNC, MCC and other settings.
 
-[Configuration Templates](https://github.com/5G-MAG/rt-mbms-tx/tree/development/Config-Template) can be
+[Configuration Templates](https://github.com/5G-MAG/rt-mbms-tx/tree/main/Config-Template) can be
 downloaded and placed in `/root/.config/srsran/` for use after installation.
 
 Copy the adapted `sib.conf.mbsfn` file to the build directory:
