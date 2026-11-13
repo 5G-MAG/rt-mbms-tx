@@ -20,6 +20,7 @@
  */
 
 #include "srsenb/hdr/stack/rrc/rrc.h"
+#include "srsenb/hdr/stack/rrc/si_window.h"
 #include "srsenb/hdr/stack/rrc/sib16_time.h"
 #include <cstdio>
 #include "srsenb/hdr/stack/mac/sched_interface.h"
@@ -264,6 +265,22 @@ int32_t rrc::init(const rrc_cfg_t&       cfg_,
   if (generate_sibs() != SRSRAN_SUCCESS) {
     logger.error("Couldn't generate SIBs.");
     return false;
+  }
+  // An SI message whose SI-window holds no cell acquisition subframe is never sent on an MBMS-dedicated cell; say so
+  // at start-up rather than leave the receiver waiting for it.
+  if (cfg.cell.mbms_dedicated) {
+    const auto& si = cfg.sib1.sched_info_list_mbms_r14;
+    for (uint32_t i = 0; i < si.size(); i++) {
+      if (!si_window::has_cas_opportunity(i + 1, cfg.sib1.si_win_len_r14.to_number(), si[i].si_periodicity_r14.to_number(),
+                                          cfg.cell.nof_prb < 25)) {
+        logger.error("SI message %u (si-Periodicity %u rf) will never be transmitted: its SI-window of %u ms contains no "
+                     "cell acquisition subframe (TS 36.211 clause 6.6.4.1); use a longer si-WindowLength or another SI "
+                     "message order",
+                     i + 1,
+                     si[i].si_periodicity_r14.to_number(),
+                     cfg.sib1.si_win_len_r14.to_number());
+      }
+    }
   }
   config_mac();
 

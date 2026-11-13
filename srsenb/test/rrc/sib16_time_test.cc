@@ -21,11 +21,13 @@
 
 // Tests for srsenb/hdr/stack/rrc/sib16_time.h: the SI-window arithmetic of TS 36.331 V19.4.0 clause 5.2.3b and the SIB16
 // time fields of clauses 6.3.1 and 6.3.2. Expected values are worked out from the clause text, not from the code.
+#include "srsenb/hdr/stack/rrc/si_window.h"
 #include "srsenb/hdr/stack/rrc/sib16_time.h"
 #include "srsran/common/test_common.h"
 #include "srsran/srslog/srslog.h"
 
 using namespace srsenb::sib16_time;
+using srsenb::si_window::has_cas_opportunity;
 
 static int test_window_arithmetic()
 {
@@ -83,6 +85,26 @@ static int test_invalid_configurations()
   return SRSRAN_SUCCESS;
 }
 
+static int test_cas_opportunity()
+{
+  // >= 25 PRB: CAS in frames with nf mod 4 = 0, subframe 0 only (TS 36.211 clause 6.6.4.1).
+  TESTASSERT(has_cas_opportunity(1, 20, 64, false));   // [0,20): frame 0
+  TESTASSERT(!has_cas_opportunity(2, 20, 256, false)); // [20,40): frames 2 and 3, no CAS (the shipped sib.conf.mbsfn)
+  TESTASSERT(has_cas_opportunity(2, 40, 256, false));  // [40,80): frame 4
+  TESTASSERT(has_cas_opportunity(2, 30, 256, false));  // [30,60): window starts in frame 3, holds frame 4's subframe 0
+  TESTASSERT(!has_cas_opportunity(2, 15, 64, false));  // [15,30): subframe 5 of frame 1 to frame 2
+  TESTASSERT(!has_cas_opportunity(2, 10, 64, false));  // [10,20)
+  TESTASSERT(!has_cas_opportunity(2, 5, 64, false));   // [5,10): subframe 5 of frame 0 is not subframe 0
+  TESTASSERT(has_cas_opportunity(3, 20, 256, false));  // [40,60): frame 4
+  TESTASSERT(!has_cas_opportunity(4, 20, 256, false)); // [60,80): frames 6 and 7
+  // 6 < PRB < 25: CAS in frames with nf mod 8 = 4.
+  TESTASSERT(!has_cas_opportunity(1, 20, 64, true));   // [0,20): frames 0 and 1
+  TESTASSERT(has_cas_opportunity(1, 80, 64, true));    // [0,80): frame 4
+  TESTASSERT(!has_cas_opportunity(6, 10, 64, true));   // [50,60): frame 5
+  TESTASSERT(has_cas_opportunity(5, 10, 64, true));    // [40,50): frame 4
+  return SRSRAN_SUCCESS;
+}
+
 static int test_fields()
 {
   fields_t f;
@@ -121,6 +143,7 @@ int main()
   srslog::init();
   TESTASSERT(test_window_arithmetic() == SRSRAN_SUCCESS);
   TESTASSERT(test_invalid_configurations() == SRSRAN_SUCCESS);
+  TESTASSERT(test_cas_opportunity() == SRSRAN_SUCCESS);
   TESTASSERT(test_fields() == SRSRAN_SUCCESS);
   printf("sib16_time_test: all passed\n");
   return SRSRAN_SUCCESS;
