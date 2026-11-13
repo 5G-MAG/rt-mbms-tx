@@ -753,6 +753,7 @@ int mac::get_dl_sched(uint32_t tti_tx_dl, dl_sched_list_t& dl_sched_res_list)
       if (sched_result.bc[i].type == sched_interface::dl_sched_bc_t::BCCH) {
         dl_sched_res->pdsch[n].softbuffer_tx[0] =
             &common_buffers[enb_cc_idx].bcch_softbuffer_tx[sched_result.bc[i].index];
+        rrc_h->prepare_bcch_dlsch(enb_cc_idx, sched_result.bc[i].index, tti_tx_dl);
         dl_sched_res->pdsch[n].data[0] = rrc_h->read_pdu_bcch_dlsch(enb_cc_idx, sched_result.bc[i].index);
 #ifdef WRITE_SIB_PCAP
         if (pcap) {

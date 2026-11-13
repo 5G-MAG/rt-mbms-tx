@@ -67,8 +67,19 @@ struct rrc_endc_cfg_t {
   ssb_rs_cfg::subcarrier_spacing_ssb_r15_e_ ssb_ssc;
 };
 
+/// How SIB16 gets its time. rt-mbms-tx extension: no clause governs this switch.
+/// When `dynamic`, SIB16 is rebuilt before each SI window with the network time of the SFN boundary that
+/// TS 36.331 clause 6.3.2 names (the one at or immediately after the end of the SI-window), taken from the host clock.
+struct sib16_time_cfg_t {
+  bool    dynamic      = false;
+  bool    include_r15  = false; ///< also carry timeReferenceInfo-r15 (0.25 us granularity)
+  int16_t leap_seconds = 18;    ///< leapSeconds: GPS time - UTC, TS 36.331 clause 6.3.1
+  int     uncertainty  = -1;    ///< timeReferenceInfo uncertainty-r15, -1 = field omitted
+};
+
 struct rrc_cfg_t {
   uint32_t enb_id; ///< Required to pack SIB1
+  sib16_time_cfg_t sib16_time;
   // Per eNB SIBs
   asn1::rrc::sib_type1_mbms_r14_s     sib1;
   // Legacy (non-MBMS-r14) SIB1, used instead of `sib1` when cell.mbms_dedicated is false --

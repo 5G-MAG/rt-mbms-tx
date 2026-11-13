@@ -2582,7 +2582,7 @@ int parse_sib15(const std::string& filename, sib_type15_r11_s* data)
   return SRSRAN_SUCCESS;
 }
 
-int parse_sib16(const std::string& filename, sib_type16_r11_s* data)
+int parse_sib16(const std::string& filename, sib_type16_r11_s* data, sib16_time_cfg_t* time_cfg)
 {
   Config cfg;
   try {
@@ -2615,6 +2615,42 @@ int parse_sib16(const std::string& filename, sib_type16_r11_s* data)
       if (ti.lookupValue("local_time_offset", lto)) {
         data->time_info_r11.local_time_offset_r11         = (int8_t)lto;
         data->time_info_r11.local_time_offset_r11_present = true;
+      }
+    }
+    // Dynamic time: `dynamic = true;` replaces time_info_utc by the host clock at each SI window.
+    // `time_reference_info = { uncertainty = N; };` (block present) also carries timeReferenceInfo-r15.
+    if (time_cfg != nullptr) {
+      bool dynamic = false;
+      s.lookupValue("dynamic", dynamic);
+      time_cfg->dynamic = dynamic;
+      if (s.exists("time_info")) {
+        int leap = 0;
+        if (s["time_info"].lookupValue("leap_seconds", leap)) {
+          time_cfg->leap_seconds = (int16_t)leap;
+        }
+      }
+      if (dynamic && s.exists("time_reference_info")) {
+        time_cfg->include_r15 = true;
+        int unc               = -1;
+        if (s["time_reference_info"].lookupValue("uncertainty", unc)) {
+          if (unc < 0 || unc > 12) {
+            fprintf(stderr, "parse_sib16: uncertainty must be 0..12 (TS 36.331 clause 6.3.2) in %s\n", filename.c_str());
+            return SRSRAN_ERROR;
+          }
+          time_cfg->uncertainty = unc;
+        }
+        // Same packed length from the start, so the length handed to the scheduler never changes.
+        data->ext = true;
+        data->time_ref_info_r15.reset(new asn1::rrc::time_ref_info_r15_s());
+        if (time_cfg->uncertainty >= 0) {
+          data->time_ref_info_r15->uncertainty_r15_present = true;
+          data->time_ref_info_r15->uncertainty_r15         = (uint8_t)time_cfg->uncertainty;
+        }
+      }
+      if (dynamic) {
+        data->time_info_r11_present = true;
+        data->time_info_r11.leap_seconds_r11_present = true;
+        data->time_info_r11.leap_seconds_r11         = time_cfg->leap_seconds;
       }
     }
   } catch (const SettingNotFoundException& e) {
@@ -2875,7 +2911,7 @@ int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_co
   if (sib_sections::parse_sib15(args_->enb_files.sib_config, sib15) != SRSRAN_SUCCESS) {
     return SRSRAN_ERROR;
   }
-  if (sib_sections::parse_sib16(args_->enb_files.sib_config, sib16) != SRSRAN_SUCCESS) {
+  if (sib_sections::parse_sib16(args_->enb_files.sib_config, sib16, &rrc_cfg_->sib16_time) != SRSRAN_SUCCESS) {
     return SRSRAN_ERROR;
   }
 

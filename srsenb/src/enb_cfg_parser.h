@@ -67,7 +67,7 @@ int parse_sib11(const std::string& filename, asn1::rrc::sib_type11_s* data);
 int parse_sib12(const std::string& filename, asn1::rrc::sib_type12_r9_s* data);
 int parse_sib13(std::string filename, asn1::rrc::sib_type13_r9_s* data);
 int parse_sib15(const std::string& filename, asn1::rrc::sib_type15_r11_s* data);
-int parse_sib16(const std::string& filename, asn1::rrc::sib_type16_r11_s* data);
+int parse_sib16(const std::string& filename, asn1::rrc::sib_type16_r11_s* data, sib16_time_cfg_t* time_cfg = nullptr);
 int parse_sibs(all_args_t* args_, rrc_cfg_t* rrc_cfg_, srsenb::phy_cfg_t* phy_config_common);
 
 } // namespace sib_sections

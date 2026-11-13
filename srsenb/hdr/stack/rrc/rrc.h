@@ -133,6 +133,7 @@ public:
   void     set_radiolink_ul_state(uint16_t rnti, bool crc_res) override;
   bool     is_paging_opportunity(uint32_t tti, uint32_t* payload_len) override;
   uint8_t* read_pdu_bcch_dlsch(const uint8_t cc_idx, const uint32_t sib_index) override;
+  void     prepare_bcch_dlsch(const uint8_t cc_idx, const uint32_t sib_index, const uint32_t tti_tx_dl) override;
 
   // rrc_interface_rlc
   void read_pdu_pcch(uint32_t tti_tx_dl, uint8_t* payload, uint32_t buffer_size) override;
@@ -243,6 +244,10 @@ private:
   void     process_release_complete(uint16_t rnti);
   void     rem_user(uint16_t rnti);
   uint32_t generate_sibs();
+
+  // SIB16 refresh state (see prepare_bcch_dlsch()): the SI-period instance last stamped, and when.
+  uint32_t sib16_last_instance_ = UINT32_MAX;
+  uint64_t sib16_last_stamp_ms_ = 0;
   void     configure_mbsfn_sibs();
   void     configure_mbms_bearers();
   int      pack_mcch(const std::vector<uint16_t>& mbms_mcs_per_pmch);

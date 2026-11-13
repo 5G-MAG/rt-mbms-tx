@@ -42,6 +42,11 @@ target_link_libraries(mbms_session_test test_helpers ${ATOMIC_LIBS})
 add_executable(pmch_mcs_clamp_test pmch_mcs_clamp_test.cc)
 target_link_libraries(pmch_mcs_clamp_test srsran_phy srslog ${ATOMIC_LIBS})
 
+# Header-only arithmetic (srsenb/hdr/stack/rrc/sib16_time.h): SI-window position and SIB16 time fields.
+add_executable(sib16_time_test sib16_time_test.cc)
+target_link_libraries(sib16_time_test srslog ${ATOMIC_LIBS})
+add_test(sib16_time_test sib16_time_test)
+
 add_test(rrc_mobility_test rrc_mobility_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(erab_setup_test erab_setup_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(rrc_meascfg_test rrc_meascfg_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)

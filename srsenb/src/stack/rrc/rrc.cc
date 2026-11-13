@@ -20,6 +20,7 @@
  */
 
 #include "srsenb/hdr/stack/rrc/rrc.h"
+#include "srsenb/hdr/stack/rrc/sib16_time.h"
 #include <cstdio>
 #include "srsenb/hdr/stack/mac/sched_interface.h"
 #include "srsenb/hdr/stack/rrc/rrc_cell_cfg.h"
@@ -335,6 +336,79 @@ uint8_t* rrc::read_pdu_bcch_dlsch(const uint8_t cc_idx, const uint32_t sib_index
     return cell_common_list->get_cc_idx(cc_idx)->sib_buffer.at(sib_index)->msg;
   }
   return nullptr;
+}
+
+/**
+ * Stamps SIB16 with the network time of the SFN boundary it must name, once per SI-window (arithmetic in sib16_time.h:
+ * TS 36.331 V19.4.0 clauses 5.2.3b, 6.3.1 and 6.3.2).
+ *
+ * The network time of a TTI is taken from CLOCK_REALTIME at this call plus the whole subframes still to run, so it is only
+ * as good as the host clock and the PHY lead time (milliseconds, lab grade). A GNSS-disciplined eNB would take the time from
+ * the radio's timestamps instead. cfg is rewritten from the MAC thread; this is not safe against a concurrent
+ * reconfiguration from the control thread.
+ */
+void rrc::prepare_bcch_dlsch(const uint8_t cc_idx, const uint32_t sib_index, const uint32_t tti_tx_dl)
+{
+  if (!cfg.sib16_time.dynamic || !cfg.cell.mbms_dedicated || sib_index == 0) {
+    return;
+  }
+  // The SI message that carries SIB16 and its periodicity, from the schedulingInfoList of SIB1-MBMS.
+  uint32_t    msg_index = 0, period = 0;
+  const auto& sched_info = cfg.sib1.sched_info_list_mbms_r14;
+  for (uint32_t i = 0; i < sched_info.size(); i++) {
+    for (uint32_t j = 0; j < sched_info[i].sib_map_info_r14.size(); j++) {
+      if (sched_info[i].sib_map_info_r14[j].to_number() == 16) {
+        msg_index = i + 1;
+        period    = sched_info[i].si_periodicity_r14.to_number();
+      }
+    }
+  }
+  if (msg_index == 0 || sib_index != msg_index) {
+    return;
+  }
+
+  const int64_t ahead_ms = sib16_time::boundary_ahead_ms(msg_index, cfg.sib1.si_win_len_r14.to_number(), period, tti_tx_dl);
+  if (ahead_ms < 0) {
+    return; // not inside the SI-window of this message: nothing to name
+  }
+
+  timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  const uint64_t now_ms   = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+  const uint32_t instance = (tti_tx_dl / 10) / period;
+  // One stamp per SI-period instance, so every repetition inside one window carries the same time. The wall-clock guard
+  // covers the SFN wrap, where the instance number repeats.
+  if (instance == sib16_last_instance_ && now_ms - sib16_last_stamp_ms_ < (uint64_t)period * 10 / 2) {
+    return;
+  }
+
+  // Network time of that boundary, in nanoseconds since 1900-01-01 UTC.
+  const int64_t           utc_1900_ns = ((int64_t)ts.tv_sec + sib16_time::unix_to_1900_s) * 1000000000LL + ts.tv_nsec + ahead_ms * 1000000LL;
+  sib16_time::fields_t    f;
+  if (!sib16_time::make_fields(utc_1900_ns, cfg.sib16_time.leap_seconds, &f)) {
+    logger.error("SIB16: host clock gives a time outside the range SIB16 can carry; not updating");
+    return;
+  }
+  auto& s16                                  = cfg.sibs[15].sib16_v1130();
+  s16.time_info_r11_present                  = true;
+  s16.time_info_r11.time_info_utc_r11        = f.time_info_utc_10ms;
+  s16.time_info_r11.leap_seconds_r11_present = true;
+  s16.time_info_r11.leap_seconds_r11         = cfg.sib16_time.leap_seconds;
+  if (cfg.sib16_time.include_r15 && s16.time_ref_info_r15.get() != nullptr) {
+    auto& rt                         = s16.time_ref_info_r15->time_r15;
+    rt.ref_days_r15                  = f.ref_days;
+    rt.ref_seconds_r15               = f.ref_seconds;
+    rt.ref_milli_seconds_r15         = f.ref_milli_seconds;
+    rt.ref_quarter_micro_seconds_r15 = f.ref_quarter_us;
+  }
+  sib16_last_instance_ = instance;
+  sib16_last_stamp_ms_ = now_ms;
+  logger.info("SIB16 stamped: SI message %u, boundary SFN %u in %lld ms, timeInfoUTC=%llu",
+              msg_index,
+              sib16_time::boundary_sfn(msg_index, cfg.sib1.si_win_len_r14.to_number(), period, tti_tx_dl),
+              (long long)ahead_ms,
+              (unsigned long long)f.time_info_utc_10ms);
+  generate_sibs();
 }
 
 void rrc::set_radiolink_dl_state(uint16_t rnti, bool crc_res)

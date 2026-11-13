@@ -125,6 +125,10 @@ public:
 
   ///< Provide packed SIB to MAC (buffer is managed by RRC)
   virtual uint8_t* read_pdu_bcch_dlsch(const uint8_t enb_cc_idx, const uint32_t sib_index) = 0;
+
+  ///< Called by MAC just before it reads the packed SI message, so RRC can refresh content that depends on the TTI
+  ///< (SIB16 time). Default: nothing to refresh.
+  virtual void prepare_bcch_dlsch(const uint8_t enb_cc_idx, const uint32_t sib_index, const uint32_t tti_tx_dl) {}
 };
 
 /// RRC interface for PDCP
