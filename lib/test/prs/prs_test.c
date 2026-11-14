@@ -325,6 +325,30 @@ static void test_put_sf(void)
   free(sf);
 }
 
+/* The PSS, SSS and PBCH-core exclusion of an MBMS-dedicated cell is in the frames with n_f mod 4 = 0 whatever the bandwidth (clauses 6.11.1.2, 6.6.4), not in the
+ * frames of the cell acquisition subframes (clause 6.6.4.1: n_f mod 8 = 4 below 25 PRB). */
+static void test_mask_frames(void)
+{
+  const uint32_t widths[] = {6, 15, 25, 50};
+  for (size_t w = 0; w < sizeof(widths) / sizeof(widths[0]); w++) {
+    srsran_cell_t cell    = make_cell(widths[w], 1, true);
+    uint32_t      width   = SRSRAN_NRE * widths[w];
+    uint32_t      centre  = 6 * widths[w];
+    bool*         mask    = calloc(width * SRSRAN_CP_NORM_NSYMB, sizeof(bool));
+    for (uint32_t n_f = 0; n_f < 16; n_f++) {
+      srsran_prs_sync_pbch_mask(&cell, n_f, 0, mask);
+      bool pss = mask[(SRSRAN_CP_NSYMB(cell.cp) - 1) * width + centre], sss = mask[(SRSRAN_CP_NSYMB(cell.cp) - 2) * width + centre];
+      CHECK(pss == (n_f % 4 == 0) && sss == pss, "%u PRB, frame %u: PSS/SSS mask %d, wanted %d", widths[w], n_f, pss, n_f % 4 == 0);
+      srsran_prs_sync_pbch_mask(&cell, n_f, 1, mask);
+      bool pbch = mask[0 * width + centre - 36] && mask[3 * width + centre + 35];
+      CHECK(pbch == (n_f % 4 == 0), "%u PRB, frame %u: PBCH core mask %d, wanted %d", widths[w], n_f, pbch, n_f % 4 == 0);
+      srsran_prs_sync_pbch_mask(&cell, n_f, 10, mask);
+      CHECK(!mask[(SRSRAN_CP_NSYMB(cell.cp) - 1) * width + centre], "%u PRB, frame %u: no PSS in slot 10 of an MBMS-dedicated cell", widths[w], n_f);
+    }
+    free(mask);
+  }
+}
+
 int main(int argc, char** argv)
 {
   if (argc < 2) {
@@ -365,6 +389,7 @@ int main(int argc, char** argv)
   test_default_id();
   test_collect_then_write();
   test_put_sf();
+  test_mask_frames();
   printf("prs_test: %d mapping cases, %d activity cases, %d failures\n", cases, actives, failures);
   return failures ? 1 : 0;
 }

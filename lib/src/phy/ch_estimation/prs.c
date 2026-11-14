@@ -150,8 +150,9 @@ void srsran_prs_sync_pbch_mask(const srsran_cell_t* cell, uint32_t n_f, uint32_t
   bool present;
   bool sync_slot;
   if (cell->mbms_dedicated) {
-    /* PSS and SSS in slot 0 and the PBCH core set in slot 1, of the frames with n_f mod 4 = 0 (clauses 6.11.1.2, 6.11.2.2, 6.6.4) */
-    present   = cas_frame(cell, n_f);
+    /* PSS and SSS in slot 0 and the PBCH core set in slot 1, of the frames with n_f mod 4 = 0 whatever the bandwidth (clauses 6.11.1.2, 6.6.4); the
+     * frame set of the cell acquisition subframes (cas_frame) is that of the PBCH repetition, clause 6.6.4.1, and is not the same below 25 PRB */
+    present   = (n_f % 4 == 0);
     sync_slot = (n_s == 0);
   } else {
     /* PSS and SSS in slots 0 and 10, the PBCH core set in slot 1, in every frame */
