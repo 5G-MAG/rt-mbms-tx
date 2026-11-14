@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 
+#include "srsran/phy/ch_estimation/prs.h"
 #include "srsran/phy/ch_estimation/refsignal_dl.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/dft/ofdm.h"
@@ -66,6 +67,12 @@ typedef struct SRSRAN_API {
   srsran_dl_sf_cfg_t dl_sf;
 
   cf_t* sf_symbols[SRSRAN_MAX_PORTS];
+
+  /* Positioning reference signals of the subframe being built: the elements free once the base signals are in the grid (srsran_prs_collect_sf), written
+   * by srsran_enb_dl_gen_signal() after PDSCH so that they take the place of PDSCH but of none of the base signals. */
+  srsran_prs_re_t prs_res[SRSRAN_PRS_MAX_RES];
+  int             nof_prs_res;
+
   cf_t*         out_buffer[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft_mbsfn;

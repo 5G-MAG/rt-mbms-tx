@@ -317,6 +317,19 @@ typedef struct {
   uint8_t  scaling_factor_beta_den;
 } srsran_mbsfn_cfg_t;
 
+#define SRSRAN_PRS_ID_CELL 0xFFFF /* N_ID^PRS is the cell identity (TS 36.211 clause 6.10.4.1, "unless configured by higher layers") */
+
+/* Positioning reference signal configuration of a cell (TS 36.211 clause 6.10.4, TS 37.355 PRS-Info). All zero means no PRS. */
+typedef struct SRSRAN_API {
+  bool     enabled;
+  uint16_t id;            /* N_ID^PRS 0..4095, or SRSRAN_PRS_ID_CELL for the cell identity */
+  uint16_t config_index;  /* I_PRS 0..2554 (Table 6.10.4.3-1) */
+  uint8_t  nof_subframes; /* N_PRS: 1, 2, 4 or 6 consecutive downlink subframes */
+  uint8_t  nof_prb;       /* N_RB^PRS: 6, 15, 25, 50, 75 or 100 */
+  uint16_t muting_len;    /* T_REP bits of the muting sequence (2, 4, ..., 1024); 0: no muting */
+  uint8_t  muting[128];   /* bit i of the sequence is bit (i % 8) of byte (i / 8), least significant bit first; 0 mutes the occasion */
+} srsran_prs_cfg_t;
+
 // Common cell constant properties that require object reconfiguration
 typedef struct SRSRAN_API {
   uint32_t              nof_prb;
@@ -339,6 +352,7 @@ typedef struct SRSRAN_API {
   /* Rel-16: semiStaticCFI-MBMS-r16 (TS 36.331/36.213 §9.1.3, MIB-MBMS bits [11-12]):
    * INTEGER(0..3). 0 = derive CFI from PCFICH; 1/2/3 directly ARE the CFI value. */
   uint8_t               semi_static_cfi;   /* 0..3; 0 also doubles as "not yet decoded" on RX */
+  srsran_prs_cfg_t      prs;               /* transmit side only; zero (disabled) elsewhere */
 } srsran_cell_t;
 
 // Common downlink properties that may change every subframe

@@ -20,6 +20,7 @@
  */
 
 #include "srsran/phy/enb/enb_dl.h"
+#include "srsran/phy/ch_estimation/prs.h"
 
 #include "srsran/srsran.h"
 #include <complex.h>
@@ -584,6 +585,28 @@ static void put_pcfich(srsran_enb_dl_t* q)
   }
 }
 
+/* Positioning reference signals (TS 36.211 clause 6.10.4). Here, with the base signals in the grid, the elements PRS would take are only recorded: they are
+ * the ones that are free, so never the PSS, SSS, PBCH or cell-specific reference signals. srsran_enb_dl_gen_signal() writes them after PDSCH, which they
+ * therefore puncture. In an MBMS-dedicated cell the cell acquisition subframe is filled with PDSCH data, so PRS written first would not survive.
+ * Subframes sent as MBSFN carry none: PRS is defined for 15 kHz and PRS in MBSFN subframes (extended cyclic prefix) is not implemented. */
+static void collect_prs(srsran_enb_dl_t* q)
+{
+  q->nof_prs_res = 0;
+  if (!q->cell.prs.enabled || q->dl_sf.sf_type == SRSRAN_SF_MBSFN) {
+    return;
+  }
+  int n = srsran_prs_collect_sf(&q->cell.prs, &q->cell, q->dl_sf.tti, q->sf_symbols[0], q->prs_res, SRSRAN_PRS_MAX_RES);
+  q->nof_prs_res = n > 0 ? n : 0;
+}
+
+static void apply_prs(srsran_enb_dl_t* q)
+{
+  for (int i = 0; i < q->nof_prs_res; i++) {
+    q->sf_symbols[0][q->prs_res[i].index] = q->prs_res[i].value;
+  }
+  q->nof_prs_res = 0;
+}
+
 void srsran_enb_dl_put_base(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf)
 {
   srsran_ofdm_set_non_mbsfn_region(&q->ifft_mbsfn, dl_sf->non_mbsfn_region);
@@ -593,6 +616,7 @@ void srsran_enb_dl_put_base(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf)
   put_refs(q, dl_sf);
   put_mib(q);
   put_pcfich(q);
+  collect_prs(q);
 }
 
 void srsran_enb_dl_put_phich(srsran_enb_dl_t* q, srsran_phich_grant_t* grant, bool ack)
@@ -660,6 +684,8 @@ int srsran_enb_dl_put_pmch(srsran_enb_dl_t* q,
 
 void srsran_enb_dl_gen_signal(srsran_enb_dl_t* q)
 {
+  apply_prs(q);
+
   // TODO: PAPR control
   float norm_factor = enb_dl_get_norm_factor(q->cell.nof_prb);
 

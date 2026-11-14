@@ -30,6 +30,7 @@ add_subdirectory(include)
 # common/srslog/adt test trees under lib/test/ are left disabled since they are
 # unverified in this environment (no build toolchain available to confirm).
 add_subdirectory(test/asn1)
+add_subdirectory(test/prs)
 
 ########################################################################
 # Install library headers

@@ -122,6 +122,16 @@ struct general_args_t {
   uint32_t    rlf_release_timer_ms;
 };
 
+/* [prs]: positioning reference signals of the cell (TS 36.211 clause 6.10.4; the fields of TS 37.355 PRS-Info). Off unless enable is set. */
+struct prs_args_t {
+  bool        enable        = false;
+  int32_t     id            = -1; // PRS ID, 0..4095; negative: the cell identity
+  uint32_t    config_index  = 0;  // I_PRS, Table 6.10.4.3-1
+  uint32_t    nof_subframes = 1;  // N_PRS: 1, 2, 4 or 6
+  uint32_t    nof_prb       = 0;  // PRS bandwidth in PRB: 6, 15, 25, 50, 75 or 100; 0: the cell bandwidth
+  std::string muting;             // muting sequence, 2, 4, ..., 1024 characters of 0 and 1 (0 mutes the occasion); empty: no muting
+};
+
 struct all_args_t {
   enb_args_t        enb;
   enb_files_t       enb_files;
@@ -133,6 +143,7 @@ struct all_args_t {
   phy_args_t        phy;
   stack_args_t      stack;
   gnb_stack_args_t  nr_stack;
+  prs_args_t        prs;
 };
 
 struct rrc_cfg_t;

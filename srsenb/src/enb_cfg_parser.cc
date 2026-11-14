@@ -25,6 +25,7 @@
 #include "srsran/asn1/rrc_utils.h"
 #include "srsran/common/band_helper.h"
 #include "srsran/common/multiqueue.h"
+#include "srsran/phy/ch_estimation/prs.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/rrc/rrc_common.h"
 #include <boost/algorithm/string.hpp>
@@ -1183,6 +1184,35 @@ int parse_cell_cfg(all_args_t* args_, srsran_cell_t* cell)
     uint32_t min_cfi = args_->stack.mac.sched.min_nof_ctrl_symbols;
     uint32_t max_cfi = args_->stack.mac.sched.max_nof_ctrl_symbols;
     cell->semi_static_cfi = (min_cfi == max_cfi && min_cfi >= 1 && min_cfi <= 3) ? (uint8_t)min_cfi : 0;
+  }
+  /* positioning reference signals ([prs]); the PRS ID follows the cell identity unless one is given */
+  cell->prs = {};
+  if (args_->prs.enable) {
+    const prs_args_t& pa = args_->prs;
+    if (pa.muting.size() > 1024 || pa.nof_subframes > 255 || pa.nof_prb > 255 || pa.config_index > 65535 || pa.id > 65534) {
+      fprintf(stderr, "Invalid [prs] configuration: a value is out of range\n");
+      return -1;
+    }
+    cell->prs.enabled       = true;
+    cell->prs.id            = pa.id < 0 ? SRSRAN_PRS_ID_CELL : (uint16_t)pa.id;
+    cell->prs.config_index  = (uint16_t)pa.config_index;
+    cell->prs.nof_subframes = (uint8_t)pa.nof_subframes;
+    cell->prs.nof_prb       = (uint8_t)(pa.nof_prb ? pa.nof_prb : cell->nof_prb);
+    cell->prs.muting_len    = (uint16_t)pa.muting.size();
+    for (size_t i = 0; i < pa.muting.size(); i++) {
+      if (pa.muting[i] != '0' && pa.muting[i] != '1') {
+        fprintf(stderr, "Invalid prs.muting: only the characters 0 and 1 are allowed\n");
+        return -1;
+      }
+      if (pa.muting[i] == '1') {
+        cell->prs.muting[i / 8] = (uint8_t)(cell->prs.muting[i / 8] | (1u << (i % 8)));
+      }
+    }
+    char why[200];
+    if (srsran_prs_cfg_validate(&cell->prs, cell, why, sizeof(why)) != SRSRAN_SUCCESS) {
+      fprintf(stderr, "Invalid [prs] configuration: %s\n", why);
+      return -1;
+    }
   }
   if (cell->cas_muting) {
     static const uint8_t valid_n_cas[] = {2, 4, 8, 16};

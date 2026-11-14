@@ -277,6 +277,12 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("embms.m1u_multiaddr", bpo::value<string>(&args->stack.embms.m1u_multiaddr)->default_value("239.255.0.1"), "M1-U Multicast address the eNB joins.")
     ("embms.m1u_if_addr", bpo::value<string>(&args->stack.embms.m1u_if_addr)->default_value("127.0.1.201"), "IP address of the interface the eNB will listen for M1-U traffic.")
     ("embms.mcs", bpo::value<uint16_t>(&args->stack.embms.mcs)->default_value(20), "Modulation and Coding scheme of MBMS traffic.")
+    ("prs.enable", bpo::value<bool>(&args->prs.enable)->default_value(false), "Transmit positioning reference signals (TS 36.211 clause 6.10.4).")
+    ("prs.id", bpo::value<int32_t>(&args->prs.id)->default_value(-1), "PRS ID (0..4095); negative: the cell identity.")
+    ("prs.config_index", bpo::value<uint32_t>(&args->prs.config_index)->default_value(0), "PRS configuration index I_PRS (Table 6.10.4.3-1). On an MBMS-dedicated cell every occasion must be subframe 0 of a cell acquisition frame, e.g. 2435 at 25 PRB.")
+    ("prs.nof_subframes", bpo::value<uint32_t>(&args->prs.nof_subframes)->default_value(1), "N_PRS, consecutive downlink subframes per occasion: 1, 2, 4 or 6 (1 on an MBMS-dedicated cell).")
+    ("prs.nof_prb", bpo::value<uint32_t>(&args->prs.nof_prb)->default_value(0), "PRS bandwidth in PRB (6, 15, 25, 50, 75, 100); 0: the cell bandwidth.")
+    ("prs.muting", bpo::value<std::string>(&args->prs.muting)->default_value(""), "PRS muting sequence, 2, 4, ..., 1024 characters of 0 and 1; 0 mutes the occasion (TS 37.355 prs-MutingInfo). Empty: no muting.")
     ("embms.cas_muting", bpo::value<bool>(&args->stack.embms.cas_muting)->default_value(false), "Enable Rel-19 CAS muting: suppress PSS/SSS/PBCH in muted frames (TS 36.211 §6.6.4/6.11.1.2/6.11.2.2).")
     // NOTE: these embms.* fields are uint8_t in embms_args_t, but boost::program_options
     // must never bind bpo::value<uint8_t>/<int8_t> directly to them: uint8_t is a
