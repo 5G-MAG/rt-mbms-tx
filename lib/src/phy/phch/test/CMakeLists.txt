@@ -34,6 +34,12 @@ add_lte_test(pbch_test_50 pbch_test -p 1 -n 50 -c 50)
 add_lte_test(pbch_test_502 pbch_test -p 2 -n 50 -c 50)
 add_lte_test(pbch_test_504 pbch_test -p 4 -n 50 -c 50)
 
+# FeMBMS PBCH CAS-repetition put/get geometry (TS 36.211 clause 6.6.4.1)
+add_executable(pbch_cas_rep_test pbch_cas_rep_test.c)
+target_link_libraries(pbch_cas_rep_test srsran_phy)
+
+add_lte_test(pbch_cas_rep_test pbch_cas_rep_test)
+
 ########################################################################
 # PSBCH TEST
 ########################################################################
@@ -354,6 +360,30 @@ add_lte_test(pmch_test_qpsk pmch_test -m 6 -n 50)
 add_lte_test(pmch_test_qam16 pmch_test -m 15 -n 100)
 add_lte_test(pmch_test_qam64 pmch_test -m 25 -n 100)
 
+# FeMBMS numerology loopback (7.5 / 2.5 / 1.25 kHz, 0.37 kHz SL4/SL2)
+add_executable(pmch_fembms_test pmch_fembms_test.c)
+target_link_libraries(pmch_fembms_test srsran_phy)
+
+add_lte_test(pmch_fembms_test pmch_fembms_test)
+
+# FeMBMS numerology OFDM time-domain loopback (encode->IFFT->FFT->decode)
+add_executable(pmch_ofdm_fembms_test pmch_ofdm_fembms_test.c)
+target_link_libraries(pmch_ofdm_fembms_test srsran_phy)
+
+add_lte_test(pmch_ofdm_fembms_test pmch_ofdm_fembms_test)
+
+# FeMBMS real (non-identity) channel-estimation round trip
+add_executable(pmch_chest_fembms_test pmch_chest_fembms_test.c)
+target_link_libraries(pmch_chest_fembms_test srsran_phy)
+
+add_lte_test(pmch_chest_fembms_test pmch_chest_fembms_test)
+
+# FeMBMS PMCH Rel-19 feature loopback (freq interleave / cyclic shift / time interleave)
+add_executable(pmch_rel19_fembms_test pmch_rel19_fembms_test.c)
+target_link_libraries(pmch_rel19_fembms_test srsran_phy)
+
+add_lte_test(pmch_rel19_fembms_test pmch_rel19_fembms_test)
+
 
 ########################################################################
 # NPDSCH TEST
@@ -532,9 +562,17 @@ foreach (cell_n_prb 6 15 25 50 75 100)
             endif (mcs EQUAL 28)
           endif (NOT (${cqi} STREQUAL none))
 
-          if (${mcs} GREATER 24)
+          # Table 8.6.1-1 (36.213) maps mcs_idx 21-28 to 64QAM (see ul_fill_ra_mcs() in
+          # ra_ul.c: mcs_idx < 21 -> 16QAM, mcs_idx < 29 -> 64QAM). If the test does not
+          # pass -p enable_64qam for mcs 21-24, srsran_pusch_encode/decode() demote the
+          # modulation back to 16QAM (UE/eNB without 64QAM support) but the TBS was
+          # already picked from the 64QAM-oriented ITBS table, producing a coding rate
+          # near 1 that intermittently fails to decode (worse once any UCI is punctured
+          # in). Gate on mcs > 20, not mcs > 24, so the requested modulation always
+          # matches the table actually used to pick the TBS.
+          if (${mcs} GREATER 20)
             set(pusch_test_args ${pusch_test_args} -p enable_64qam)
-          endif(${mcs} GREATER 24)
+          endif(${mcs} GREATER 20)
 
           set(pusch_test_args ${pusch_test_args} -m ${mcs})
 

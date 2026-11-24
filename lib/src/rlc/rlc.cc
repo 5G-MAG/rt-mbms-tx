@@ -216,14 +216,13 @@ void rlc::write_sdu(uint32_t lcid, unique_byte_buffer_t sdu)
   }
 }
 
-void rlc::write_sdu_mch(uint32_t lcid, unique_byte_buffer_t sdu)
+void rlc::write_sdu_mch(uint32_t mch_idx, uint32_t lcid, unique_byte_buffer_t sdu)
 {
-  uint32_t mch_idx = 0; // [TODO]
   if (valid_lcid_mrb(mch_idx, lcid)) {
     rlc_array_mrb.at(mch_idx).at(lcid)->write_sdu(std::move(sdu));
-    update_bsr_mch(lcid);
+    update_bsr_mch(mch_idx, lcid);
   } else {
-    logger.warning("RLC LCID %d doesn't exist. Deallocating SDU", lcid);
+    logger.warning("RLC LCID %d (mch_idx %d) doesn't exist. Deallocating SDU", lcid, mch_idx);
   }
 }
 
@@ -317,17 +316,16 @@ uint32_t rlc::read_pdu(uint32_t lcid, uint8_t* payload, uint32_t nof_bytes)
   return ret;
 }
 
-uint32_t rlc::read_pdu_mch(uint32_t lcid, uint8_t* payload, uint32_t nof_bytes)
+uint32_t rlc::read_pdu_mch(uint32_t mch_idx, uint32_t lcid, uint8_t* payload, uint32_t nof_bytes)
 {
   uint32_t ret = 0;
-  uint32_t mch_idx = 0; // [TODO]
 
   rwlock_read_guard lock(rwlock);
   if (valid_lcid_mrb(mch_idx,lcid)) {
     ret = rlc_array_mrb.at(mch_idx).at(lcid)->read_pdu(payload, nof_bytes);
-    update_bsr_mch(lcid);
+    update_bsr_mch(mch_idx, lcid);
   } else {
-    logger.warning("LCID %d doesn't exist.", lcid);
+    logger.warning("LCID %d (mch_idx %d) doesn't exist.", lcid, mch_idx);
   }
 
   srsran_expect(ret <= nof_bytes, "Created too big RLC PDU for MCH (%d > %d)", ret, nof_bytes);
@@ -494,7 +492,26 @@ int rlc::add_bearer_mrb(uint32_t mch_idx, uint32_t lcid)
       logger.error("Error configuring RLC entity.");
       return SRSRAN_ERROR;
     }
-    rlc_entity->set_bsr_callback(bsr_callback);
+    /* Every MRB entity handed the SAME raw bsr_callback would report buffer-state
+     * changes using only its own bare lcid (rlc_um_lte's tx side calls
+     * bsr_callback(parent->get_lcid(), n_bytes, 0) directly) - indistinguishable
+     * from another PMCH's entity at the same bare lcid, since every PMCH numbers
+     * its own MRB sessions starting at 1. Confirmed live: with 2 PMCHs, this let
+     * one PMCH's real queue depth get applied to another PMCH's empty session
+     * downstream in mac::rlc_buffer_state(), corrupting its schedule. Compose
+     * mch_idx into the reported lcid so the receiving end (mac::rlc_buffer_state,
+     * srsenb/src/stack/mac/mac.cc) can tell them apart via decompose_mch_lcid().
+     * This library file is srsran-namespaced and can't include srsenb's
+     * compose_mch_lcid (enb_pdcp_interfaces.h) without an inverted layering
+     * dependency, so the stride is duplicated here - it must stay equal to
+     * srsenb::PMCH_LCID_STRIDE. */
+    constexpr uint32_t MRB_BSR_LCID_STRIDE = 16;
+    rlc_entity->set_bsr_callback(
+        [this, mch_idx](uint32_t lcid, uint32_t tx_queue, uint32_t prio_tx_queue) {
+          if (bsr_callback) {
+            bsr_callback(mch_idx * MRB_BSR_LCID_STRIDE + lcid, tx_queue, prio_tx_queue);
+          }
+        });
     if (not rlc_array_mrb.at(mch_idx).emplace(lcid, std::move(rlc_entity)).second) {
       logger.error("Error inserting RLC entity in to array.");
       return SRSRAN_ERROR;
@@ -646,10 +663,23 @@ void rlc::update_bsr(uint32_t lcid)
   }
 }
 
-void rlc::update_bsr_mch(uint32_t lcid)
+void rlc::update_bsr_mch(uint32_t mch_idx, uint32_t lcid)
 {
   if (bsr_callback) {
-    uint32_t tx_queue = get_total_mch_buffer_state(lcid);
+    /* tx_queue itself is unused here -- the actual notification is a side
+     * effect of the get_buffer_state() call inside
+     * get_total_mch_buffer_state(): rlc_um_lte_tx::get_buffer_state()
+     * invokes bsr_callback directly whenever it's called (see
+     * rlc_um_lte.cc), so querying the right entity's buffer state IS the
+     * notification. This used to default mch_idx to 0 (the parameter
+     * didn't exist; get_total_mch_buffer_state's own mch_idx defaulted to
+     * 0), so writing to any PMCH other than 0 silently queried and
+     * notified for PMCH0's entity instead of its own - invisible for
+     * PMCH0 itself (0 == 0), but meant every other PMCH's bsr_callback
+     * was simply never triggered, confirmed live: PMCH1 real content
+     * never reached MAC's buffer-size tracking at all despite otherwise-
+     * correct GTPU/PDCP/RLC-write routing. */
+    uint32_t tx_queue = get_total_mch_buffer_state(lcid, mch_idx);
   }
 }
 

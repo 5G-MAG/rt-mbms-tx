@@ -335,10 +335,14 @@ enb_ctx_t* s1ap::find_enb_ctx(uint16_t enb_id)
 void s1ap::delete_enb_ctx(int32_t assoc_id)
 {
   std::map<int32_t, uint16_t>::iterator it_assoc = m_sctp_to_enb_id.find(assoc_id);
-  uint16_t                              enb_id   = it_assoc->second;
+  if (it_assoc == m_sctp_to_enb_id.end()) {
+    m_logger.error("Could not find eNB to delete. Association: %d", assoc_id);
+    return;
+  }
+  uint16_t enb_id = it_assoc->second;
 
   std::map<uint16_t, enb_ctx_t*>::iterator it_ctx = m_active_enbs.find(enb_id);
-  if (it_ctx == m_active_enbs.end() || it_assoc == m_sctp_to_enb_id.end()) {
+  if (it_ctx == m_active_enbs.end()) {
     m_logger.error("Could not find eNB to delete. Association: %d", assoc_id);
     return;
   }

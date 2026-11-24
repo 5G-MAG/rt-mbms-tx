@@ -2776,6 +2776,27 @@ const char* mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_opts::to_number_st
   return convert_enum_idx(options, 2, value, "mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_e_");
 }
 
+SRSASN_CODE mbsfn_area_info_r16_s::pack(bit_ref& bref) const
+{
+  bref.pack(ext, 1);
+  HANDLE_CODE(bref.pack(time_separation_r16_present, 1));
+  HANDLE_CODE(pack_integer(bref, mbsfn_area_id_r16, (uint16_t)0u, (uint16_t)255u));
+  HANDLE_CODE(pack_integer(bref, notif_ind_r16, (uint8_t)0u, (uint8_t)7u));
+  HANDLE_CODE(mcch_cfg_r16.mcch_repeat_period_r16.pack(bref));
+  HANDLE_CODE(mcch_cfg_r16.mcch_mod_period_r16.pack(bref));
+  HANDLE_CODE(pack_integer(bref, mcch_cfg_r16.mcch_offset_r16, (uint8_t)0u, (uint8_t)10u));
+  HANDLE_CODE(mcch_cfg_r16.sf_alloc_info_r16.pack(bref));
+  HANDLE_CODE(mcch_cfg_r16.sig_mcs_r16.pack(bref));
+  HANDLE_CODE(subcarrier_spacing_mbms_r16.pack(bref));
+  if (time_separation_r16_present) {
+    HANDLE_CODE(time_separation_r16.pack(bref));
+  }
+
+  // No ext-group logic here: MBSFN-AreaInfo-r16 has no defined extension groups of its own
+  // (its "..." is bare as of V19.3.0) -- pmch-Bandwidth-r17 belongs to the separate
+  // MBSFN-AreaInfo-r17 wrapper, not to this type's extension.
+  return SRSASN_SUCCESS;
+}
 SRSASN_CODE mbsfn_area_info_r16_s::unpack(cbit_ref& bref)
 {
   bref.unpack(ext, 1);
@@ -2793,17 +2814,10 @@ SRSASN_CODE mbsfn_area_info_r16_s::unpack(cbit_ref& bref)
   }
 
   if (ext) {
-    ext_groups_unpacker_guard group_flags(1);
+    // No known extension groups yet; still consume (and skip) whatever a future/foreign
+    // encoder may have put on the wire so any outer SEQUENCE stays bit-aligned.
+    ext_groups_unpacker_guard group_flags(0);
     group_flags.unpack(bref);
-
-    if (group_flags[0]) {
-      varlength_field_unpack_guard varlen_scope(bref, false);
-
-      HANDLE_CODE(bref.unpack(pmch_bandwidth_v16xy_present, 1));
-      if (pmch_bandwidth_v16xy_present) {
-        HANDLE_CODE(pmch_bandwidth_v16xy.unpack(bref));
-      }
-    }
   }
   return SRSASN_SUCCESS;
 }
@@ -2822,13 +2836,8 @@ void mbsfn_area_info_r16_s::to_json(json_writer& j) const
   j.write_str("signallingMCS-r16", mcch_cfg_r16.sig_mcs_r16.to_string());
   j.end_obj();
   j.write_str("subcarrierSpacingMBMS-r16", subcarrier_spacing_mbms_r16.to_string());
-  if (ext) {
-    if (time_separation_r16_present) {
-      j.write_str("timeSeparation-r16", time_separation_r16.to_string());
-    }
-    if (pmch_bandwidth_v16xy_present) {
-      j.write_str("pmch-Bandwidth-v16xy", pmch_bandwidth_v16xy.to_string());
-    }
+  if (time_separation_r16_present) {
+    j.write_str("timeSeparation-r16", time_separation_r16.to_string());
   }
   j.end_obj();
 }
@@ -2872,13 +2881,13 @@ uint8_t mbsfn_area_info_r16_s::mcch_cfg_r16_s_::sig_mcs_r16_opts::to_number() co
 
 std::string mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_opts::to_string() const
 {
-  static const char* options[] = {"khz7dot5", "khz2dot5", "khz1dot25", "khz0dot37", "spare4", "spare3", "spare2", "spare1"};
+  static const char* options[] = {"khz7dot5", "khz2dot5", "khz1dot25", "khz0dot37", "khz15", "spare3", "spare2", "spare1"};
   return convert_enum_idx(options, 8, value, "mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_e_");
 }
 float mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_opts::to_number() const
 {
-  static const float options[] = {7.5, 2.5, 1.25, 0.37};
-  return map_enum_number(options, 4, value, "mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_e_");
+  static const float options[] = {7.5, 2.5, 1.25, 0.37, 15};
+  return map_enum_number(options, 5, value, "mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_e_");
 }
 std::string mbsfn_area_info_r16_s::subcarrier_spacing_mbms_r16_opts::to_number_string() const
 {
@@ -2897,15 +2906,46 @@ uint8_t mbsfn_area_info_r16_s::time_separation_r16_opts::to_number() const
   return map_enum_number(options, 2, value, "mbsfn_area_info_r16_s::time_separation_r16_opts");
 }
 
-std::string mbsfn_area_info_r16_s::pmch_bandwidth_v16xy_opts::to_string() const
+// MBSFN-AreaInfo-r17 ::= SEQUENCE
+SRSASN_CODE mbsfn_area_info_r17_s::pack(bit_ref& bref) const
 {
-  static const char* options[] = {"n30", "n35", "n40", "spare1"};
-  return convert_enum_idx(options, 4, value, "mbsfn_area_info_r16_s::pmch_bandwidth_v16xy_opts");
+  bref.pack(ext, 1);
+  HANDLE_CODE(mbsfn_area_info_r17.pack(bref));
+  HANDLE_CODE(pmch_bandwidth_r17.pack(bref));
+
+  // No ext-group logic: MBSFN-AreaInfo-r17's own "..." has no defined groups as of V19.3.0.
+  return SRSASN_SUCCESS;
 }
-uint8_t mbsfn_area_info_r16_s::pmch_bandwidth_v16xy_opts::to_number() const
+SRSASN_CODE mbsfn_area_info_r17_s::unpack(cbit_ref& bref)
 {
-  static const uint8_t options[] = {30, 35, 40};
-  return map_enum_number(options, 3, value, "mbsfn_area_info_r16_s::pmch_bandwidth_v16xy_opts");
+  bref.unpack(ext, 1);
+  HANDLE_CODE(mbsfn_area_info_r17.unpack(bref));
+  HANDLE_CODE(pmch_bandwidth_r17.unpack(bref));
+
+  if (ext) {
+    ext_groups_unpacker_guard group_flags(0);
+    group_flags.unpack(bref);
+  }
+  return SRSASN_SUCCESS;
+}
+void mbsfn_area_info_r17_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  j.write_fieldname("mbsfn-AreaInfo-r17");
+  mbsfn_area_info_r17.to_json(j);
+  j.write_str("pmch-Bandwidth-r17", pmch_bandwidth_r17.to_string());
+  j.end_obj();
+}
+
+std::string mbsfn_area_info_r17_s::pmch_bandwidth_r17_opts::to_string() const
+{
+  static const char* options[] = {"n40", "n35", "n30", "spare1"};
+  return convert_enum_idx(options, 4, value, "mbsfn_area_info_r17_s::pmch_bandwidth_r17_opts");
+}
+uint8_t mbsfn_area_info_r17_s::pmch_bandwidth_r17_opts::to_number() const
+{
+  static const uint8_t options[] = {40, 35, 30};
+  return map_enum_number(options, 3, value, "mbsfn_area_info_r17_s::pmch_bandwidth_r17_opts");
 }
 
 
@@ -4633,6 +4673,63 @@ const char* sib_type12_r9_s::warning_msg_segment_type_r9_opts::to_string() const
   return convert_enum_idx(options, 2, value, "sib_type12_r9_s::warning_msg_segment_type_r9_e_");
 }
 
+// MBMS-ROM-FreqInfo-r16 ::= SEQUENCE
+SRSASN_CODE mbms_rom_info_r16_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(subcarrier_spacing_r16_present, 1));
+  HANDLE_CODE(pack_integer(bref, rom_freq_r16, (uint32_t)0u, (uint32_t)262143u));
+  if (subcarrier_spacing_r16_present) {
+    HANDLE_CODE(subcarrier_spacing_r16.pack(bref));
+  }
+  HANDLE_CODE(bw_r16.pack(bref));
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_rom_info_r16_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(subcarrier_spacing_r16_present, 1));
+  HANDLE_CODE(unpack_integer(rom_freq_r16, bref, (uint32_t)0u, (uint32_t)262143u));
+  if (subcarrier_spacing_r16_present) {
+    HANDLE_CODE(subcarrier_spacing_r16.unpack(bref));
+  }
+  HANDLE_CODE(bw_r16.unpack(bref));
+  return SRSASN_SUCCESS;
+}
+void mbms_rom_info_r16_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  j.write_int("mbms-ROM-Freq-r16", rom_freq_r16);
+  if (subcarrier_spacing_r16_present) {
+    j.write_str("subcarrierSpacing-r16", subcarrier_spacing_r16.to_string());
+  }
+  j.write_str("bw-r16", bw_r16.to_string());
+  j.end_obj();
+}
+const char* mbms_rom_info_r16_s::subcarrier_spacing_r16_opts::to_string() const
+{
+  static const char* options[] = {"khz15", "khz7dot5", "khz1dot25"};
+  return convert_enum_idx(options, 3, value, "mbms_rom_info_r16_s::subcarrier_spacing_r16_e_");
+}
+float mbms_rom_info_r16_s::subcarrier_spacing_r16_opts::to_number() const
+{
+  static const float options[] = {15.0, 7.5, 1.25};
+  return map_enum_number(options, 3, value, "mbms_rom_info_r16_s::subcarrier_spacing_r16_e_");
+}
+const char* mbms_rom_info_r16_s::subcarrier_spacing_r16_opts::to_number_string() const
+{
+  static const char* options[] = {"15", "7.5", "1.25"};
+  return convert_enum_idx(options, 3, value, "mbms_rom_info_r16_s::subcarrier_spacing_r16_e_");
+}
+const char* mbms_rom_info_r16_s::bw_r16_opts::to_string() const
+{
+  static const char* options[] = {"n6", "n15", "n25", "n50", "n75", "n100"};
+  return convert_enum_idx(options, 6, value, "mbms_rom_info_r16_s::bw_r16_e_");
+}
+uint8_t mbms_rom_info_r16_s::bw_r16_opts::to_number() const
+{
+  static const uint8_t options[] = {6, 15, 25, 50, 75, 100};
+  return map_enum_number(options, 6, value, "mbms_rom_info_r16_s::bw_r16_e_");
+}
+
 // SystemInformationBlockType13-r9 ::= SEQUENCE
 SRSASN_CODE sib_type13_r9_s::pack(bit_ref& bref) const
 {
@@ -4648,6 +4745,8 @@ SRSASN_CODE sib_type13_r9_s::pack(bit_ref& bref) const
   if (ext) {
     ext_groups_packer_guard group_flags;
     group_flags[0] |= notif_cfg_v1430.is_present();
+    group_flags[1] |= mbsfn_area_info_list_r16_present;
+    group_flags[2] |= mbsfn_area_info_list_r17_present;
     group_flags.pack(bref);
 
     if (group_flags[0]) {
@@ -4656,6 +4755,20 @@ SRSASN_CODE sib_type13_r9_s::pack(bit_ref& bref) const
       HANDLE_CODE(bref.pack(notif_cfg_v1430.is_present(), 1));
       if (notif_cfg_v1430.is_present()) {
         HANDLE_CODE(notif_cfg_v1430->pack(bref));
+      }
+    }
+    if (group_flags[1]) {
+      varlength_field_pack_guard varlen_scope(bref, false);
+      HANDLE_CODE(bref.pack(mbsfn_area_info_list_r16_present, 1));
+      if (mbsfn_area_info_list_r16_present) {
+        HANDLE_CODE(pack_dyn_seq_of(bref, mbsfn_area_info_list_r16, 1, 8));
+      }
+    }
+    if (group_flags[2]) {
+      varlength_field_pack_guard varlen_scope(bref, false);
+      HANDLE_CODE(bref.pack(mbsfn_area_info_list_r17_present, 1));
+      if (mbsfn_area_info_list_r17_present) {
+        HANDLE_CODE(pack_dyn_seq_of(bref, mbsfn_area_info_list_r17, 1, 8));
       }
     }
   }
@@ -4673,7 +4786,7 @@ SRSASN_CODE sib_type13_r9_s::unpack(cbit_ref& bref)
   }
 
   if (ext) {
-    ext_groups_unpacker_guard group_flags(1);
+    ext_groups_unpacker_guard group_flags(3);  /* group 0 (v1430), group 1 (r16), group 2 (r17) */
     group_flags.unpack(bref);
 
     if (group_flags[0]) {
@@ -4692,6 +4805,14 @@ SRSASN_CODE sib_type13_r9_s::unpack(cbit_ref& bref)
       HANDLE_CODE(bref.unpack(mbsfn_area_info_list_r16_present, 1));
       if (mbsfn_area_info_list_r16_present) {
         HANDLE_CODE(unpack_dyn_seq_of(mbsfn_area_info_list_r16, bref, 1, 8));
+      }
+    }
+
+    if (group_flags[2]) {
+      varlength_field_unpack_guard varlen_scope(bref, false);
+      HANDLE_CODE(bref.unpack(mbsfn_area_info_list_r17_present, 1));
+      if (mbsfn_area_info_list_r17_present) {
+        HANDLE_CODE(unpack_dyn_seq_of(mbsfn_area_info_list_r17, bref, 1, 8));
       }
     }
   }
@@ -4718,6 +4839,13 @@ void sib_type13_r9_s::to_json(json_writer& j) const
     if (mbsfn_area_info_list_r16_present) {
       j.start_array("mbsfn-AreaInfoList-r16");
       for (const auto& e1 : mbsfn_area_info_list_r16) {
+        e1.to_json(j);
+      }
+      j.end_array();
+    }
+    if (mbsfn_area_info_list_r17_present) {
+      j.start_array("mbsfn-AreaInfoList-r17");
+      for (const auto& e1 : mbsfn_area_info_list_r17) {
         e1.to_json(j);
       }
       j.end_array();
@@ -10337,6 +10465,44 @@ uint16_t non_mbsfn_sf_cfg_r14_s::radio_frame_alloc_period_r14_opts::to_number() 
 }
 
 // SystemInformationBlockType1-MBMS-r14 ::= SEQUENCE
+// sib_type1_mbms_v1900_s — Rel-19 CAS muting extension
+SRSASN_CODE sib_type1_mbms_v1900_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(0, 1));  // no further extension
+  HANDLE_CODE(bref.pack(cas_muting_cfg_r19_present, 1));
+  HANDLE_CODE(bref.pack(0, 1));  // nonCriticalExtension not present
+  if (cas_muting_cfg_r19_present) {
+    HANDLE_CODE(pack_integer(bref, cas_muting_cfg_r19.k_cas_r19, (uint8_t)4u, (uint8_t)63u));
+    HANDLE_CODE(cas_muting_cfg_r19.n_cas_r19.pack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE sib_type1_mbms_v1900_s::unpack(cbit_ref& bref)
+{
+  bool ext;
+  HANDLE_CODE(bref.unpack(ext, 1));
+  HANDLE_CODE(bref.unpack(cas_muting_cfg_r19_present, 1));
+  bool nce_present;
+  HANDLE_CODE(bref.unpack(nce_present, 1));
+  if (cas_muting_cfg_r19_present) {
+    HANDLE_CODE(unpack_integer(cas_muting_cfg_r19.k_cas_r19, bref, (uint8_t)4u, (uint8_t)63u));
+    HANDLE_CODE(cas_muting_cfg_r19.n_cas_r19.unpack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+void sib_type1_mbms_v1900_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (cas_muting_cfg_r19_present) {
+    j.write_fieldname("cas-MutingConfig-r19");
+    j.start_obj();
+    j.write_int("k-CAS-r19", cas_muting_cfg_r19.k_cas_r19);
+    j.write_str("n-CAS-r19", cas_muting_cfg_r19.n_cas_r19.to_string());
+    j.end_obj();
+  }
+  j.end_obj();
+}
+
 SRSASN_CODE sib_type1_mbms_r14_s::pack(bit_ref& bref) const
 {
   HANDLE_CODE(bref.pack(multi_band_info_list_r14_present, 1));
@@ -10364,6 +10530,9 @@ SRSASN_CODE sib_type1_mbms_r14_s::pack(bit_ref& bref) const
   }
   if (cell_access_related_info_list_r14_present) {
     HANDLE_CODE(pack_dyn_seq_of(bref, cell_access_related_info_list_r14, 1, 5));
+  }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.pack(bref));
   }
 
   return SRSASN_SUCCESS;
@@ -10395,6 +10564,9 @@ SRSASN_CODE sib_type1_mbms_r14_s::unpack(cbit_ref& bref)
   }
   if (cell_access_related_info_list_r14_present) {
     HANDLE_CODE(unpack_dyn_seq_of(cell_access_related_info_list_r14, bref, 1, 5));
+  }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.unpack(bref));
   }
 
   return SRSASN_SUCCESS;
@@ -10461,6 +10633,17 @@ uint8_t sib_type1_mbms_r14_s::si_win_len_r14_opts::to_number() const
 {
   static const uint8_t options[] = {1, 2, 5, 10, 15, 20, 40, 80};
   return map_enum_number(options, 8, value, "sib_type1_mbms_r14_s::si_win_len_r14_e_");
+}
+
+const char* sib_type1_mbms_v1900_s::n_cas_r19_opts::to_string() const
+{
+  static const char* options[] = {"n2", "n4", "n8", "n16"};
+  return convert_enum_idx(options, 4, value, "sib_type1_mbms_v1900_s::n_cas_r19_e_");
+}
+uint8_t sib_type1_mbms_v1900_s::n_cas_r19_opts::to_number() const
+{
+  static const uint8_t options[] = {2, 4, 8, 16};
+  return map_enum_number(options, 4, value, "sib_type1_mbms_v1900_s::n_cas_r19_e_");
 }
 
 // CarrierFreqInfoUTRA-FDD-v8h0 ::= SEQUENCE

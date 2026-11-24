@@ -22,7 +22,9 @@
 #ifndef SRSRAN_GTPC_IES_H
 #define SRSRAN_GTPC_IES_H
 
+#include "srsran/common/byte_buffer.h"
 #include "srsran/phy/io/netsource.h"
+#include <vector>
 
 namespace srsran {
 
@@ -131,13 +133,48 @@ enum gtpc_ie_type {
   GTPC_IE_TYPE_ADDITIONAL_MM_CONTEXT_FOR_SRVCC  = 159,
   GTPC_IE_TYPE_ADDITIONAL_FLAGS_FOR_SRVCC       = 160,
   // 161 RESERVED
-  GTPC_IE_TYPE_MDT_CONFIGURATION = 162,
-  GTPC_IE_TYPE_APCO              = 163,
-  // 164 RESERVED
-  GTPC_IE_TYPE_CHANGE_TO_REPORT_FLAGS = 165,
-  // 168 TO 254 SPARE. FOR FUTURE USE.
+  GTPC_IE_TYPE_MDT_CONFIGURATION                     = 162,
+  GTPC_IE_TYPE_APCO                                  = 163,
+  GTPC_IE_TYPE_ABSOLUTE_TIME_OF_MBMS_DATA_TRANSFER   = 164, // TS 29.274 v19.6.0 clause 8.95
+  GTPC_IE_TYPE_CHANGE_TO_REPORT_FLAGS                = 165,
+  // 166-167 SPARE
+  // 168 SPARE (Deprecated: was Global MBMS Bearer Service Identifier / superseded by v19.6.0)
+  // 169-170 SPARE
+  GTPC_IE_TYPE_MBMS_FLAGS = 171, // TS 29.274 v19.6.0 clause 8.102
+  // 172-189 SPARE. FOR FUTURE USE.
+  GTPC_IE_TYPE_ECGI_LIST = 190, // TS 29.274 v19.6.0 clause 8.121
+  // 191-254 SPARE. FOR FUTURE USE.
   GTPC_IE_TYPE_PRIVATE_EXTENSION = 255
 };
+
+/****************************************************************************
+ *
+ * GTP-C IE Header (TLIV: Type, Length, Instance, Value)
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.1/8.2
+ *
+ * Every IE is: 1 octet Type, 2 octets Length (of the Value field only),
+ * 1 octet (4 spare bits + 4-bit Instance), then Length octets of Value.
+ *
+ ***************************************************************************/
+struct gtpc_ie_header_t {
+  uint8_t  type;
+  uint16_t length;
+  uint8_t  instance; // low 4 bits significant, high 4 bits spare
+};
+
+/**
+ * Packs a 4-octet IE header (Type + Length + spare/Instance) into pdu.
+ */
+int gtpc_ie_header_pack(const gtpc_ie_header_t& ie_header, srsran::byte_buffer_t* pdu);
+
+/**
+ * Unpacks a 4-octet IE header from ptr. remaining is the number of valid
+ * octets available at ptr; returns SRSRAN_ERROR if fewer than 4 are
+ * available. Does not validate that `length` octets of Value actually
+ * follow -- callers must check that themselves against their own remaining
+ * count before reading the Value.
+ */
+int gtpc_ie_header_unpack(const uint8_t* ptr, uint32_t remaining, gtpc_ie_header_t* ie_header);
 
 /****************************************************************
  *
@@ -237,10 +274,21 @@ struct gtpc_cause_ie {
   bool                  pce;
   bool                  bce;
   bool                  cs;
+  bool                  offending_ie_present; // selects the 10-octet (n=6) vs 6-octet (n=2) wire form
   enum gtpc_ie_type     offending_ie_type;
-  uint16_t              length_of_offending_ie;
+  uint16_t              length_of_offending_ie; // per clause 8.4, always packed as 0 when offending_ie_present
   uint8_t               offending_ie_instance;
 };
+
+/**
+ * Packs a Cause IE. If cause.length_of_offending_ie != 0 (or offending_ie_type
+ * is otherwise meaningfully set), the 4-octet offending-IE block is included
+ * (n=6, 10 octets total); otherwise the short form is used (n=2, 6 octets
+ * total), per clause 8.4's two valid lengths. Per clause 8.4, when the
+ * offending-IE block is present, its own Length field is always written as 0.
+ */
+int gtpc_pack_cause_ie(const gtpc_cause_ie& cause, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_cause_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_cause_ie* cause);
 
 /****************************************************************************
  *
@@ -251,6 +299,8 @@ struct gtpc_cause_ie {
 /*
  * The Recovery (Restart Counter) IE should be kept as an uint8_t.
  */
+int gtpc_pack_recovery_ie(uint8_t restart_counter, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_recovery_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, uint8_t* restart_counter);
 
 /****************************************************************************
  *
@@ -319,7 +369,15 @@ struct gtpc_pdn_address_allocation_ie {
 /****************************************************************************
  *
  * GTP-C Bearer Quality of Service IE
- * Ref: 3GPP TS 29.274 v10.14.0 Figure 8.15-1
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.15, Figure 8.15-1
+ *
+ * NOTE: prior to this revision, mbr_ul/mbr_dl/gbr_ul/gbr_dl were uint8_t --
+ * incorrect against the spec, which gives each of these 4 fields 5 octets
+ * (40 bits) on the wire (kbps, binary value). uint8_t cannot represent a
+ * real bit rate. Widened to uint64_t (40 bits fits) since nothing in this
+ * codebase currently packs/unpacks this struct (no working Create Session
+ * Request/Response serialization exists yet), so this is a safe fix, not a
+ * behavior change to anything working today.
  *
  ***************************************************************************/
 struct gtpc_bearer_qos_ie {
@@ -330,12 +388,20 @@ struct gtpc_bearer_qos_ie {
     uint8_t pci : 1;
     uint8_t spare2 : 1;
   } arp;
-  uint8_t qci;
-  uint8_t mbr_ul;
-  uint8_t mbr_dl;
-  uint8_t gbr_ul;
-  uint8_t gbr_dl;
+  uint8_t  qci;
+  uint64_t mbr_ul; // 40 bits significant (5 octets on the wire)
+  uint64_t mbr_dl; // 40 bits significant
+  uint64_t gbr_ul; // 40 bits significant
+  uint64_t gbr_dl; // 40 bits significant
 };
+
+/**
+ * Packs/unpacks a Bearer QoS IE (26 octets: 4-octet IE header + 1 ARP octet +
+ * 1 QCI octet + 4x5-octet rate fields). mbr_ul/mbr_dl/gbr_ul/gbr_dl are
+ * written/read as the low 40 bits only, big-endian.
+ */
+int gtpc_pack_bearer_qos_ie(const gtpc_bearer_qos_ie& qos, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_bearer_qos_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_bearer_qos_ie* qos);
 
 // TODO
 // TODO IEs between 8.16 and 8.17 missing
@@ -408,6 +474,19 @@ typedef struct gtpc_f_teid_ie {
   struct in6_addr          ipv6; // TODO
 } gtp_fteid_t;
 
+/**
+ * Packs/unpacks an F-TEID IE. Confirmed against TS 29.274 v19.6.0 clause 8.22:
+ * octet 5 = V4(bit8)|V6(bit7)|Interface Type(bits6-1); octets 6-9 = TEID/GRE
+ * key; then IPv4 (4 octets) if V4 set, then IPv6 (16 octets) if V6 set. The
+ * gtpc_interface_type enum's implicit ordinal values were verified to match
+ * the spec's numeric Interface Type codes exactly (e.g. SM_MBMS_GW_GTP_C_INTERFACE
+ * = 24, SN_MBMS_GW_GTP_C_INTERFACE = 25, SM_MME_GTP_C_INTERFACE = 26, matching
+ * Table 8.22 verbatim), so the enum value can be cast directly to the 6-bit
+ * wire field.
+ */
+int gtpc_pack_f_teid_ie(const gtpc_f_teid_ie& fteid, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_f_teid_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_f_teid_ie* fteid);
+
 // TODO
 // TODO IEs between 8.22 and 8.28 missing
 // TODO
@@ -421,6 +500,260 @@ typedef struct gtpc_f_teid_ie {
 // The usage of this grouped IE is specific to the GTP-C message being sent.
 // As such, each GTP-C message will define it's bearer context structures
 // locally, according to the rules of  TS 29.274 v10.14.0 Section 7.
+
+/****************************************************************************
+ *
+ * GTP-C generic opaque IE
+ *
+ * Used for IEs whose internal Value-field layout is not available to this
+ * codebase from primary source. As of this revision the only remaining
+ * user is Private Extension (no clause text obtained at all) -- MBMS Time
+ * to Data Transfer was resolved via TS 48.018 (see below) and no longer
+ * needs this. The raw bytes are stored/forwarded verbatim, never
+ * interpreted. std::vector (not a fixed-size array) avoids picking an
+ * arbitrary bound before the real format is known.
+ *
+ ***************************************************************************/
+struct gtpc_opaque_ie {
+  std::vector<uint8_t> value;
+};
+
+/****************************************************************************
+ *
+ * GTP-C Private Extension IE
+ * Ref: 3GPP TS 29.274 -- no clause-8.x text available to this codebase.
+ * Treated as fully opaque (type + length + instance + raw value bytes);
+ * do NOT assume the commonly-known Enterprise-ID+Value split without the
+ * actual clause text.
+ *
+ ***************************************************************************/
+int gtpc_pack_private_extension_ie(const gtpc_opaque_ie& ext, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_private_extension_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_opaque_ie* ext);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Session Duration IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.69 (envelope) + TS 29.061 v20.0.0
+ * clause 17.7.7 / AVP 904 (internal 3-octet seconds+days encoding, obtained
+ * after the initial design and confirmed to fully resolve this IE).
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_duration_ie {
+  // Total duration in seconds, 0-1641600 (19 days). 0 is the spec's own
+  // reserved value meaning "indefinite / always-on".
+  uint32_t duration_sec;
+};
+int gtpc_pack_mbms_session_duration_ie(const gtpc_mbms_session_duration_ie& dur,
+                                        uint8_t                              instance,
+                                        srsran::byte_buffer_t*               pdu);
+int gtpc_unpack_mbms_session_duration_ie(const uint8_t*                  ptr,
+                                          const gtpc_ie_header_t&         ie_header,
+                                          gtpc_mbms_session_duration_ie*  dur);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Service Area IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.70 (envelope) + TS 29.061 v20.0.0
+ * clause 17.7.6 / AVP 903 (internal count+list encoding, obtained after the
+ * initial design and confirmed to fully resolve this IE).
+ *
+ ***************************************************************************/
+struct gtpc_mbms_service_area_ie {
+  // Each code is an opaque 16-bit MBMS Service Area Identity (TS 23.003
+  // clause 15.3 defines the geographic meaning; not needed by this codec).
+  std::vector<uint16_t> sai_codes;
+};
+int gtpc_pack_mbms_service_area_ie(const gtpc_mbms_service_area_ie& area,
+                                    uint8_t                          instance,
+                                    srsran::byte_buffer_t*           pdu);
+int gtpc_unpack_mbms_service_area_ie(const uint8_t*              ptr,
+                                      const gtpc_ie_header_t&     ie_header,
+                                      gtpc_mbms_service_area_ie* area);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Session Identifier IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.71 -- opaque 1-octet value allocated
+ * by the BM-SC (fully positioned on the wire; only its semantic allowed-value
+ * range is deferred to TS 29.061, which does not affect wire encoding).
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_id_ie {
+  uint8_t session_id;
+};
+int gtpc_pack_mbms_session_id_ie(const gtpc_mbms_session_id_ie& id, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_id_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_mbms_session_id_ie* id);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Flow Identifier IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.72 -- opaque 2-octet value.
+ *
+ ***************************************************************************/
+struct gtpc_mbms_flow_id_ie {
+  uint16_t flow_id;
+};
+int gtpc_pack_mbms_flow_id_ie(const gtpc_mbms_flow_id_ie& flow, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_flow_id_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_mbms_flow_id_ie* flow);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS IP Multicast Distribution IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.73, Figure 8.73-1
+ *
+ ***************************************************************************/
+enum gtpc_mbms_hc_indicator { GTPC_MBMS_HC_UNCOMPRESSED = 0, GTPC_MBMS_HC_COMPRESSED = 1 };
+
+struct gtpc_mbms_ip_mc_distrib_ie {
+  uint32_t                   c_teid;
+  bool                       dist_addr_is_ipv6; // false = IPv4 (4 octets), true = IPv6 (16 octets)
+  in_addr_t                  dist_addr_ipv4;
+  struct in6_addr            dist_addr_ipv6;
+  bool                       source_addr_is_ipv6;
+  in_addr_t                  source_addr_ipv4;
+  struct in6_addr            source_addr_ipv6;
+  enum gtpc_mbms_hc_indicator hc_indicator;
+};
+int gtpc_pack_mbms_ip_mc_distrib_ie(const gtpc_mbms_ip_mc_distrib_ie& distrib,
+                                     uint8_t                          instance,
+                                     srsran::byte_buffer_t*           pdu);
+int gtpc_unpack_mbms_ip_mc_distrib_ie(const uint8_t*               ptr,
+                                       const gtpc_ie_header_t&      ie_header,
+                                       gtpc_mbms_ip_mc_distrib_ie* distrib);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Distribution Acknowledge IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.74, Figure 8.74-1 -- Sn-interface
+ * only per the Sm/Sn message tables, included here for union/catalog
+ * symmetry; never populated on the Sm send path in this codebase.
+ *
+ ***************************************************************************/
+enum gtpc_mbms_distribution_indication {
+  GTPC_MBMS_DISTR_NONE = 0,
+  GTPC_MBMS_DISTR_ALL  = 1,
+  GTPC_MBMS_DISTR_SOME = 2
+};
+struct gtpc_mbms_distribution_ack_ie {
+  enum gtpc_mbms_distribution_indication distr_ind;
+};
+int gtpc_pack_mbms_distribution_ack_ie(const gtpc_mbms_distribution_ack_ie& ack,
+                                        uint8_t                              instance,
+                                        srsran::byte_buffer_t*               pdu);
+int gtpc_unpack_mbms_distribution_ack_ie(const uint8_t*                  ptr,
+                                          const gtpc_ie_header_t&         ie_header,
+                                          gtpc_mbms_distribution_ack_ie*  ack);
+
+/****************************************************************************
+ *
+ * GTP-C TMGI IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.89, Figure 8.89-1
+ *
+ * mcc_bcd/mnc_bcd use this codebase's existing bcd_helpers.h BCD
+ * representation (e.g. produced by string_to_mcc()/string_to_mnc()), NOT a
+ * plmn_id_t class (no such class exists in bcd_helpers.h -- verified by
+ * reading the actual file, correcting an unverified assumption from the
+ * initial design). mbms_service_id is stored as uint32_t for convenience but
+ * is exactly 3 wire octets (octets 8-10 of the 6-octet TMGI value) -- pack
+ * writes only the low 3 bytes, unpack zero-extends into the top byte.
+ *
+ ***************************************************************************/
+struct gtpc_tmgi_ie {
+  uint16_t mcc_bcd;
+  uint16_t mnc_bcd;
+  uint32_t mbms_service_id; // low 24 bits significant
+};
+int gtpc_pack_tmgi_ie(const gtpc_tmgi_ie& tmgi, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_tmgi_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_tmgi_ie* tmgi);
+
+/****************************************************************************
+ *
+ * GTP-C Absolute Time of MBMS Data Transfer IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.95, Figure 8.95-1 -- standard NTP-64
+ * timestamp (32-bit seconds since 1900-01-01, 32-bit fraction, granularity
+ * 1/2^32 s).
+ *
+ ***************************************************************************/
+struct gtpc_abs_time_mbms_data_transfer_ie {
+  uint32_t ntp_seconds;
+  uint32_t ntp_fraction;
+};
+int gtpc_pack_abs_time_mbms_data_transfer_ie(const gtpc_abs_time_mbms_data_transfer_ie& t,
+                                              uint8_t                                    instance,
+                                              srsran::byte_buffer_t*                     pdu);
+int gtpc_unpack_abs_time_mbms_data_transfer_ie(const uint8_t*                        ptr,
+                                                const gtpc_ie_header_t&               ie_header,
+                                                gtpc_abs_time_mbms_data_transfer_ie* t);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Flags IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.102, Figure 8.102-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_flags_ie {
+  bool msri; // MBMS Session Re-establishment Indication (bit 1)
+  bool lmri; // Local MBMS Bearer Context Release Indication (bit 2)
+};
+int gtpc_pack_mbms_flags_ie(const gtpc_mbms_flags_ie& flags, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_flags_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_mbms_flags_ie* flags);
+
+/****************************************************************************
+ *
+ * GTP-C MBMS Time to Data Transfer IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.x (envelope: confirmed exactly 1
+ * octet by TS 29.061 clause 17.7.14) + TS 48.018 v17.0.0 clause 11.3.92 /
+ * Table 11.3.92.b (internal value-part coding, obtained after the initial
+ * design and confirmed to fully resolve this IE -- the last one that had
+ * been left opaque).
+ *
+ * Table 11.3.92.b's coding is a plain linear count: raw octet value N
+ * (0-255) represents (N+1) seconds, i.e. 0x00=1s, 0x01=2s, ..., 0xFF=256s.
+ *
+ ***************************************************************************/
+struct gtpc_mbms_time_to_data_transfer_ie {
+  // Seconds between the Session Start/Update Request and the actual start
+  // of data transfer, 1-256 inclusive (TS 48.018 Table 11.3.92.b -- there
+  // is no "0 seconds" or "indefinite" value, unlike MBMS Session Duration).
+  uint32_t seconds;
+};
+int gtpc_pack_mbms_time_to_data_transfer_ie(const gtpc_mbms_time_to_data_transfer_ie& t,
+                                             uint8_t                                   instance,
+                                             srsran::byte_buffer_t*                    pdu);
+int gtpc_unpack_mbms_time_to_data_transfer_ie(const uint8_t*                        ptr,
+                                               const gtpc_ie_header_t&               ie_header,
+                                               gtpc_mbms_time_to_data_transfer_ie*  t);
+
+/****************************************************************************
+ *
+ * GTP-C ECGI field
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.21.5, Figure 8.21.5-1
+ *
+ * Verified directly against clause text (an earlier draft of this codec had
+ * flagged this as an unverified 3GPP-convention inference; the actual clause
+ * confirms it): 7 octets total -- 3-octet PLMN (same swapped-BCD convention
+ * as TMGI, reusing bcd_helpers.h) followed by a 28-bit ECI (E-UTRAN Cell
+ * Identifier): its top 4 bits occupy the low nibble of the 4th octet (with
+ * the high nibble spare), then 3 full octets of the remaining 24 bits.
+ *
+ ***************************************************************************/
+struct gtpc_ecgi_field_t {
+  uint16_t mcc_bcd;
+  uint16_t mnc_bcd;
+  uint32_t eci; // 28 bits significant
+};
+
+/****************************************************************************
+ *
+ * GTP-C ECGI List IE
+ * Ref: 3GPP TS 29.274 v19.6.0 clause 8.121, Figure 8.121-1
+ *
+ ***************************************************************************/
+struct gtpc_ecgi_list_ie {
+  std::vector<gtpc_ecgi_field_t> ecgi_list;
+};
+int gtpc_pack_ecgi_list_ie(const gtpc_ecgi_list_ie& list, uint8_t instance, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_ecgi_list_ie(const uint8_t* ptr, const gtpc_ie_header_t& ie_header, gtpc_ecgi_list_ie* list);
 
 } // namespace srsran
 #endif // SRSRAN_GTPC_IES_H

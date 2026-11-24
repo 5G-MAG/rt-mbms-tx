@@ -63,6 +63,12 @@ target_compile_options(s1ap_asn1 PRIVATE "-Os")
 target_link_libraries(s1ap_asn1 asn1_utils srsran_common)
 INSTALL(TARGETS s1ap_asn1 DESTINATION ${LIBRARY_DIR})
 
+# M3AP ASN1 lib (MME <-> MCE/eNB MBMS session control, TS 36.444)
+add_library(m3ap_asn1 STATIC m3ap.cc)
+target_compile_options(m3ap_asn1 PRIVATE "-Os")
+target_link_libraries(m3ap_asn1 asn1_utils srsran_common)
+INSTALL(TARGETS m3ap_asn1 DESTINATION ${LIBRARY_DIR})
+
 # RRC NR ASN1
 add_library(rrc_nr_asn1 STATIC rrc_nr.cc rrc_nr_utils.cc)
 target_compile_options(rrc_nr_asn1 PRIVATE "-Os")
@@ -78,5 +84,11 @@ add_library(nas_5g_msg STATIC nas_5g_msg.cc nas_5g_ies.cc nas_5g_utils.cc)
 target_compile_options(nas_5g_msg PRIVATE "-Os")
 target_link_libraries(nas_5g_msg asn1_utils srsran_common)
 INSTALL(TARGETS nas_5g_msg DESTINATION ${LIBRARY_DIR})
+
+# SBc-AP ASN1 lib (CBC <-> MME)
+add_library(sbc_ap_asn1 STATIC sbc_ap.cc)
+target_compile_options(sbc_ap_asn1 PRIVATE "-Os")
+target_link_libraries(sbc_ap_asn1 asn1_utils srsran_common)
+INSTALL(TARGETS sbc_ap_asn1 DESTINATION ${LIBRARY_DIR})
 
 

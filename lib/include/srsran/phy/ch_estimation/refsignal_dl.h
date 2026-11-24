@@ -36,8 +36,14 @@
 // Number of references in a subframe: there are 2 symbols for port_id=0,1 x 2 slots x 2 refs per prb
 #define SRSRAN_REFSIGNAL_NUM_SF_MBSFN(nof_prb, scs) ( ( (scs == SRSRAN_SCS_15KHZ ? 2 : 0) + srsran_refsignal_mbsfn_rs_per_rb(scs) ) * (nof_prb))
 
+/* TS 36.211 §6.10.2.1.3-4: 2.5 kHz RS sequences repeat every 40 ms (40 subframes).
+ * 0.37 kHz RS sequences repeat every 40 ms (13 slots of 3 ms each).
+ * The pilot table is sized to the larger of the two periods. */
+#define SRSRAN_MBSFN_NOF_SF_40MS 40
+
 #define SRSRAN_REFSIGNAL_MAX_NUM_SF(nof_prb) (8 * nof_prb)
-#define SRSRAN_REFSIGNAL_MAX_NUM_SF_MBSFN(nof_prb) SRSRAN_REFSIGNAL_NUM_SF_MBSFN(nof_prb, SRSRAN_SCS_1KHZ25)
+/* SL2 (type2, 81 pilots/RB) is the densest MBSFN RS — use it as the allocation upper bound. */
+#define SRSRAN_REFSIGNAL_MAX_NUM_SF_MBSFN(nof_prb) SRSRAN_REFSIGNAL_NUM_SF_MBSFN(nof_prb, SRSRAN_SCS_370HZ_SL2)
 
 #define SRSRAN_REFSIGNAL_PILOT_IDX(i, l, cell) (2 * cell.nof_prb * (l) + (i))
 
@@ -46,7 +52,7 @@
 /** Cell-Specific Reference Signal */
 typedef struct SRSRAN_API {
   srsran_cell_t cell;
-  cf_t*         pilots[2][SRSRAN_NOF_SF_X_FRAME]; // Saves the reference signal per subframe for ports 0,1 and ports 2,3
+  cf_t*         pilots[2][SRSRAN_MBSFN_NOF_SF_40MS]; // Saves the reference signal per subframe for ports 0,1 and ports 2,3
   srsran_sf_t   type;
   uint16_t      mbsfn_area_id;
 } srsran_refsignal_t;
@@ -82,13 +88,13 @@ SRSRAN_API int srsran_refsignal_mbsfn_init(srsran_refsignal_t* q, uint32_t max_p
 
 SRSRAN_API int srsran_refsignal_mbsfn_set_cell(srsran_refsignal_t* q, srsran_cell_t cell, uint16_t mbsfn_area_id, srsran_scs_t scs);
 
-SRSRAN_API int srsran_refsignal_mbsfn_get_sf(srsran_cell_t cell, uint32_t port_id, cf_t* sf_symbols, cf_t* pilots, srsran_scs_t scs, uint32_t sf_idx);
+SRSRAN_API int srsran_refsignal_mbsfn_get_sf(srsran_cell_t cell, uint32_t port_id, cf_t* sf_symbols, cf_t* pilots, srsran_scs_t scs, uint32_t tti);
 
 SRSRAN_API uint32_t srsran_refsignal_mbsfn_nsymbol(uint32_t l, srsran_scs_t scs);
 
 SRSRAN_API uint32_t srsran_refsignal_mbsfn_fidx(uint32_t l, srsran_scs_t scs);
 
-SRSRAN_API uint32_t srsran_refsignal_mbsfn_nof_symbols();
+SRSRAN_API uint32_t srsran_refsignal_mbsfn_nof_symbols(srsran_scs_t scs);
 
 SRSRAN_API uint32_t srsran_refsignal_mbsfn_rs_per_symbol(srsran_scs_t scs);
 
@@ -100,10 +106,10 @@ SRSRAN_API int srsran_refsignal_mbsfn_put_sf(srsran_cell_t cell,
                                              cf_t*         mbsfn_pilots,
                                              cf_t*         sf_symbols,
                                              srsran_scs_t  scs,
-                                             uint32_t      sf_idx);
+                                             uint32_t      tti);
 
 SRSRAN_API int srsran_refsignal_mbsfn_gen_seq(srsran_refsignal_t* q, srsran_cell_t cell, uint32_t N_mbsfn_id, srsran_scs_t scs);
 
-SRSRAN_API uint32_t srsran_refsignal_mbsfn_offset(uint32_t l, uint32_t s, uint32_t sf, srsran_scs_t scs);
+SRSRAN_API uint32_t srsran_refsignal_mbsfn_offset(uint32_t l, uint32_t s, uint32_t tti, srsran_scs_t scs);
 
 #endif // SRSRAN_REFSIGNAL_DL_H

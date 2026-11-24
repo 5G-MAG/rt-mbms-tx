@@ -162,6 +162,8 @@ private:
   bool handle_successfuloutcome(const asn1::s1ap::successful_outcome_s& msg);
   bool handle_unsuccessfuloutcome(const asn1::s1ap::unsuccessful_outcome_s& msg);
   bool handle_paging(const asn1::s1ap::paging_s& msg);
+  bool handle_write_replace_warning_request(const asn1::s1ap::write_replace_warning_request_s& msg);
+  bool handle_kill_request(const asn1::s1ap::kill_request_s& msg);
 
   bool handle_s1setupresponse(const asn1::s1ap::s1_setup_resp_s& msg);
 

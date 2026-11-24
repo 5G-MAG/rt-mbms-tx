@@ -8706,6 +8706,9 @@ SRSASN_CODE ue_eutra_cap_v15a0_ies_s::pack(bit_ref& bref) const
   if (tdd_add_ue_eutra_cap_v15a0_present) {
     HANDLE_CODE(tdd_add_ue_eutra_cap_v15a0.pack(bref));
   }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.pack(bref));
+  }
 
   return SRSASN_SUCCESS;
 }
@@ -8725,6 +8728,9 @@ SRSASN_CODE ue_eutra_cap_v15a0_ies_s::unpack(cbit_ref& bref)
   }
   if (tdd_add_ue_eutra_cap_v15a0_present) {
     HANDLE_CODE(tdd_add_ue_eutra_cap_v15a0.unpack(bref));
+  }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.unpack(bref));
   }
 
   return SRSASN_SUCCESS;
@@ -8748,8 +8754,7 @@ void ue_eutra_cap_v15a0_ies_s::to_json(json_writer& j) const
   }
   if (non_crit_ext_present) {
     j.write_fieldname("nonCriticalExtension");
-    j.start_obj();
-    j.end_obj();
+    non_crit_ext.to_json(j);
   }
   j.end_obj();
 }
@@ -14452,6 +14457,391 @@ uint8_t mbms_params_v1470_s::mbms_scaling_factor7dot5_r14_opts::to_number() cons
 {
   static const uint8_t options[] = {1, 2, 3, 4};
   return map_enum_number(options, 4, value, "mbms_params_v1470_s::mbms_scaling_factor7dot5_r14_e_");
+}
+
+// MBMS-SupportedBandInfo-r16 ::= SEQUENCE
+SRSASN_CODE mbms_supported_band_info_r16_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(subcarrier_spacing_mbms_khz2dot5_r16_present, 1));
+  HANDLE_CODE(bref.pack(subcarrier_spacing_mbms_khz0dot37_r16_present, 1));
+  if (subcarrier_spacing_mbms_khz0dot37_r16_present) {
+    HANDLE_CODE(bref.pack(subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot2_r16_present, 1));
+    HANDLE_CODE(bref.pack(subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot4_r16_present, 1));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_supported_band_info_r16_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(subcarrier_spacing_mbms_khz2dot5_r16_present, 1));
+  HANDLE_CODE(bref.unpack(subcarrier_spacing_mbms_khz0dot37_r16_present, 1));
+  if (subcarrier_spacing_mbms_khz0dot37_r16_present) {
+    HANDLE_CODE(bref.unpack(subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot2_r16_present, 1));
+    HANDLE_CODE(bref.unpack(subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot4_r16_present, 1));
+  }
+  return SRSASN_SUCCESS;
+}
+void mbms_supported_band_info_r16_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (subcarrier_spacing_mbms_khz2dot5_r16_present) {
+    j.write_str("subcarrierSpacingMBMS-khz2dot5-r16", "supported");
+  }
+  if (subcarrier_spacing_mbms_khz0dot37_r16_present) {
+    j.start_obj("subcarrierSpacingMBMS-khz0dot37-r16");
+    if (subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot2_r16_present) {
+      j.write_str("timeSeparationSlot2-r16", "supported");
+    }
+    if (subcarrier_spacing_mbms_khz0dot37_r16.time_separation_slot4_r16_present) {
+      j.write_str("timeSeparationSlot4-r16", "supported");
+    }
+    j.end_obj();
+  }
+  j.end_obj();
+}
+
+// MBMS-Parameters-v1610 ::= SEQUENCE
+SRSASN_CODE mbms_params_v1610_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(mbms_scaling_factor2dot5_r16_present, 1));
+  HANDLE_CODE(bref.pack(mbms_scaling_factor0dot37_r16_present, 1));
+  if (mbms_scaling_factor2dot5_r16_present) {
+    HANDLE_CODE(mbms_scaling_factor2dot5_r16.pack(bref));
+  }
+  if (mbms_scaling_factor0dot37_r16_present) {
+    HANDLE_CODE(mbms_scaling_factor0dot37_r16.pack(bref));
+  }
+  HANDLE_CODE(pack_dyn_seq_of(bref, mbms_supported_band_info_list_r16, 1, 64));
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_params_v1610_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(mbms_scaling_factor2dot5_r16_present, 1));
+  HANDLE_CODE(bref.unpack(mbms_scaling_factor0dot37_r16_present, 1));
+  if (mbms_scaling_factor2dot5_r16_present) {
+    HANDLE_CODE(mbms_scaling_factor2dot5_r16.unpack(bref));
+  }
+  if (mbms_scaling_factor0dot37_r16_present) {
+    HANDLE_CODE(mbms_scaling_factor0dot37_r16.unpack(bref));
+  }
+  HANDLE_CODE(unpack_dyn_seq_of(mbms_supported_band_info_list_r16, bref, 1, 64));
+  return SRSASN_SUCCESS;
+}
+void mbms_params_v1610_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (mbms_scaling_factor2dot5_r16_present) {
+    j.write_str("mbms-ScalingFactor2dot5-r16", mbms_scaling_factor2dot5_r16.to_string());
+  }
+  if (mbms_scaling_factor0dot37_r16_present) {
+    j.write_str("mbms-ScalingFactor0dot37-r16", mbms_scaling_factor0dot37_r16.to_string());
+  }
+  j.start_array("mbms-SupportedBandInfoList-r16");
+  for (const auto& e1 : mbms_supported_band_info_list_r16) {
+    e1.to_json(j);
+  }
+  j.end_array();
+  j.end_obj();
+}
+const char* mbms_params_v1610_s::mbms_scaling_factor2dot5_r16_opts::to_string() const
+{
+  static const char* options[] = {"n2", "n4", "n6", "n8"};
+  return convert_enum_idx(options, 4, value, "mbms_params_v1610_s::mbms_scaling_factor2dot5_r16_e_");
+}
+uint8_t mbms_params_v1610_s::mbms_scaling_factor2dot5_r16_opts::to_number() const
+{
+  static const uint8_t options[] = {2, 4, 6, 8};
+  return map_enum_number(options, 4, value, "mbms_params_v1610_s::mbms_scaling_factor2dot5_r16_e_");
+}
+const char* mbms_params_v1610_s::mbms_scaling_factor0dot37_r16_opts::to_string() const
+{
+  static const char* options[] = {"n12", "n16", "n20", "n24"};
+  return convert_enum_idx(options, 4, value, "mbms_params_v1610_s::mbms_scaling_factor0dot37_r16_e_");
+}
+uint8_t mbms_params_v1610_s::mbms_scaling_factor0dot37_r16_opts::to_number() const
+{
+  static const uint8_t options[] = {12, 16, 20, 24};
+  return map_enum_number(options, 4, value, "mbms_params_v1610_s::mbms_scaling_factor0dot37_r16_e_");
+}
+
+// MBMS-SupportedBandInfo-v1700 ::= SEQUENCE
+SRSASN_CODE mbms_supported_band_info_v1700_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(pmch_bandwidth_n40_r17_present, 1));
+  HANDLE_CODE(bref.pack(pmch_bandwidth_n35_r17_present, 1));
+  HANDLE_CODE(bref.pack(pmch_bandwidth_n30_r17_present, 1));
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_supported_band_info_v1700_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(pmch_bandwidth_n40_r17_present, 1));
+  HANDLE_CODE(bref.unpack(pmch_bandwidth_n35_r17_present, 1));
+  HANDLE_CODE(bref.unpack(pmch_bandwidth_n30_r17_present, 1));
+  return SRSASN_SUCCESS;
+}
+void mbms_supported_band_info_v1700_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (pmch_bandwidth_n40_r17_present) {
+    j.write_str("pmch-Bandwidth-n40-r17", "supported");
+  }
+  if (pmch_bandwidth_n35_r17_present) {
+    j.write_str("pmch-Bandwidth-n35-r17", "supported");
+  }
+  if (pmch_bandwidth_n30_r17_present) {
+    j.write_str("pmch-Bandwidth-n30-r17", "supported");
+  }
+  j.end_obj();
+}
+
+// MBMS-Parameters-v1700 ::= SEQUENCE
+SRSASN_CODE mbms_params_v1700_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(mbms_supported_band_info_list_v1700_present, 1));
+  if (mbms_supported_band_info_list_v1700_present) {
+    HANDLE_CODE(pack_dyn_seq_of(bref, mbms_supported_band_info_list_v1700, 1, 64));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_params_v1700_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(mbms_supported_band_info_list_v1700_present, 1));
+  if (mbms_supported_band_info_list_v1700_present) {
+    HANDLE_CODE(unpack_dyn_seq_of(mbms_supported_band_info_list_v1700, bref, 1, 64));
+  }
+  return SRSASN_SUCCESS;
+}
+void mbms_params_v1700_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (mbms_supported_band_info_list_v1700_present) {
+    j.start_array("mbms-SupportedBandInfoList-v1700");
+    for (const auto& e1 : mbms_supported_band_info_list_v1700) {
+      e1.to_json(j);
+    }
+    j.end_array();
+  }
+  j.end_obj();
+}
+
+// UE-EUTRA-Capability-v1700-IEs ::= SEQUENCE
+SRSASN_CODE ue_eutra_cap_v1700_ies_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(non_crit_ext_present, 1));
+  HANDLE_CODE(mbms_params_v1700.pack(bref));
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.pack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE ue_eutra_cap_v1700_ies_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(non_crit_ext_present, 1));
+  HANDLE_CODE(mbms_params_v1700.unpack(bref));
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.unpack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+void ue_eutra_cap_v1700_ies_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  j.write_fieldname("mbms-Parameters-v1700");
+  mbms_params_v1700.to_json(j);
+  if (non_crit_ext_present) {
+    j.write_fieldname("nonCriticalExtension");
+    non_crit_ext.to_json(j);
+  }
+  j.end_obj();
+}
+
+// MBMS-Parameters-v1900 ::= SEQUENCE
+SRSASN_CODE mbms_supported_band_info_v1900_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(cas_muting_5gb_r19_present, 1));
+  HANDLE_CODE(bref.pack(time_interleaving_r19_present, 1));
+  HANDLE_CODE(bref.pack(pmch_cyclic_shift_alpha1_r19_present, 1));
+  HANDLE_CODE(bref.pack(pmch_cyclic_shift_alpha2_r19_present, 1));
+  HANDLE_CODE(bref.pack(pmch_cyclic_shift_alpha3_r19_present, 1));
+  HANDLE_CODE(bref.pack(freq_interleaving_r19_present, 1));
+  if (time_interleaving_r19_present) {
+    HANDLE_CODE(bref.pack(time_interleaving_r19.time_interleaving_khz15_r19_present, 1));
+    HANDLE_CODE(bref.pack(time_interleaving_r19.time_interleaving_khz7dot5_r19_present, 1));
+    HANDLE_CODE(bref.pack(time_interleaving_r19.time_interleaving_khz2dot5_r19_present, 1));
+    HANDLE_CODE(bref.pack(time_interleaving_r19.time_interleaving_khz1dot25_r19_present, 1));
+  }
+  if (freq_interleaving_r19_present) {
+    HANDLE_CODE(bref.pack(freq_interleaving_r19.freq_interleaving_khz15_r19_present, 1));
+    HANDLE_CODE(bref.pack(freq_interleaving_r19.freq_interleaving_khz7dot5_r19_present, 1));
+    HANDLE_CODE(bref.pack(freq_interleaving_r19.freq_interleaving_khz2dot5_r19_present, 1));
+    HANDLE_CODE(bref.pack(freq_interleaving_r19.freq_interleaving_khz1dot25_r19_present, 1));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_supported_band_info_v1900_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(cas_muting_5gb_r19_present, 1));
+  HANDLE_CODE(bref.unpack(time_interleaving_r19_present, 1));
+  HANDLE_CODE(bref.unpack(pmch_cyclic_shift_alpha1_r19_present, 1));
+  HANDLE_CODE(bref.unpack(pmch_cyclic_shift_alpha2_r19_present, 1));
+  HANDLE_CODE(bref.unpack(pmch_cyclic_shift_alpha3_r19_present, 1));
+  HANDLE_CODE(bref.unpack(freq_interleaving_r19_present, 1));
+  if (time_interleaving_r19_present) {
+    HANDLE_CODE(bref.unpack(time_interleaving_r19.time_interleaving_khz15_r19_present, 1));
+    HANDLE_CODE(bref.unpack(time_interleaving_r19.time_interleaving_khz7dot5_r19_present, 1));
+    HANDLE_CODE(bref.unpack(time_interleaving_r19.time_interleaving_khz2dot5_r19_present, 1));
+    HANDLE_CODE(bref.unpack(time_interleaving_r19.time_interleaving_khz1dot25_r19_present, 1));
+  }
+  if (freq_interleaving_r19_present) {
+    HANDLE_CODE(bref.unpack(freq_interleaving_r19.freq_interleaving_khz15_r19_present, 1));
+    HANDLE_CODE(bref.unpack(freq_interleaving_r19.freq_interleaving_khz7dot5_r19_present, 1));
+    HANDLE_CODE(bref.unpack(freq_interleaving_r19.freq_interleaving_khz2dot5_r19_present, 1));
+    HANDLE_CODE(bref.unpack(freq_interleaving_r19.freq_interleaving_khz1dot25_r19_present, 1));
+  }
+  return SRSASN_SUCCESS;
+}
+void mbms_supported_band_info_v1900_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (cas_muting_5gb_r19_present) {
+    j.write_str("cas-Muting-5GB-r19", "supported");
+  }
+  if (time_interleaving_r19_present) {
+    j.start_obj("timeInterleaving-r19");
+    if (time_interleaving_r19.time_interleaving_khz15_r19_present) {
+      j.write_str("timeInterleavingKhz15-r19", "supported");
+    }
+    if (time_interleaving_r19.time_interleaving_khz7dot5_r19_present) {
+      j.write_str("timeInterleavingKhz7dot5-r19", "supported");
+    }
+    if (time_interleaving_r19.time_interleaving_khz2dot5_r19_present) {
+      j.write_str("timeInterleavingKhz2dot5-r19", "supported");
+    }
+    if (time_interleaving_r19.time_interleaving_khz1dot25_r19_present) {
+      j.write_str("timeInterleavingKhz1dot25-r19", "supported");
+    }
+    j.end_obj();
+  }
+  if (pmch_cyclic_shift_alpha1_r19_present) {
+    j.write_str("pmch-CyclicShiftAlpha1-r19", "supported");
+  }
+  if (pmch_cyclic_shift_alpha2_r19_present) {
+    j.write_str("pmch-CyclicShiftAlpha2-r19", "supported");
+  }
+  if (pmch_cyclic_shift_alpha3_r19_present) {
+    j.write_str("pmch-CyclicShiftAlpha3-r19", "supported");
+  }
+  if (freq_interleaving_r19_present) {
+    j.start_obj("freqInterleaving-r19");
+    if (freq_interleaving_r19.freq_interleaving_khz15_r19_present) {
+      j.write_str("freqInterleavingKhz15-r19", "supported");
+    }
+    if (freq_interleaving_r19.freq_interleaving_khz7dot5_r19_present) {
+      j.write_str("freqInterleavingKhz7dot5-r19", "supported");
+    }
+    if (freq_interleaving_r19.freq_interleaving_khz2dot5_r19_present) {
+      j.write_str("freqInterleavingKhz2dot5-r19", "supported");
+    }
+    if (freq_interleaving_r19.freq_interleaving_khz1dot25_r19_present) {
+      j.write_str("freqInterleavingKhz1dot25-r19", "supported");
+    }
+    j.end_obj();
+  }
+  j.end_obj();
+}
+
+SRSASN_CODE mbms_params_v1900_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(mbms_supported_band_info_list_v1900_present, 1));
+  if (mbms_supported_band_info_list_v1900_present) {
+    HANDLE_CODE(pack_dyn_seq_of(bref, mbms_supported_band_info_list_v1900, 1, 64));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE mbms_params_v1900_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(mbms_supported_band_info_list_v1900_present, 1));
+  if (mbms_supported_band_info_list_v1900_present) {
+    HANDLE_CODE(unpack_dyn_seq_of(mbms_supported_band_info_list_v1900, bref, 1, 64));
+  }
+  return SRSASN_SUCCESS;
+}
+void mbms_params_v1900_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (mbms_supported_band_info_list_v1900_present) {
+    j.start_array("mbms-SupportedBandInfoList-v1900");
+    for (const auto& e1 : mbms_supported_band_info_list_v1900) {
+      e1.to_json(j);
+    }
+    j.end_array();
+  }
+  j.end_obj();
+}
+
+// UE-EUTRA-Capability-v1900-IEs ::= SEQUENCE
+SRSASN_CODE ue_eutra_cap_v1900_ies_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(mbms_params_v1900_present, 1));
+  if (mbms_params_v1900_present) {
+    HANDLE_CODE(mbms_params_v1900.pack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE ue_eutra_cap_v1900_ies_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(mbms_params_v1900_present, 1));
+  if (mbms_params_v1900_present) {
+    HANDLE_CODE(mbms_params_v1900.unpack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+void ue_eutra_cap_v1900_ies_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (mbms_params_v1900_present) {
+    j.write_fieldname("mbms-Parameters-v1900");
+    mbms_params_v1900.to_json(j);
+  }
+  j.end_obj();
+}
+
+// UE-EUTRA-Capability-v1610-IEs ::= SEQUENCE
+SRSASN_CODE ue_eutra_cap_v1610_ies_s::pack(bit_ref& bref) const
+{
+  HANDLE_CODE(bref.pack(mbms_params_v1610_present, 1));
+  HANDLE_CODE(bref.pack(non_crit_ext_present, 1));
+  if (mbms_params_v1610_present) {
+    HANDLE_CODE(mbms_params_v1610.pack(bref));
+  }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.pack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+SRSASN_CODE ue_eutra_cap_v1610_ies_s::unpack(cbit_ref& bref)
+{
+  HANDLE_CODE(bref.unpack(mbms_params_v1610_present, 1));
+  HANDLE_CODE(bref.unpack(non_crit_ext_present, 1));
+  if (mbms_params_v1610_present) {
+    HANDLE_CODE(mbms_params_v1610.unpack(bref));
+  }
+  if (non_crit_ext_present) {
+    HANDLE_CODE(non_crit_ext.unpack(bref));
+  }
+  return SRSASN_SUCCESS;
+}
+void ue_eutra_cap_v1610_ies_s::to_json(json_writer& j) const
+{
+  j.start_obj();
+  if (mbms_params_v1610_present) {
+    j.write_fieldname("mbms-Parameters-v1610");
+    mbms_params_v1610.to_json(j);
+  }
+  if (non_crit_ext_present) {
+    j.write_fieldname("nonCriticalExtension");
+    non_crit_ext.to_json(j);
+  }
+  j.end_obj();
 }
 
 // UE-EUTRA-Capability-v14a0-IEs ::= SEQUENCE

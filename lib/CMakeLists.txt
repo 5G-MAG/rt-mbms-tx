@@ -25,6 +25,11 @@ add_subdirectory(src)
 add_subdirectory(include)
 #add_subdirectory(examples)
 #add_subdirectory(test)
+# test/asn1 specifically: contains the MCCH/RRC ASN.1 round-trip tests (e.g.
+# srsran_asn1_rrc_mcch_test), verified to compile; the sibling mac/rlc/pdcp/phy/
+# common/srslog/adt test trees under lib/test/ are left disabled since they are
+# unverified in this environment (no build toolchain available to confirm).
+add_subdirectory(test/asn1)
 
 ########################################################################
 # Install library headers

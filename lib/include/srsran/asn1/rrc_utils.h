@@ -148,6 +148,17 @@ mbsfn_sf_cfg_t    make_mbsfn_sf_cfg(const asn1::rrc::mbsfn_sf_cfg_s& sf_cfg);
 mcch_msg_t        make_mcch_msg(const asn1::rrc::mcch_msg_s& asn1_type);
 sib13_t           make_sib13(const asn1::rrc::sib_type13_r9_s& asn1_type);
 
+/* PMCH-SoftBufferSizeParameters-r19's scalingFactorBeta enum (one32nd/one5th/one3rd/
+ * three8th/five12th/onehalf/five8th/two3rd/five6th/one) <-> a plain num/den fraction,
+ * shared by rrc.cc's pack_mcch() (TX encode) and rrc_utils.cc's make_pmch_info_ext_r19_tx()
+ * (RX decode) so both directions use one source of truth for the mapping. The enum itself
+ * is deliberately kept out of this header (nested-type access needs rrc.h's full struct
+ * definition, which this header avoids pulling in) - ordinal is the enum's plain options
+ * value (safe to static_cast<...::options>() at the call site, which does have rrc.h). */
+bool     pmch_scaling_factor_beta_by_name(const std::string& name, uint8_t* num, uint8_t* den);
+uint32_t pmch_scaling_factor_beta_num_den_to_ordinal(uint8_t num, uint8_t den);
+void     pmch_scaling_factor_beta_ordinal_to_num_den(uint32_t ordinal, uint8_t* num, uint8_t* den);
+
 } // namespace srsran
 
 /************************

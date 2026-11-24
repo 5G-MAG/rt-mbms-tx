@@ -33,6 +33,9 @@
 /// Handler called after the user interrupts the program.
 static std::atomic<srsran_signal_hanlder> user_handler;
 
+/// Handler called on SIGHUP (config reload); does not trigger shutdown.
+static std::atomic<srsran_signal_hanlder> sighup_handler;
+
 static void srsran_signal_handler(int signal)
 {
   switch (signal) {
@@ -40,6 +43,11 @@ static void srsran_signal_handler(int signal)
       fprintf(stderr, "Couldn't stop after %ds. Forcing exit.\n", SRSRAN_TERM_TIMEOUT_S);
       execute_emergency_cleanup_handlers();
       raise(SIGKILL);
+    case SIGHUP:
+      if (auto handler = sighup_handler.load()) {
+        handler();
+      }
+      break;
     default:
       // all other registered signals try to stop the app gracefully
       // Call the user handler if present and remove it so that further signals are treated by the default handler.
@@ -62,4 +70,10 @@ void srsran_register_signal_handler(srsran_signal_hanlder handler)
   signal(SIGTERM, srsran_signal_handler);
   signal(SIGHUP, srsran_signal_handler);
   signal(SIGALRM, srsran_signal_handler);
+}
+
+void srsran_register_sighup_handler(srsran_signal_hanlder handler)
+{
+  sighup_handler.store(handler);
+  signal(SIGHUP, srsran_signal_handler);
 }

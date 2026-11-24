@@ -501,6 +501,72 @@ struct mbsfn_sf_cfg_v1430_s {
   bool        operator!=(const mbsfn_sf_cfg_v1430_s& other) const { return not(*this == other); }
 };
 
+// MBSFN-SubframeConfig-v1610 ::= SEQUENCE
+struct mbsfn_sf_cfg_v1610_s {
+  struct sf_alloc_v1610_c_ {
+    struct types_opts {
+      enum options { one_frame_v1610, four_frames_v1610, nulltype } value;
+      typedef uint8_t number_type;
+
+      const char* to_string() const;
+      uint8_t     to_number() const;
+    };
+    typedef enumerated<types_opts> types;
+
+    // choice methods
+    sf_alloc_v1610_c_() = default;
+    sf_alloc_v1610_c_(const sf_alloc_v1610_c_& other);
+    sf_alloc_v1610_c_& operator=(const sf_alloc_v1610_c_& other);
+    ~sf_alloc_v1610_c_() { destroy_(); }
+    void        set(types::options e = types::nulltype);
+    types       type() const { return type_; }
+    SRSASN_CODE pack(bit_ref& bref) const;
+    SRSASN_CODE unpack(cbit_ref& bref);
+    void        to_json(json_writer& j) const;
+    bool        operator==(const sf_alloc_v1610_c_& other) const;
+    bool        operator!=(const sf_alloc_v1610_c_& other) const { return not(*this == other); }
+    // getters
+    fixed_bitstring<2>& one_frame_v1610()
+    {
+      assert_choice_type(types::one_frame_v1610, type_, "subframeAllocation-v1610");
+      return c.get<fixed_bitstring<2> >();
+    }
+    fixed_bitstring<8>& four_frames_v1610()
+    {
+      assert_choice_type(types::four_frames_v1610, type_, "subframeAllocation-v1610");
+      return c.get<fixed_bitstring<8> >();
+    }
+    const fixed_bitstring<2>& one_frame_v1610() const
+    {
+      assert_choice_type(types::one_frame_v1610, type_, "subframeAllocation-v1610");
+      return c.get<fixed_bitstring<2> >();
+    }
+    const fixed_bitstring<8>& four_frames_v1610() const
+    {
+      assert_choice_type(types::four_frames_v1610, type_, "subframeAllocation-v1610");
+      return c.get<fixed_bitstring<8> >();
+    }
+    fixed_bitstring<2>& set_one_frame_v1610();
+    fixed_bitstring<8>& set_four_frames_v1610();
+
+  private:
+    types                                type_;
+    choice_buffer_t<fixed_bitstring<8> > c;
+
+    void destroy_();
+  };
+
+  // member variables
+  sf_alloc_v1610_c_ sf_alloc_v1610;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+  bool        operator==(const mbsfn_sf_cfg_v1610_s& other) const;
+  bool        operator!=(const mbsfn_sf_cfg_v1610_s& other) const { return not(*this == other); }
+};
+
 // MBSFN-SubframeConfigList ::= SEQUENCE (SIZE (1..8)) OF MBSFN-SubframeConfig
 using mbsfn_sf_cfg_list_l = dyn_array<mbsfn_sf_cfg_s>;
 

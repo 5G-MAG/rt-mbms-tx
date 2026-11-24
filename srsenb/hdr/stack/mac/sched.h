@@ -48,6 +48,7 @@ public:
 
   void init(rrc_interface_mac* rrc, const sched_args_t& sched_cfg);
   int  cell_cfg(const std::vector<cell_cfg_t>& cell_cfg) override;
+  void set_sib_lens(uint32_t enb_cc_idx, const cell_cfg_sib_t* sibs) final;
   int  reset() final;
 
   int  ue_cfg(uint16_t rnti, const ue_cfg_t& ue_cfg) final;

@@ -77,11 +77,20 @@ int srsran_ue_dl_init(srsran_ue_dl_t* q, cf_t* in_buffer[SRSRAN_MAX_PORTS], uint
     q->mi_auto              = true;
     q->mi_manual_index      = 0;
 
-    for (int j = 0; j < SRSRAN_MAX_PORTS; j++) {
-      q->sf_symbols[j] = srsran_vec_cf_malloc(MAX_SFLEN_RE);
-      if (!q->sf_symbols[j]) {
-        perror("malloc");
-        goto clean_exit;
+    {
+      /* sf_symbols must fit the widest resource grid across all MBSFN SCS.
+       * 0.37 kHz (SL2/SL4) uses 486 sc/PRB with 1 symbol/subframe = 486*prb RE.
+       * For 75 PRBs that is 36450, exceeding the standard 15 kHz grid (16800 for 100 PRBs). */
+      uint32_t sl4_prb  = (max_prb <= 75u) ? max_prb : 75u;
+      uint32_t sl4_re   = SRSRAN_NRE_SCS_370HZ * sl4_prb;
+      uint32_t std_re   = SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM);
+      uint32_t sf_alloc = (sl4_re > std_re) ? sl4_re : std_re;
+      for (int j = 0; j < SRSRAN_MAX_PORTS; j++) {
+        q->sf_symbols[j] = srsran_vec_cf_malloc(sf_alloc);
+        if (!q->sf_symbols[j]) {
+          perror("malloc");
+          goto clean_exit;
+        }
       }
     }
 
@@ -104,7 +113,14 @@ int srsran_ue_dl_init(srsran_ue_dl_t* q, cf_t* in_buffer[SRSRAN_MAX_PORTS], uint
     ofdm_cfg.in_buffer  = in_buffer[0];
     ofdm_cfg.out_buffer = q->sf_symbols[0];
     ofdm_cfg.sf_type    = SRSRAN_SF_MBSFN;
-    ofdm_cfg.symbol_sz  = srsran_symbol_sz_scs(max_prb, SRSRAN_SCS_1KHZ25); // init for largest possible size
+    {
+      /* 0.37 kHz SCS supports at most 75 PRBs; cap before calling symbol_sz_scs to
+       * avoid SRSRAN_ERROR (-1) being cast to a huge uint32 and crashing DFT init. */
+      uint32_t sl4_prb  = (max_prb <= 75u) ? max_prb : 75u;
+      int      sz_370   = srsran_symbol_sz_scs(sl4_prb, SRSRAN_SCS_370HZ);
+      int      sz_norm  = srsran_symbol_sz(max_prb);
+      ofdm_cfg.symbol_sz = (sz_370 > sz_norm && sz_370 > 0) ? (uint32_t)sz_370 : (uint32_t)sz_norm;
+    }
     if (srsran_ofdm_rx_init_cfg(&q->fft_mbsfn, &ofdm_cfg)) {
       ERROR("Error initiating FFT for MBSFN subframes ");
       goto clean_exit;
@@ -225,7 +241,8 @@ int srsran_ue_dl_set_cell(srsran_ue_dl_t* q, srsran_cell_t cell)
         phich_init_reg = 2; // mi=2
       }
 
-      if (srsran_ofdm_rx_set_prb(&q->fft_mbsfn, SRSRAN_CP_EXT, q->cell.mbsfn_prb)) {
+      uint32_t mbsfn_fft_prb = q->cell.mbsfn_prb != 0 ? q->cell.mbsfn_prb : q->cell.nof_prb;
+      if (srsran_ofdm_rx_set_prb(&q->fft_mbsfn, SRSRAN_CP_EXT, mbsfn_fft_prb)) {
         ERROR("Error resizing MBSFN FFT");
         return SRSRAN_ERROR;
       }
@@ -386,6 +403,34 @@ int srsran_ue_dl_decode_fft_estimate(srsran_ue_dl_t* q, srsran_dl_sf_cfg_t* sf, 
         srsran_ofdm_rx_sf(&q->fft[j]);
       }
     }
+    /* PMCH_RE_DUMP: scratch instrumentation, see the matching comment in the modem
+     * repo's copy of this function (this app is TX-only, so this path is not
+     * actually live here, but kept mirrored for consistency). */
+    if (getenv("PMCH_RE_DUMP") &&
+        (!getenv("PMCH_RE_DUMP_TTI") || (uint32_t)atoi(getenv("PMCH_RE_DUMP_TTI")) == sf->tti) &&
+        sf->sf_type == SRSRAN_SF_MBSFN) {
+      uint32_t dump_n = SRSRAN_NRE_SCS(sf->subcarrier_spacing) * q->cell.nof_prb;
+      char     fn[128];
+      snprintf(fn, sizeof(fn), "/tmp/pmch_rx_postfft_tti%u.bin", sf->tti);
+      FILE* ffft = fopen(fn, "wb");
+      if (ffft) {
+        fwrite(q->sf_symbols[0], sizeof(cf_t), dump_n, ffft);
+        fclose(ffft);
+      }
+      fprintf(stderr, "[PMCH_RE_DUMP] RX postfft tti=%u scs=%d nof_prb=%u dump_n=%u\n",
+              sf->tti, (int)sf->subcarrier_spacing, q->cell.nof_prb, dump_n);
+      /* DIAG: see matching comment in modem repo's copy of this function. */
+      fprintf(stderr,
+              "[PMCH_RE_DUMP] DIAG fft_mbsfn: cfg.symbol_sz=%u cfg.subcarrier_spacing=%d "
+              "nof_guards=%u nof_re=%u nof_symbols_mbsfn=%u non_mbsfn_region=%d expected_cp=%u\n",
+              q->fft_mbsfn.cfg.symbol_sz,
+              (int)q->fft_mbsfn.cfg.subcarrier_spacing,
+              q->fft_mbsfn.nof_guards,
+              q->fft_mbsfn.nof_re,
+              q->fft_mbsfn.nof_symbols_mbsfn,
+              q->fft_mbsfn.non_mbsfn_region,
+              q->fft_mbsfn.cfg.symbol_sz / 4U);
+    }
     if (sf->sf_type == SRSRAN_SF_MBSFN && sf->subcarrier_spacing != SRSRAN_SCS_15KHZ) {
       return srsran_chest_dl_estimate_cfg(&q->chest, sf, &cfg->chest_cfg, q->sf_symbols, &q->chest_res);
     } else {
@@ -465,6 +510,16 @@ static int dci_blind_search(srsran_ue_dl_t*     q,
         INFO("Skipping location L=%d, ncce=%d. Already allocated", search_space->loc[l].L, search_space->loc[l].ncce);
         continue;
       }
+      // Multiple formats can share the same length/CCE aggregation (e.g. the common-SS
+      // SI/P/RA-RNTI search tries both FORMAT1A and FORMAT1C at every location) and more
+      // than one may independently cross the correlation threshold at the same location --
+      // a real ambiguity, not just noise, since e.g. a compact FORMAT1C payload can also
+      // happen to look like a valid (but wrong) FORMAT1A interpretation. Evaluate every
+      // format at this location and keep only the best-correlating one, instead of
+      // accepting whichever format happens to be checked first in search_space->formats.
+      bool             have_best = false;
+      float            best_corr = 0.0f;
+      srsran_dci_msg_t best_msg  = {};
       for (uint32_t f = 0; f < search_space->nof_formats; f++) {
         INFO("Searching format %s in %d,%d (%d/%d)",
              srsran_dci_format_string(search_space->formats[f]),
@@ -474,18 +529,19 @@ static int dci_blind_search(srsran_ue_dl_t*     q,
              search_space->nof_locations);
 
         // Try to decode a valid DCI msg
-        dci_msg[nof_dci].location = search_space->loc[l];
-        dci_msg[nof_dci].format   = search_space->formats[f];
-        dci_msg[nof_dci].rnti     = 0;
-        if (srsran_pdcch_decode_msg(&q->pdcch, sf, dci_cfg, &dci_msg[nof_dci])) {
+        srsran_dci_msg_t candidate = {};
+        candidate.location = search_space->loc[l];
+        candidate.format   = search_space->formats[f];
+        candidate.rnti     = 0;
+        if (srsran_pdcch_decode_msg(&q->pdcch, sf, dci_cfg, &candidate)) {
           ERROR("Error decoding DCI msg");
           return SRSRAN_ERROR;
         }
 
         // Check if RNTI is matched
-        if ((dci_msg[nof_dci].rnti == rnti) && (dci_msg[nof_dci].nof_bits > 0)) {
+        if ((candidate.rnti == rnti) && (candidate.nof_bits > 0)) {
           // Compute decoded message correlation to drastically reduce false alarm probability
-          float corr = srsran_pdcch_msg_corr(&q->pdcch, &dci_msg[nof_dci]);
+          float corr = srsran_pdcch_msg_corr(&q->pdcch, &candidate);
 
           // Skip candidate if the threshold is not reached
           // 0.5 is set from pdcch_test
@@ -493,7 +549,17 @@ static int dci_blind_search(srsran_ue_dl_t*     q,
             continue;
           }
 
-          // Look for the messages found and apply the new format if the location is common
+          if (corr > best_corr) {
+            best_corr = corr;
+            best_msg  = candidate;
+            have_best = true;
+          }
+        }
+      }
+
+      if (have_best) {
+        dci_msg[nof_dci] = best_msg;
+        // Look for the messages found and apply the new format if the location is common
           if (search_in_common && (dci_cfg->multiple_csi_request_enabled || dci_cfg->srs_request_enabled)) {
             /*
              * A UE configured to monitor PDCCH candidates whose CRCs are scrambled with C-RNTI or SPS C-RNTI,
@@ -539,11 +605,9 @@ static int dci_blind_search(srsran_ue_dl_t*     q,
               q->nof_allocated_locations++;
             }
             nof_dci++;
-            break;
           } else {
             INFO("Ignoring message with size %d, already decoded", dci_msg[nof_dci].nof_bits);
           }
-        }
       }
     }
   } else {

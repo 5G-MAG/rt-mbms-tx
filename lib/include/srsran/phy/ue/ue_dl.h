@@ -57,7 +57,7 @@
 #include "srsran/config.h"
 
 #define SRSRAN_MAX_CANDIDATES_UE 16 // From 36.213 Table 9.1.1-1
-#define SRSRAN_MAX_CANDIDATES_COM 6 // From 36.213 Table 9.1.1-1
+#define SRSRAN_MAX_CANDIDATES_COM 7 // 6 from 36.213 Table 9.1.1-1 + 1 for AL16 (MBMS-dedicated, Rel-16)
 #define SRSRAN_MAX_CANDIDATES (SRSRAN_MAX_CANDIDATES_UE + SRSRAN_MAX_CANDIDATES_COM)
 
 #define SRSRAN_MAX_FORMATS 4

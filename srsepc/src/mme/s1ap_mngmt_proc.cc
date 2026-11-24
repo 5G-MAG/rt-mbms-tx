@@ -106,9 +106,18 @@ bool s1ap_mngmt_proc::handle_s1_setup_request(const asn1::s1ap::s1_setup_request
   } else {
     enb_ctx_t* enb_ptr = m_s1ap->find_enb_ctx(enb_ctx.enb_id);
     if (enb_ptr != nullptr) {
-      // eNB already registered
-      // TODO replace enb_ctx
-      m_logger.warning("eNB Already registered");
+      // eNB already registered under this enb_id -- almost always a stale entry left behind by
+      // an eNB that disconnected without a graceful SCTP shutdown (crash, kill -9, network
+      // drop), since only SCTP_SHUTDOWN_EVENT triggers delete_enb_ctx() and an abrupt
+      // disconnect may never generate one. Replacing it is essential, not just tidy: leaving
+      // the old context in place means every subsequent MME->eNB send (paging, and now PWS's
+      // WriteReplaceWarningRequest/KillRequest) keeps targeting the dead association's SCTP
+      // sinfo and fails with "Broken pipe" forever, even though a brand new, healthy
+      // association for this exact eNB now exists.
+      m_logger.warning("eNB Id 0x%x already registered -- replacing stale context with new connection",
+                        enb_ctx.enb_id);
+      m_s1ap->delete_enb_ctx(enb_ptr->sri.sinfo_assoc_id);
+      m_s1ap->add_new_enb_ctx(enb_ctx, enb_sri);
     } else {
       // new eNB
       m_s1ap->add_new_enb_ctx(enb_ctx, enb_sri);

@@ -28,6 +28,7 @@
 #ifndef SRSENB_ENB_H
 #define SRSENB_ENB_H
 
+#include <mutex>
 #include <pthread.h>
 #include <stdarg.h>
 #include <string>
@@ -36,6 +37,7 @@
 
 #include "srsran/radio/radio.h"
 
+#include "srsenb/hdr/control_server.h"
 #include "srsenb/hdr/phy/enb_phy_base.h"
 #include "srsenb/hdr/stack/enb_stack_base.h"
 #include "srsenb/hdr/stack/rrc/rrc_config.h"
@@ -75,6 +77,8 @@ struct enb_files_t {
   std::string sib_config;
   std::string rr_config;
   std::string rb_config;
+  std::string config_file;      /* path to main enb.conf — used for runtime reload */
+  std::string sib12_alert_file; /* path to sib12_alert.conf (default: sib.conf dir/sib12_alert.conf) */
 };
 
 struct log_args_t {
@@ -88,6 +92,12 @@ struct log_args_t {
 
 struct gui_args_t {
   bool enable;
+};
+
+struct control_args_t {
+  bool        enable    = false;
+  std::string bind_addr = "127.0.0.1"; // loopback by default; use an internal address for cross-container
+  uint16_t    port      = 2100;        // TCP control port the portal connects to
 };
 
 struct general_args_t {
@@ -118,6 +128,7 @@ struct all_args_t {
   srsran::rf_args_t rf;
   log_args_t        log;
   gui_args_t        gui;
+  control_args_t    control;
   general_args_t    general;
   phy_args_t        phy;
   stack_args_t      stack;
@@ -153,6 +164,14 @@ public:
 
   void toggle_padding() override;
 
+  void reload_embms_config();
+  void reload_sib12(bool activate);
+
+  // Thread-safe accessors for the live eMBMS config, shared between the SIGHUP/file-reload
+  // path and the control_server socket (both may call set_embms_config() from different threads).
+  embms_args_t get_embms_config() const;
+  void         set_embms_config(const embms_args_t& embms_cfg);
+
   void tti_clock() override;
 
 private:
@@ -163,8 +182,9 @@ private:
   srslog::sink&         log_sink;
   srslog::basic_logger& enb_log;
 
-  all_args_t        args    = {};
-  std::atomic<bool> started = {false};
+  all_args_t         args    = {};
+  std::atomic<bool>  started = {false};
+  mutable std::mutex embms_cfg_mutex;
 
   phy_cfg_t    phy_cfg    = {};
   rrc_cfg_t    rrc_cfg    = {};
@@ -176,6 +196,7 @@ private:
   std::unique_ptr<enb_stack_base>     nr_stack    = nullptr;
   std::unique_ptr<srsran::radio_base> radio       = nullptr;
   std::unique_ptr<enb_phy_base>       phy         = nullptr;
+  std::unique_ptr<control_server>     ctrl_server;
 
   // System metrics processor.
   srsran::sys_metrics_processor sys_proc;

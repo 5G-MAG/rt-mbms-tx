@@ -1,7 +1,6 @@
 sib1 =
 {
     intra_freq_reselection = "Allowed";
-    q_rx_lev_min = -65;
     //p_max = 3;
     cell_barred = "NotBarred"
     si_window_length = 20;

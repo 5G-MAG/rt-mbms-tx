@@ -33,4 +33,8 @@ using srsran_signal_hanlder = void (*)();
 /// Passing a null function pointer disables the current installed handler.
 void srsran_register_signal_handler(srsran_signal_hanlder handler);
 
+/// Registers the specified function to be called on SIGHUP without triggering shutdown.
+/// Passing a null function pointer disables the current installed handler.
+void srsran_register_sighup_handler(srsran_signal_hanlder handler);
+
 #endif // SRSRAN_SIGNAL_HANDLER_H

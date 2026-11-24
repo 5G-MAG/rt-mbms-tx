@@ -23,11 +23,14 @@
 #define SRSRAN_RRC_CONFIG_H
 
 #include "rrc_config_common.h"
+#include "srsenb/hdr/stack/enb_stack_base.h" // pmch_cfg_t
 #include "srsran/asn1/rrc.h"
 #include "srsran/common/security.h"
 #include "srsran/interfaces/enb_rrc_interface_types.h"
 #include "srsran/phy/common/phy_common.h"
 #include <array>
+#include <string>
+#include <vector>
 
 namespace srsenb {
 
@@ -68,6 +71,13 @@ struct rrc_cfg_t {
   uint32_t enb_id; ///< Required to pack SIB1
   // Per eNB SIBs
   asn1::rrc::sib_type1_mbms_r14_s     sib1;
+  // Legacy (non-MBMS-r14) SIB1, used instead of `sib1` when cell.mbms_dedicated is false --
+  // derived from `sib1` post-parse (see enb_cfg_parser.cc's make_sib1_legacy()), not
+  // separately configured. This is TS 36.300 §15.2.2's "MBMS/Unicast-mixed cell": a genuinely
+  // camping-capable cell broadcasting eMBMS via the standard max-6-subframe MBSFN allocation
+  // (cell_barred is set not_barred -- see make_sib1_legacy()), even though no real unicast UE
+  // ever actually attaches.
+  asn1::rrc::sib_type1_s              sib1_legacy;
   asn1::rrc::sib_info_item_c sibs[ASN1_RRC_MAX_SIB];
   asn1::rrc::mac_main_cfg_s  mac_cnfg;
 
@@ -79,6 +89,38 @@ struct rrc_cfg_t {
   std::map<uint32_t, rrc_cfg_qci_t>                                                       qci_cfg;
   bool                                                                                    enable_mbsfn;
   uint16_t                                                                                mbms_mcs;
+  /* Rel-17 LTE_terr_bcast */
+  uint8_t                                                                                 pmch_bandwidth;           /* 0=off, 30/35/40 PRBs (TS 36.331 pmch-Bandwidth-r17) */
+  /* Rel-19 LTE_terr_bcast_Ph2 */
+  uint8_t                                                                                 pmch_cyclic_shift_alpha;  /* 0=off, 1/2/3 */
+  bool                                                                                    pmch_freq_interleaving;
+  uint8_t                                                                                 pmch_time_interleaving_n; /* 0/1=off, 2/4/8/16 */
+  uint8_t                                                                                 pmch_time_interleaving_m; /* 4/8/16/32 subframes per period */
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): 0=absent/inherit main */
+  uint8_t                                                                                 pmch_time_interleaving_n_last_mtch;
+  uint8_t                                                                                 pmch_time_interleaving_m_last_mtch;
+  /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping). Only
+   * meaningful/signalled when pmch_time_interleaving_n > 1; see rrc.cc's pack_mcch(). */
+  uint8_t                                                                                 pmch_n_soft_ref_category = 4; /* TS 36.306 Table 4.1-1 UE category */
+  uint8_t                                                                                 pmch_scaling_factor_beta_num = 1;
+  uint8_t                                                                                 pmch_scaling_factor_beta_den = 1;
+  bool                                                                                    pmch_use_mcs_table2;
+  uint8_t                                                                                 mch_sched_period_rf;          /* scheduling period in radio frames (default 64) */
+  uint8_t                                                                                 nof_mbms_sessions;            /* number of MTCH sessions (default 1) */
+  bool                                                                                    pmch_time_separation_sl2;     /* false=SL4 (default), true=SL2 (TS 36.211 §4.1) */
+  std::string                                                                             pmch_subcarrier_spacing;      /* "" = derive from r9 SCS; "khz1dot25"/"khz2dot5"/"khz7dot5"/"khz0dot37" = override */
+  uint16_t                                                                                sf_alloc_info_r16 = 0;        /* MCCH sf-AllocInfo-r16 (10-bit, first bit SF0); 0 = derive from r9 (TS 36.331 MBSFN-AreaInfo-r16) */
+  /* Extra PMCHs beyond PMCH0 (empty = today's single-PMCH behavior, using only
+   * the flat pmch_* fields above). Persisted here (set in reconfigure_embms(),
+   * read in configure_mbsfn_sibs()/pack_mcch()) rather than only threaded as a
+   * function parameter, since configure_mbsfn_sibs() has other call sites
+   * (startup, cell reconfiguration) that don't go through reconfigure_embms(). */
+  std::vector<pmch_cfg_t>                                                                 extra_pmch;
+  /* PMCH0's own session TEIDs, same format/semantics as embms_args_t::session_teids (comma-
+   * separated hex/decimal, e.g. "0xAAAAAAAA,0xAAAAAAAB") -- empty (default) means "no
+   * TEID-based filtering", the pre-existing behavior of signalling every known real session
+   * on PMCH0 unfiltered. See rrc.cc's resolve_pmch_sessions(). */
+  std::string                                                                             session_teids;
   uint32_t                                                                                inactivity_timeout_ms;
   std::array<srsran::CIPHERING_ALGORITHM_ID_ENUM, srsran::CIPHERING_ALGORITHM_ID_N_ITEMS> eea_preference_list;
   std::array<srsran::INTEGRITY_ALGORITHM_ID_ENUM, srsran::INTEGRITY_ALGORITHM_ID_N_ITEMS> eia_preference_list;
@@ -92,6 +134,8 @@ struct rrc_cfg_t {
   srb_cfg_t srb1_cfg;
   srb_cfg_t srb2_cfg;
   rrc_endc_cfg_t endc_cfg;
+  std::string    sib12_alert_file;  /* path to sib12_alert.conf for runtime SIGUSR1/SIGUSR2 emergency alerts */
+  std::string    sib_tag_state_file; /* path to persist sys_info_value_tag_r14 across restarts */
 };
 
 constexpr uint32_t UE_PCELL_CC_IDX = 0;

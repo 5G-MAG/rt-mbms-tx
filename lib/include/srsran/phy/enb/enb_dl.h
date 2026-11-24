@@ -38,6 +38,7 @@
 #include "srsran/phy/ch_estimation/refsignal_dl.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/dft/ofdm.h"
+#include "srsran/phy/resampling/resampler.h"
 #include "srsran/phy/phch/dci.h"
 #include "srsran/phy/phch/pbch.h"
 #include "srsran/phy/phch/pcfich.h"
@@ -68,6 +69,17 @@ typedef struct SRSRAN_API {
   cf_t*         out_buffer[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft[SRSRAN_MAX_PORTS];
   srsran_ofdm_t ifft_mbsfn;
+
+  /* CAS/PBCH/PSS/SSS ifft[] stays permanently at its own native, narrow symbol_sz
+   * (exactly like a standard, non-FeMBMS LTE cell) regardless of mbsfn_prb - it
+   * writes into its own cas_buffer[] here, then cas_upsampler[] bridges that
+   * narrow-rate output up to the wire's (possibly wider, to carry a wideband
+   * pmch_bandwidth) rate into the shared out_buffer[] ifft_mbsfn also targets.
+   * Replaces an earlier approach that widened ifft[]'s own symbol_sz directly -
+   * abandoned after a full day of unresolved corruption; see
+   * SIB13_MBSFN_TEST_RESULTS.md and this session's plan file. */
+  cf_t*                  cas_buffer[SRSRAN_MAX_PORTS];
+  srsran_resampler_fft_t cas_upsampler[SRSRAN_MAX_PORTS];
 
   srsran_pbch_t   pbch;
   srsran_pcfich_t pcfich;
@@ -105,6 +117,8 @@ SRSRAN_API int srsran_enb_dl_set_cell(srsran_enb_dl_t* q, srsran_cell_t cell);
 
 SRSRAN_API int srsran_enb_dl_set_mbsfn_subcarrier_spacing(srsran_enb_dl_t* q, srsran_scs_t subcarrier_spacing);
 
+SRSRAN_API int srsran_enb_dl_set_mbsfn_area_id(srsran_enb_dl_t* q, uint16_t mbsfn_area_id);
+
 SRSRAN_API bool srsran_enb_dl_location_is_common_ncce(srsran_enb_dl_t* q, const srsran_dci_location_t* loc);
 
 SRSRAN_API void srsran_enb_dl_put_base(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf);
@@ -118,7 +132,12 @@ SRSRAN_API int srsran_enb_dl_put_pdcch_ul(srsran_enb_dl_t* q, srsran_dci_cfg_t* 
 SRSRAN_API int
 srsran_enb_dl_put_pdsch(srsran_enb_dl_t* q, srsran_pdsch_cfg_t* pdsch, uint8_t* data[SRSRAN_MAX_CODEWORDS]);
 
-SRSRAN_API int srsran_enb_dl_put_pmch(srsran_enb_dl_t* q, srsran_pmch_cfg_t* pmch_cfg, uint8_t* data);
+/* shared_ti_tx_buf: see srsran_pmch_encode()'s doc comment in pmch.h. NULL is
+ * safe (falls back to q->pmch's own per-instance ti_tx_buf[]). */
+SRSRAN_API int srsran_enb_dl_put_pmch(srsran_enb_dl_t* q,
+                                       srsran_pmch_cfg_t* pmch_cfg,
+                                       uint8_t*            data,
+                                       uint8_t**           shared_ti_tx_buf);
 
 SRSRAN_API void srsran_enb_dl_gen_signal(srsran_enb_dl_t* q);
 

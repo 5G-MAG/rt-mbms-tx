@@ -760,11 +760,11 @@ int main(int argc, char** argv)
     exit(-1);
   }
   if (mbsfn_area_id > -1) {
-    if (srsran_refsignal_mbsfn_init(&mbsfn_refs, cell.nof_prb)) {
+    if (srsran_refsignal_mbsfn_init(&mbsfn_refs, cell.nof_prb, SRSRAN_SCS_15KHZ)) {
       ERROR("Error initializing equalizer");
       exit(-1);
     }
-    if (srsran_refsignal_mbsfn_set_cell(&mbsfn_refs, cell, mbsfn_area_id)) {
+    if (srsran_refsignal_mbsfn_set_cell(&mbsfn_refs, cell, mbsfn_area_id, SRSRAN_SCS_15KHZ)) {
       ERROR("Error initializing MBSFNR signal");
       exit(-1);
     }
@@ -863,7 +863,7 @@ int main(int argc, char** argv)
       }
 
       if (mch_table[sf_idx] == 1 && mbsfn_area_id > -1) {
-        srsran_refsignal_mbsfn_put_sf(cell, 0, csr_refs.pilots[0][sf_idx], mbsfn_refs.pilots[0][sf_idx], sf_symbols[0],SRSRAN_SCS_15KHZ,sf_idx);
+        srsran_refsignal_mbsfn_put_sf(cell, 0, csr_refs.pilots[0][sf_idx], mbsfn_refs.pilots[0][sf_idx], sf_symbols[0], SRSRAN_SCS_15KHZ, nf * 10 + sf_idx);
       } else {
         dl_sf.tti = nf * 10 + sf_idx;
         for (i = 0; i < cell.nof_ports; i++) {
@@ -873,7 +873,7 @@ int main(int argc, char** argv)
 
       srsran_pbch_mib_pack(&cell, sfn, bch_payload);
       if (sf_idx == 0) {
-        srsran_pbch_encode(&pbch, bch_payload, sf_symbols, nf % 4);
+        srsran_pbch_encode(&pbch, bch_payload, sf_symbols, nf % 4, nf);
       }
 
       dl_sf.tti = nf * 10 + sf_idx;
@@ -970,7 +970,7 @@ int main(int argc, char** argv)
           pmch_cfg.area_id = mbsfn_area_id;
 
           /* Encode PMCH */
-          if (srsran_pmch_encode(&pmch, &dl_sf, &pmch_cfg, data_mbms, sf_symbols)) {
+          if (srsran_pmch_encode(&pmch, &dl_sf, &pmch_cfg, data_mbms, sf_symbols, NULL)) {
             ERROR("Error encoding PDSCH");
             exit(-1);
           }

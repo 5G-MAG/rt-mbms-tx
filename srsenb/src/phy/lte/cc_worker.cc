@@ -19,6 +19,10 @@
  *
  */
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
 #include "srsran/common/threads.h"
 #include "srsran/srsran.h"
 
@@ -91,6 +95,16 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
   srsran_cell_t cell    = phy_->get_cell(cc_idx);
   uint32_t      nof_prb = phy_->get_nof_prb(cc_idx);
   uint32_t      sf_len  = SRSRAN_SF_LEN_PRB(nof_prb);
+  // PMCH (the MBSFN/broadcast data channel) can be signalled wider than the
+  // carrier itself (cell.mbsfn_prb, via pmch-Bandwidth-r17) for FeMBMS
+  // extended coverage: a narrow CAS carrier with a wider PMCH allocation.
+  // Every downlink buffer/FFT plan sized for the carrier alone would
+  // overflow once PMCH's own RE-mapping (which already correctly uses
+  // mbsfn_prb) exceeds it, so downlink allocations are sized from whichever
+  // is wider. Uplink (signal_buffer_rx, enb_ul_*) has no MBSFN direction and
+  // stays sized by the carrier's own nof_prb.
+  uint32_t      dl_max_prb = std::max(nof_prb, static_cast<uint32_t>(cell.mbsfn_prb));
+  uint32_t      dl_sf_len  = SRSRAN_SF_LEN_PRB(dl_max_prb);
 
   // Init cell here
   for (uint32_t p = 0; p < phy->get_nof_ports(cc_idx); p++) {
@@ -100,14 +114,14 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
       return;
     }
     srsran_vec_cf_zero(signal_buffer_rx[p], 2 * sf_len);
-    signal_buffer_tx[p] = srsran_vec_cf_malloc(3 * 2 * sf_len);
+    signal_buffer_tx[p] = srsran_vec_cf_malloc(3 * 2 * dl_sf_len);
     if (!signal_buffer_tx[p]) {
       ERROR("Error allocating memory");
       return;
     }
-    srsran_vec_cf_zero(signal_buffer_tx[p], 3 * 2 * sf_len);
+    srsran_vec_cf_zero(signal_buffer_tx[p], 3 * 2 * dl_sf_len);
   }
-  if (srsran_enb_dl_init(&enb_dl, signal_buffer_tx, nof_prb)) {
+  if (srsran_enb_dl_init(&enb_dl, signal_buffer_tx, dl_max_prb)) {
     ERROR("Error initiating ENB DL (cc=%d)", cc_idx);
     return;
   }
@@ -129,8 +143,9 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     return;
   }
 
-  /* Setup SI-RNTI in PHY */
-  add_rnti( SRSRAN_SIRNTI_MBMS_DEDICATED);
+  /* Setup SI-RNTI in PHY -- value legally differs by cell type (TS 36.321 §7.1), matching the
+   * same cell.mbms_dedicated branch already used for MIB packing and SIB1/SI-DCI generation. */
+  add_rnti(cell.mbms_dedicated ? SRSRAN_SIRNTI_MBMS_DEDICATED : SRSRAN_SIRNTI);
 
   /* Setup P-RNTI in PHY */
   add_rnti(SRSRAN_PRNTI);
@@ -140,7 +155,7 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     add_rnti(i);
   }
 
-  if (srsran_softbuffer_tx_init(&temp_mbsfn_softbuffer, nof_prb)) {
+  if (srsran_softbuffer_tx_init(&temp_mbsfn_softbuffer, dl_max_prb)) {
     ERROR("Error initiating soft buffer");
     exit(-1);
   }
@@ -232,7 +247,21 @@ void cc_worker::work_dl(const srsran_dl_sf_cfg_t&            dl_sf_cfg,
 {
   std::lock_guard<std::mutex> lock(mutex);
   dl_sf = dl_sf_cfg;
-  dl_sf.subcarrier_spacing = SRSRAN_SCS_1KHZ25;
+  /* Propagate the MBSFN SCS from the PHY config on the first MBSFN subframe.
+   * Both the dl_sf SCS (used by encode_pmch/put_refs) and the enb_dl internal
+   * pilot sequence SCS must match. The lazy update only fires when they diverge
+   * (once, on the first MBSFN subframe after configure_mbsfn is called). */
+  srsran_scs_t mbsfn_scs = SRSRAN_SCS_1KHZ25;
+  if (dl_sf.sf_type == SRSRAN_SF_MBSFN && mbsfn_cfg != nullptr) {
+    mbsfn_scs = mbsfn_cfg->subcarrier_spacing;
+    if (mbsfn_scs != enb_dl.subcarrier_spacing) {
+      srsran_enb_dl_set_mbsfn_subcarrier_spacing(&enb_dl, mbsfn_scs);
+    }
+    if (mbsfn_cfg->mbsfn_area_id != enb_dl.mbsfnr_signal.mbsfn_area_id) {
+      srsran_enb_dl_set_mbsfn_area_id(&enb_dl, mbsfn_cfg->mbsfn_area_id);
+    }
+  }
+  dl_sf.subcarrier_spacing = mbsfn_scs;
 
   // Put base signals (references, PBCH, PCFICH and PSS/SSS) into the resource grid
   srsran_enb_dl_put_base(&enb_dl, &dl_sf);
@@ -244,6 +273,9 @@ void cc_worker::work_dl(const srsran_dl_sf_cfg_t&            dl_sf_cfg,
   } else {
     if (mbsfn_cfg->enable) {
       encode_pmch(dl_grants.pdsch, mbsfn_cfg);
+    } else if (getenv("CAS_MUTE_DIAG")) {
+      fprintf(stderr, "CAS_MUTE_DIAG_ENCPMCH tti=%u sf=%u SKIPPED mbsfn_cfg.enable=false\n",
+              dl_sf.tti, dl_sf.tti % 10);
     }
   }
 
@@ -543,16 +575,104 @@ int cc_worker::encode_pdcch_dl(stack_interface_phy_lte::dl_sched_grant_t* grants
 
 int cc_worker::encode_pmch(stack_interface_phy_lte::dl_sched_grant_t* grant, srsran_mbsfn_cfg_t* mbsfn_cfg)
 {
+  /* MAC sets dci.rnti=0 (mac.cc) when there is nothing to actually transmit
+   * this subframe (e.g. mtch_stop==0, no MBMS traffic queued) - distinct from
+   * grant->data[0]==NULL, which is also used intentionally for a time-
+   * interleaving continuation subframe (slot_n>0) that must still encode the
+   * slot's cached ti_tx_buf content, so data[0] alone can't be the guard.
+   * Without this check, srsran_enb_dl_put_pmch() encoded a well-formed PMCH TB
+   * from srsran_pmch_t's zeroed, never-primed ti_tx_buf[] regardless - RX,
+   * decoding that all-zero payload successfully, saw its first MAC subheader
+   * byte (0x00: E-bit=0, LCID=0) and misrouted it to the MCCH/RRC handler
+   * (LCID 0 is MCCH's reserved bearer ID), corrupting Phy::_mcch until the
+   * next real MCCH occasion. Mirrors encode_pdsch()'s existing
+   * `rnti && ue_db.count(rnti)` gate for the same reason. */
+  if (getenv("PMCH_TI_DIAG")) {
+    fprintf(stderr, "TI_DIAG_ENCPMCH tti=%u rnti=0x%x data=%p subframe_idx=%u\n", dl_sf.tti, grant->dci.rnti,
+            (void*)grant->data[0], mbsfn_cfg->mch_subframe_idx);
+  }
+  if (getenv("CAS_MUTE_DIAG")) {
+    fprintf(stderr, "CAS_MUTE_DIAG_ENCPMCH tti=%u sf=%u rnti=0x%x data=%p mch_subframe_idx=%u is_mcch=%d\n",
+            dl_sf.tti, dl_sf.tti % 10, grant->dci.rnti, (void*)grant->data[0], mbsfn_cfg->mch_subframe_idx,
+            (int)mbsfn_cfg->is_mcch);
+  }
+  if (!grant->dci.rnti) {
+    /* FIXED 2026-07-19: this early return left enb_dl.sf_symbols[0] holding
+     * whatever the LAST real PMCH encode wrote there - srsran_enb_dl_gen_signal()
+     * unconditionally IFFTs that buffer for every MBSFN subframe regardless of
+     * whether fresh content was written this occasion, so an idle occasion
+     * (no MAC grant) was retransmitting stale, real-looking-but-wrong-TB
+     * content instead of silence. Confirmed live: at pmch_bandwidth=40, MAC
+     * grants real data on ~0.16% of MBSFN subframes (content-rate-limited -
+     * build_mch_sched() correctly drains the queue fast over a much bigger
+     * per-subframe TBS and goes idle for the rest of the period), but the
+     * receiver's own DTX/idle detection (MCHIDLE, power-threshold based) was
+     * only catching ~52% of subframes as idle - the other ~48% looked like a
+     * real, powered signal worth attempting to decode (and correctly failing
+     * every time, since it's stale/wrong-TB, not this subframe's actual
+     * content) - inflating BLER on subframes that were never really
+     * scheduled. Zeroing the RE grid here makes an idle occasion transmit
+     * genuine silence, so the receiver's existing power-based DTX detection
+     * can correctly recognize it instead of attempting a doomed decode.
+     *
+     * CORRECTED 2026-07-20: ifft_mbsfn.nof_re is a PER-SYMBOL RE count (see
+     * ofdm.c's single nof_re = cfg.nof_prb * SRSRAN_NRE_SCS(...) assignment),
+     * not a per-subframe one - the original comment's "no more/less" claim was
+     * wrong. ofdm_tx_slot_mbsfn() (the IFFT that actually reads this buffer)
+     * loops total_syms = nof_symbols_mbsfn * SRSRAN_MBSFN_NOF_SLOTS(scs) times,
+     * consuming nof_re samples EACH time (mirrors ue_dl_wide_sf_len()'s
+     * identical total_syms computation on the RX side, used for the analogous
+     * purpose there). Zeroing only nof_re left every symbol after the first
+     * still holding stale content - for every SCS where total_syms>1 (i.e.
+     * every SCS except 1.25kHz, where nof_symbols_mbsfn==SRSRAN_MBSFN_NOF_SLOTS
+     * ==1 makes total_syms==1 and this bug was coincidentally invisible), most
+     * of a stale PMCH TB would still be transmitted un-silenced on an idle
+     * occasion. Zero the full total_syms*nof_re span instead. */
+    uint32_t mbsfn_total_syms =
+        enb_dl.ifft_mbsfn.nof_symbols_mbsfn * SRSRAN_MBSFN_NOF_SLOTS(enb_dl.ifft_mbsfn.cfg.subcarrier_spacing);
+    srsran_vec_cf_zero(enb_dl.sf_symbols[0], enb_dl.ifft_mbsfn.nof_re * mbsfn_total_syms);
+    /* REGRESSION FIX (same day): the zero-fill above also wipes the MBSFN
+     * reference signals (MBSFN-RS) that enb_dl.c's put_refs() writes into this
+     * same buffer independently of PMCH data - real FeMBMS/LTE requires those
+     * pilots on EVERY MBSFN subframe regardless of whether user data is
+     * present, specifically so receivers can maintain channel estimation
+     * across idle occasions. Without this, the receiver's chest_res.ce[] goes
+     * completely empty on muted subframes (confirmed live: CIR/CE dashboard
+     * panels showed nothing but the -80dB floor). Re-write the pilots
+     * immediately after the zero-fill, mirroring put_refs()'s exact call -
+     * safe and idempotent regardless of whether put_refs() already ran this
+     * subframe (before or after this function, either order). */
+    {
+      srsran_scs_t scs = dl_sf.subcarrier_spacing;
+      uint32_t     sf_idx;
+      if (SRSRAN_SCS_IS_370HZ(scs)) {
+        uint32_t pos40 = dl_sf.tti % 40u;
+        sf_idx = (pos40 > 0u) ? (pos40 - 1u) / 3u : 0u;
+      } else {
+        sf_idx = dl_sf.tti % 10u;
+      }
+      srsran_refsignal_mbsfn_put_sf(enb_dl.cell, 0, enb_dl.csr_signal.pilots[0][dl_sf.tti % 10u],
+          enb_dl.mbsfnr_signal.pilots[0][sf_idx], enb_dl.sf_symbols[0], scs, dl_sf.tti);
+    }
+    return SRSRAN_SUCCESS;
+  }
   srsran_pmch_cfg_t pmch_cfg;
   ZERO_OBJECT(pmch_cfg);
   srsran_configure_pmch(&pmch_cfg, &enb_dl.cell, mbsfn_cfg);
   srsran_ra_dl_compute_nof_re(&enb_dl.cell, &dl_sf, &pmch_cfg.pdsch_cfg.grant);
 
+  pmch_cfg.cyclic_shift       = mbsfn_cfg->cyclic_shift;
+  pmch_cfg.cyclic_shift_alpha = mbsfn_cfg->cyclic_shift_alpha;
+  pmch_cfg.freq_interleaving  = mbsfn_cfg->freq_interleaving;
+  pmch_cfg.subframe_idx       = mbsfn_cfg->mch_subframe_idx;
+
   // Set soft buffer
   pmch_cfg.pdsch_cfg.softbuffers.tx[0] = &temp_mbsfn_softbuffer;
 
-  // Encode PMCH
-  if (srsran_enb_dl_put_pmch(&enb_dl, &pmch_cfg, grant->data[0])) {
+  // Encode PMCH. Shared, cell-wide ti_tx_buf (not this worker's own
+  // enb_dl.pmch.ti_tx_buf[]) - see phy_common::pmch_ti_tx_buf's doc comment
+  // for why a per-worker buffer is unsafe with time interleaving active.
+  if (srsran_enb_dl_put_pmch(&enb_dl, &pmch_cfg, grant->data[0], phy->get_pmch_ti_tx_buf())) {
     Error("Error putting PMCH");
     return SRSRAN_ERROR;
   }

@@ -46,12 +46,33 @@ enb_cell_common_list::enb_cell_common_list(const rrc_cfg_t& cfg_) : cfg(cfg_)
 
     // Set Cell SIB1
     new_cell->sib1 = cfg.sib1;
+    // Rel-19 CAS muting: populate v1900 extension if enabled
+    if (cfg.cell.cas_muting) {
+      new_cell->sib1.non_crit_ext_present                              = true;
+      new_cell->sib1.non_crit_ext.cas_muting_cfg_r19_present          = true;
+      new_cell->sib1.non_crit_ext.cas_muting_cfg_r19.k_cas_r19        = cfg.cell.k_cas;
+      using n_cas_e = sib_type1_mbms_v1900_s::n_cas_r19_e_;
+      switch (cfg.cell.n_cas) {
+        case 4:  new_cell->sib1.non_crit_ext.cas_muting_cfg_r19.n_cas_r19 = n_cas_e::n4;  break;
+        case 8:  new_cell->sib1.non_crit_ext.cas_muting_cfg_r19.n_cas_r19 = n_cas_e::n8;  break;
+        case 16: new_cell->sib1.non_crit_ext.cas_muting_cfg_r19.n_cas_r19 = n_cas_e::n16; break;
+        default: new_cell->sib1.non_crit_ext.cas_muting_cfg_r19.n_cas_r19 = n_cas_e::n2;  break;
+      }
+    }
     // Update cellId
     sib_type1_mbms_r14_s::cell_access_related_info_r14_s_* cell_access = &new_cell->sib1.cell_access_related_info_r14;
     cell_access->cell_id_r14.from_number((cfg.enb_id << 8u) + new_cell->cell_cfg.cell_id);
     cell_access->tac_r14.from_number(new_cell->cell_cfg.tac);
     // Update DL EARFCN
     new_cell->sib1.freq_band_ind_r14 = (uint8_t)srsran_band_get_band(new_cell->cell_cfg.dl_earfcn);
+
+    // Set Cell SIB1 (legacy) -- same per-cell identity as the MBMS-r14 one above, just in
+    // the legacy cell_access_related_info layout. Used instead of sib1 when this cell's
+    // mbms_dedicated is false; see rrc::generate_sibs().
+    new_cell->sib1_legacy                                  = cfg.sib1_legacy;
+    new_cell->sib1_legacy.cell_access_related_info.cell_id.from_number((cfg.enb_id << 8u) + new_cell->cell_cfg.cell_id);
+    new_cell->sib1_legacy.cell_access_related_info.tac.from_number(new_cell->cell_cfg.tac);
+    new_cell->sib1_legacy.freq_band_ind = (uint8_t)srsran_band_get_band(new_cell->cell_cfg.dl_earfcn);
 
     // Set Cell SIB2
     // update PRACH root seq index for this cell

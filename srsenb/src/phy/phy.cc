@@ -236,6 +236,11 @@ void phy::set_mch_period_stop(uint32_t stop)
   workers_common.set_mch_period_stop(stop);
 }
 
+void phy::set_last_mtch_start(uint8_t pmch_idx, uint32_t start_sf)
+{
+  workers_common.set_last_mtch_start(pmch_idx, start_sf);
+}
+
 void phy::set_activation_deactivation_scell(uint16_t rnti, const std::array<bool, SRSRAN_MAX_CARRIERS>& activation)
 {
   // Iterate all elements except 0 that is reserved for primary cell
@@ -337,6 +342,11 @@ void phy::configure_mbsfn(srsran::sib2_mbms_t* sib2, srsran::sib13_t* sib13, con
   mbsfn_config.mcch = mcch;
 
   workers_common.configure_mbsfn(&mbsfn_config);
+}
+
+void phy::set_cell_cas_muting_cfg(bool cas_muting, uint8_t k_cas, uint8_t n_cas, uint8_t additional_non_mbsfn_subframes)
+{
+  workers_common.set_cell_cas_muting_cfg(cas_muting, k_cas, n_cas, additional_non_mbsfn_subframes);
 }
 
 // Start GUI

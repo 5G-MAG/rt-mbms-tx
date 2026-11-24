@@ -56,7 +56,8 @@ void generate_mcch_table(uint8_t* table, uint32_t sf_alloc)
 
 void generate_mcch_table_r16(uint8_t* table, uint32_t alloc)
 {
-  for (uint32_t j = 0; j < 9; j++) {
-    table[10-j] = (alloc >> j) & 0x01;
+  // 9-bit sf-AllocInfo-r16 per TS 36.331: MSB maps to SF1, LSB maps to SF9.
+  for (uint32_t sf = 1; sf <= 9; sf++) {
+    table[sf] = (alloc >> (9 - sf)) & 0x01;
   }
 }

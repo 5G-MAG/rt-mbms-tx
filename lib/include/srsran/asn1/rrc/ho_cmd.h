@@ -204,7 +204,7 @@ struct as_cfg_s {
   security_algorithm_cfg_s source_security_algorithm_cfg;
   fixed_bitstring<16>      source_ue_id;
   mib_s                    source_mib;
-  sib_type1_mbms_r14_s              source_sib_type1;
+  sib_type1_s              source_sib_type1;
   sib_type2_s              source_sib_type2;
   ant_info_common_s        ant_info_common;
   uint32_t                 source_dl_carrier_freq = 0;

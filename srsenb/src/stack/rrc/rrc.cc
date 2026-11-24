@@ -20,6 +20,7 @@
  */
 
 #include "srsenb/hdr/stack/rrc/rrc.h"
+#include <cstdio>
 #include "srsenb/hdr/stack/mac/sched_interface.h"
 #include "srsenb/hdr/stack/rrc/rrc_cell_cfg.h"
 #include "srsenb/hdr/stack/rrc/rrc_endc.h"
@@ -30,23 +31,186 @@
 #include "srsran/asn1/rrc_utils.h"
 #include "srsran/common/bcd_helpers.h"
 #include "srsran/common/enb_events.h"
+#include "srsran/common/rwlock_guard.h"
 #include "srsran/common/standard_streams.h"
 #include "srsran/common/string_helpers.h"
 #include "srsran/interfaces/enb_mac_interfaces.h"
 #include "srsran/interfaces/enb_pdcp_interfaces.h"
 #include "srsran/interfaces/enb_rlc_interfaces.h"
+#include "srsran/phy/phch/ra_dl.h"
 
 using srsran::byte_buffer_t;
 
 using namespace asn1::rrc;
 
+// Forward-declare parse_sib12 to avoid pulling libconfig into this TU
+namespace srsenb { namespace sib_sections {
+int parse_sib12(const std::string& filename, asn1::rrc::sib_type12_r9_s* data);
+} } // namespace sib_sections, srsenb
+
 namespace srsenb {
+
+/* Largest PMCH mcs_idx <= requested_mcs whose transport block actually fits in the
+ * MBSFN subframe's data REs. srsran_pmch_fill_ra_mcs() picks modulation/TBS purely
+ * from TS 36.213 Table 7.1.7.1-1 (mirroring the classic PDSCH table, per spec clause
+ * 11.1) - it has no notion of the *available* RE budget, so nothing stops an operator
+ * from configuring an MCS whose TBS+24 exceeds Qm*nof_re, i.e. a code rate above 1:
+ * a transport block that cannot decode even in principle (reproduced directly via
+ * pmch_test at mcs 26-28/100 PRB - every codeblock hits max iterations and CRC=KO,
+ * not a subtle bug). Guard against silently configuring that here, using the
+ * worst-case (fewest available REs) standard 15kHz MBSFN budget: cfi=2, extended CP.
+ * A real non_mbsfn_region_length=1 config has strictly more REs than assumed here, so
+ * this can only be conservative, never let an infeasible MCS through.
+ * Only meaningful for the standard 15kHz path - FeMBMS-dedicated low-SCS carriers
+ * have no control region and a very different (much larger) RE budget; this does not
+ * attempt to model those and must not be called for them.
+ *
+ * KNOWN LIMITATION (found July 2026, not fixed): this only guarantees code rate <= 1,
+ * i.e. mathematically decodable in principle - not that decode is actually reliable.
+ * A real ZMQ-loopback test at nof_prb=25 with mbms_mcs=28 (clamped by this function to
+ * 26, rate <=1) measured ~99.9% MTCH CRC failure over a real, non-identity channel; the
+ * same test at mcs=2 decoded cleanly (0 CRC errors, all packets delivered). So a
+ * configuration that passes this check can still be far too marginal to use in
+ * practice. No safety margin is applied here - deliberately: the one data point above
+ * establishes that the problem exists, but not how much margin would actually fix it,
+ * and any specific number would be an invented guess dressed up as a numeric fix, not
+ * something derived from spec or from calibrated link-budget/turbo-code analysis. If
+ * this is worth hardening, it needs real characterization (e.g. turbo-code BLER-vs-code
+ * rate curves at target SNR) before picking a number - not a guess. */
+// Parses a comma-separated TEID list (e.g. "0xAAAAAAAA,0xAAAAAAAB") the same way gtpu.cc's
+// m1u_handler::init() parses embms.session_teids for the M1-U demux -- base-0 std::stoul so
+// "0x..." entries work, not string_helpers.h's string_parse_list() (decimal-only). The RRC
+// (this file) and GTP-U (gtpu.cc) parses of the same config string must stay in lockstep, or
+// a session's OTA-signalled LCID (below) and its actual M1-U delivery LCID could disagree.
+// Empty input, or any malformed entry, both return {} (no filtering) -- mirrors gtpu.cc's own
+// "ignore the whole list, falling back to legacy behavior" choice on a bad entry.
+static std::vector<uint32_t> parse_teid_list(const std::string& csv)
+{
+  std::vector<uint32_t> teids;
+  if (csv.empty()) {
+    return teids;
+  }
+  size_t pos = 0;
+  while (pos <= csv.size()) {
+    size_t comma = csv.find(',', pos);
+    std::string tok = csv.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    try {
+      size_t consumed = 0;
+      teids.push_back((uint32_t)std::stoul(tok, &consumed, 0));
+      if (consumed != tok.size()) {
+        throw std::invalid_argument("trailing characters");
+      }
+    } catch (const std::exception&) {
+      return {};
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    pos = comma + 1;
+  }
+  return teids;
+}
+
+// Resolves which real sessions one PMCH (PMCH0 when extra==nullptr, else cfg.extra_pmch[p-1])
+// should signal, each with lc_ch_id already assigned -- shared by configure_mbsfn_sibs() (which
+// copies the result into srsran::pmch_info_t::mbms_session_info_list) and pack_mcch() (which
+// copies it into the ASN.1 MBMS-SessionInfoList-r9 wire type instead). An EMPTY return means
+// "nothing real is available for this PMCH" -- both callers keep their own pre-existing static/
+// fabricated single-session stub for that case, unchanged from before this feature existed
+// (the two stubs differ: pack_mcch()'s must be ASN.1-legal, e.g. a real-looking fake TMGI;
+// configure_mbsfn_sibs()'s internal one doesn't need to be).
+//
+// Two cases, checked in priority order:
+//  1. This PMCH's own session_teids is configured -- use exactly the configured TEIDs that
+//     currently have a real M3AP-driven session (mbms_sessions, keyed by tmgi_key), with
+//     lc_ch_id = (that TEID's 0-based position in session_teids) + 1. That indexing must match
+//     gtpu.cc's m1u_handler demux exactly, or MCCH would signal one LCID for a session while
+//     M1-U delivers its data under a different one. Returned even if it matches nothing yet
+//     (an explicit filter is honored as configured, not silently overridden by case 2 below).
+//  2. No session_teids configured anywhere on this PMCH, this IS PMCH0, and at least one real
+//     session exists -- today's pre-existing, unfiltered behavior, unchanged: every known
+//     session goes on PMCH0. PMCH1+ never falls into this case: without an explicit filter
+//     there's no way to know which sessions are "its", and defaulting to "all of them" would
+//     just duplicate PMCH0's assignment.
+static std::vector<srsran::pmch_info_t::mbms_session_info_t>
+resolve_pmch_sessions(const pmch_cfg_t*                                                       extra,
+                       const rrc_cfg_t&                                                        cfg,
+                       const std::map<std::string, srsran::pmch_info_t::mbms_session_info_t>& mbms_sessions)
+{
+  std::vector<srsran::pmch_info_t::mbms_session_info_t> out;
+  const std::string&    session_teids_str = extra ? extra->session_teids : cfg.session_teids;
+  std::vector<uint32_t> wanted_teids      = parse_teid_list(session_teids_str);
+
+  /* lc_ch_id here becomes the "lcid" half of compose_mch_lcid(pmch_idx, lcid) at every
+   * caller (rrc.cc's configure_mbms_bearers(), gtpu.cc's m1u_handler) -- and that
+   * composite is what bearer_manager::add_eps_bearer()'s uint8_t eps_bearer_id (0..255)
+   * bounds (see enb_pdcp_interfaces.h's comment on PMCH_LCID_STRIDE/PMCH_LCID_MAX_COMPOSITE
+   * for the full reasoning, spec citations included). srsran::pmch_info_t::
+   * max_session_per_pmch (29) alone would let lcid exceed
+   * PMCH_LCID_STRIDE (16), corrupting the composite's mch_idx bits for pmch_idx>=1. Only
+   * tighten the cap once a second PMCH genuinely exists (extra_pmch non-empty) -- with
+   * just PMCH0, composite==lcid always (mch_idx=0), so the original, more generous
+   * 29-session cap is still exactly safe and unchanged. */
+  uint32_t max_real_sessions = (extra || !cfg.extra_pmch.empty())
+                                   ? std::min<uint32_t>(srsran::pmch_info_t::max_session_per_pmch, PMCH_LCID_STRIDE - 1)
+                                   : srsran::pmch_info_t::max_session_per_pmch;
+
+  for (uint32_t i = 0; i < wanted_teids.size() && out.size() < max_real_sessions; i++) {
+    for (auto& kv : mbms_sessions) {
+      if (kv.second.teid == wanted_teids[i]) {
+        out.push_back(kv.second);
+        out.back().lc_ch_id = (uint8_t)(i + 1);
+        break; // TEIDs are expected to be unique; first (and only) match wins.
+      }
+    }
+  }
+  if (!out.empty() || !wanted_teids.empty()) {
+    return out;
+  }
+  if (extra || mbms_sessions.empty()) {
+    return out; // PMCH1+ with no filter, or no real sessions exist anywhere: nothing to offer.
+  }
+  uint32_t n = std::min<uint32_t>((uint32_t)mbms_sessions.size(), max_real_sessions);
+  uint32_t s = 0;
+  for (auto& kv : mbms_sessions) {
+    if (s >= n) {
+      break;
+    }
+    out.push_back(kv.second);
+    out.back().lc_ch_id = (uint8_t)(s + 1);
+    s++;
+  }
+  return out;
+}
+
+static uint16_t clamp_pmch_mcs_to_feasible(uint16_t requested_mcs, uint32_t nof_prb, bool use_mcs_table2)
+{
+  static const uint32_t worst_case_re_per_prb = 102; // cfi=2, EXT CP, both slots, MBSFN-RS excluded
+  const uint32_t        nof_re                = nof_prb * worst_case_re_per_prb;
+  for (uint16_t mcs = requested_mcs; mcs > 0; mcs--) {
+    srsran_ra_tb_t tb = {};
+    tb.mcs_idx        = mcs;
+    if (srsran_pmch_fill_ra_mcs(&tb, nof_prb, use_mcs_table2, SRSRAN_SCS_15KHZ) < 0) {
+      continue;
+    }
+    uint32_t qm = srsran_mod_bits_x_symbol(tb.mod);
+    if ((uint32_t)tb.tbs + 24 <= qm * nof_re) {
+      return mcs;
+    }
+  }
+  return 0;
+}
 
 rrc::rrc(srsran::task_sched_handle task_sched_, enb_bearer_manager& manager_) :
   logger(srslog::fetch_basic_logger("RRC")), bearer_manager(manager_), task_sched(task_sched_), rx_pdu_queue(128)
-{}
+{
+  pthread_rwlock_init(&cell_common_list_rwlock, nullptr);
+}
 
-rrc::~rrc() {}
+rrc::~rrc()
+{
+  pthread_rwlock_destroy(&cell_common_list_rwlock);
+}
 
 int32_t rrc::init(const rrc_cfg_t&       cfg_,
                   phy_interface_rrc_lte* phy_,
@@ -166,6 +330,7 @@ void rrc::get_metrics(rrc_metrics_t& m)
 
 uint8_t* rrc::read_pdu_bcch_dlsch(const uint8_t cc_idx, const uint32_t sib_index)
 {
+  srsran::rwlock_read_guard lock(cell_common_list_rwlock);
   if (sib_index < ASN1_RRC_MAX_SIB && cc_idx < cell_common_list->nof_cells()) {
     return cell_common_list->get_cc_idx(cc_idx)->sib_buffer.at(sib_index)->msg;
   }
@@ -230,6 +395,109 @@ void rrc::protocol_failure(uint16_t rnti)
   }
 }
 
+/* (Re-)registers the broadcast RNTI's RLC/PDCP/GTP-U/bearer_manager bearers from the
+ * current PMCH/session configuration. Safe to call repeatedly -- add_bearer_mrb()/
+ * add_bearer_mrb()/add_eps_bearer() are all no-ops for an already-registered (rnti,
+ * id) pair, so re-running this after cfg.extra_pmch or mbms_sessions changes only
+ * actually adds whatever is genuinely new. Called once from add_user() when the
+ * broadcast RNTI is first added (MAC's first-MCCH-ready event, effectively at eNB
+ * startup) and again from configure_mbsfn_sibs() every time it re-packs MCCH after
+ * that -- add_user() itself only ever runs once per process lifetime, so without this
+ * second call site a PMCH or session added later (e.g. embms.nof_pmch live-set after
+ * startup, or a real M3AP session arriving after the fabricated-fallback bearer was
+ * already registered) would be signalled in MCCH but never actually get a bearer to
+ * deliver data through. */
+void rrc::configure_mbms_bearers()
+{
+  /* Iterate every configured PMCH (not just PMCH0 -- mcch.msg.pmch_info_list_r9[0]
+   * before this loop existed) via resolve_pmch_sessions(), the same session-
+   * resolution logic configure_mbsfn_sibs()/pack_mcch() use to build the actual
+   * MCCH content, rather than re-deriving PMCH index from the packed ASN.1
+   * structure (pmch_info_list_r9 and pmch_info_list_ext_v1900 are two SEPARATE
+   * lists, split by has_phase2 -- neither one's array position is the real,
+   * area-wide PMCH index on its own). Every real or fabricated session gets a
+   * bearer, matching this loop's pre-existing behavior for PMCH0.
+   *
+   * lcid alone is ambiguous once 2+ PMCHs exist (each independently numbers its
+   * own sessions from 1) -- PDCP/GTP-U/bearer_manager have no PMCH concept of
+   * their own (flat maps keyed by a single id), so every one of their calls below
+   * uses compose_mch_lcid(p, lcid) instead of bare lcid, keeping every (PMCH,
+   * lcid) pair's key unique. Only rlc->add_bearer_mrb() decomposes this back
+   * (inside srsenb::rlc's own wrapper) since its inner object is genuinely
+   * mch_idx-aware and MAC's scheduler already reads specific (pmch_idx, lcid)
+   * pairs from it -- see enb_pdcp_interfaces.h's compose_mch_lcid() doc comment. */
+  uint32_t nof_pmch_now = 1u + (uint32_t)cfg.extra_pmch.size();
+  for (uint32_t p = 0; p < nof_pmch_now; p++) {
+    const pmch_cfg_t* extra    = (p > 0) ? &cfg.extra_pmch[p - 1] : nullptr;
+    auto              sessions = resolve_pmch_sessions(extra, cfg, mbms_sessions);
+    std::vector<uint32_t> lcids;
+    if (!sessions.empty()) {
+      for (auto& info : sessions) {
+        lcids.push_back(info.lc_ch_id);
+      }
+    } else if (p == 0 || extra) {
+      /* resolve_pmch_sessions() returns empty both for "PMCH1+, no session_teids
+       * configured" (genuinely nothing to add a bearer for) AND for "no real M3AP
+       * session exists yet" (true at startup, for every PMCH, until the first
+       * MBMS Session Start Request arrives) -- the two are NOT the same thing:
+       * configure_mbsfn_sibs()/pack_mcch() always fabricate a placeholder session
+       * for the latter case (so MCCH keeps signalling *something*), and this loop
+       * must register a matching bearer for it too, or the very first M1-U packets
+       * -- which can arrive before any M3AP session-start event, straight after
+       * this eNB's own startup -- have nowhere to go ("Can't deliver SDU for EPS
+       * bearer N", confirmed live). "p==0 || extra" is always true (kept as
+       * self-documentation of the actual condition, not a real filter) --
+       * fabrication applies uniformly, mirroring pack_mcch()'s own fallback. */
+      uint32_t nof_sessions_p = extra ? (extra->nof_mbms_sessions ? extra->nof_mbms_sessions : 1u)
+                                        : (cfg.nof_mbms_sessions ? cfg.nof_mbms_sessions : 1u);
+      for (uint32_t s = 0; s < nof_sessions_p && s < 8u; s++) {
+        lcids.push_back(s + 1);
+      }
+    }
+    for (uint32_t lcid : lcids) {
+      uint32_t composite = compose_mch_lcid(p, lcid);
+      if (composite > PMCH_LCID_MAX_COMPOSITE) {
+        /* gtpu.cc's tunnel manager silently drops anything past this ceiling with just a
+         * terse "invalid eps-BearerID" warning (confirmed live) -- fail loudly and by
+         * name here instead, since by the time that log line would fire there's no
+         * indication which PMCH/session it was even for. Deliberately not tracked in
+         * _registered_mbms_bearers below (checked only after this point) -- an
+         * over-budget config should keep re-logging every call, not go silent after
+         * the first occurrence. */
+        logger.error("configure_mbms_bearers: PMCH %u lcid %u -> composite %u exceeds the max "
+                     "addressable MBMS bearer id (%u) -- skipping this bearer entirely. Reduce "
+                     "nof_pmch or the number of sessions on this PMCH.",
+                     p, lcid, composite, PMCH_LCID_MAX_COMPOSITE);
+        continue;
+      }
+      if (!_registered_mbms_bearers.insert(composite).second) {
+        // Already registered on an earlier call to this function (safe to call
+        // repeatedly -- see its own doc comment) -- skip re-registering it rather than
+        // let bearer_manager log "EPS bearer ID %d ... already registered" at ERROR
+        // level on every single MCCH repack, which is genuinely harmless but noisy
+        // enough to trip alerting in a real deployment.
+        continue;
+      }
+      uint32_t addr_in   = 0;
+      // adding UE object to MAC for MRNTI without scheduling configuration (broadcast not part of regular scheduling)
+      rlc->add_bearer_mrb(SRSRAN_MRNTI, composite);
+      /* eps_bearer_id must be distinct per MBMS session (mirrors lcid, same as the
+       * gtpu->add_bearer() call two lines below) -- previously hardcoded to 1 for
+       * every session, so gtpu_pdcp_adapter::write_sdu()'s bearers->get_radio_bearer(
+       * MRNTI, eps_bearer_id) lookup collided across sessions: the last-registered
+       * session's lcid silently overwrote every earlier one's mapping under the same
+       * key, and M1-U content for any session but the last was dropped with "Can't
+       * deliver SDU for EPS bearer N" -- found while wiring up per-session M1-U TEID
+       * demux, latent since multi-session MBMS support was added, undetected until
+       * now because every real test only ever exercised a single session. */
+      bearer_manager.add_eps_bearer(
+          SRSRAN_MRNTI, static_cast<uint8_t>(composite), srsran::srsran_rat_t::lte, composite);
+      pdcp->add_bearer(SRSRAN_MRNTI, composite, srsran::make_drb_pdcp_config_t(1, false));
+      gtpu->add_bearer(SRSRAN_MRNTI, composite, 1, 1, addr_in);
+    }
+  }
+}
+
 // This function is called from PRACH worker (can wait)
 int rrc::add_user(uint16_t rnti, const sched_interface::ue_cfg_t& sched_ue_cfg)
 {
@@ -247,20 +515,11 @@ int rrc::add_user(uint16_t rnti, const sched_interface::ue_cfg_t& sched_ue_cfg)
     rlc->add_user(rnti);
     pdcp->add_user(rnti);
     logger.info("Added new user rnti=0x%x", rnti);
+    if (rnti == SRSRAN_MRNTI) {
+      configure_mbms_bearers();
+    }
   } else {
     logger.error("Adding user rnti=0x%x (already exists)", rnti);
-  }
-
-  if (rnti == SRSRAN_MRNTI) {
-    for (auto& mbms_item : mcch.msg.c1().mbsfn_area_cfg_r9().pmch_info_list_r9[0].mbms_session_info_list_r9) {
-      uint32_t lcid = mbms_item.lc_ch_id_r9;
-      uint32_t addr_in;
-      // adding UE object to MAC for MRNTI without scheduling configuration (broadcast not part of regular scheduling)
-      rlc->add_bearer_mrb(SRSRAN_MRNTI, lcid);
-      bearer_manager.add_eps_bearer(SRSRAN_MRNTI, 1, srsran::srsran_rat_t::lte, lcid);
-      pdcp->add_bearer(SRSRAN_MRNTI, lcid, srsran::make_drb_pdcp_config_t(1, false));
-      gtpu->add_bearer(SRSRAN_MRNTI, lcid, 1, 1, addr_in);
-    }
   }
   return SRSRAN_SUCCESS;
 }
@@ -524,12 +783,34 @@ void rrc::add_paging_id(uint32_t ueid, const asn1::s1ap::ue_paging_id_c& ue_pagi
 
 bool rrc::is_paging_opportunity(uint32_t tti, uint32_t* payload_len)
 {
+  if (etws_paging_active_.load() && etws_paging_count_.load() > 0) {
+    *payload_len = 4; // minimal PCCH PDU with etws_ind
+    return true;
+  }
   *payload_len = pending_paging->pending_pcch_bytes(tti_point(tti));
   return *payload_len > 0;
 }
 
 void rrc::read_pdu_pcch(uint32_t tti_tx_dl, uint8_t* payload, uint32_t buffer_size)
 {
+  if (etws_paging_active_.load() && etws_paging_count_.load() > 0) {
+    etws_paging_count_.fetch_sub(1);
+    pcch_msg_s pcch;
+    paging_s&  pg       = pcch.msg.set_c1().paging();
+    pg.etws_ind_present = true;
+    srsran::byte_buffer_t buf;
+    asn1::bit_ref         bref(buf.msg, buf.get_tailroom());
+    if (pcch.pack(bref) == asn1::SRSASN_SUCCESS) {
+      buf.N_bytes = bref.distance_bytes();
+      if (buf.N_bytes <= buffer_size) {
+        std::copy(buf.msg, buf.msg + buf.N_bytes, payload);
+        logger.warning("ETWS paging broadcast, %u occasions remaining",
+                       (unsigned)etws_paging_count_.load());
+      }
+    }
+    return;
+  }
+
   auto read_func = [this, payload, buffer_size](srsran::const_byte_span pdu, const pcch_msg_s& msg, bool first_tx) {
     // copy PCCH pdu to buffer
     if (pdu.size() > buffer_size) {
@@ -724,6 +1005,35 @@ void rrc::rem_user(uint16_t rnti)
   }
 }
 
+void rrc::fill_sib_lens(uint32_t ccidx, sched_interface::cell_cfg_sib_t (&sibs)[sched_interface::MAX_SIBS]) const
+{
+  srsran::rwlock_read_guard lock(cell_common_list_rwlock);
+  for (auto& s : sibs) {
+    s = {};
+  }
+  for (uint32_t i = 0; i < nof_si_messages; i++) {
+    sibs[i].len = cell_common_list->get_cc_idx(ccidx)->sib_buffer.at(i)->N_bytes;
+    if (i == 0) {
+      sibs[i].period_rf = 8; // SIB1 is always 8 rf
+    } else {
+      sibs[i].period_rf = cfg.sib1.sched_info_list_mbms_r14[i - 1].si_periodicity_r14.to_number();
+    }
+  }
+}
+
+/// Re-pushes just the per-cell SIB length/periodicity table to MAC, e.g. after a post-init
+/// generate_sibs() rebuild (cas_muting toggle, SIB12 activation) changes a packed SIB length.
+/// Cheap and safe to call often, unlike config_mac()/mac::cell_cfg(), which also recreates
+/// the broadcast/RA schedulers and would disrupt already-connected UEs.
+void rrc::update_mac_sib_cfg()
+{
+  for (uint32_t ccidx = 0; ccidx < cfg.cell_list.size(); ++ccidx) {
+    sched_interface::cell_cfg_sib_t sibs[sched_interface::MAX_SIBS];
+    fill_sib_lens(ccidx, sibs);
+    mac->set_sib_lens(ccidx, sibs);
+  }
+}
+
 void rrc::config_mac()
 {
   using sched_cell_t = sched_interface::cell_cfg_t;
@@ -736,14 +1046,7 @@ void rrc::config_mac()
     sched_interface::cell_cfg_t& item = sched_cfg[ccidx];
 
     // set sib/prach cfg
-    for (uint32_t i = 0; i < nof_si_messages; i++) {
-      item.sibs[i].len = cell_common_list->get_cc_idx(ccidx)->sib_buffer.at(i)->N_bytes;
-      if (i == 0) {
-        item.sibs[i].period_rf = 8; // SIB1 is always 8 rf
-      } else {
-        item.sibs[i].period_rf = cfg.sib1.sched_info_list_mbms_r14[i - 1].si_periodicity_r14.to_number();
-      }
-    }
+    fill_sib_lens(ccidx, item.sibs);
     item.prach_config        = cfg.sibs[1].sib2().rr_cfg_common.prach_cfg.prach_cfg_info.prach_cfg_idx;
     item.prach_nof_preambles = cfg.sibs[1].sib2().rr_cfg_common.rach_cfg_common.preamb_info.nof_ra_preambs.to_number();
     item.si_window_ms        = cfg.sib1.si_win_len_r14.to_number();
@@ -804,69 +1107,133 @@ void rrc::config_mac()
  */
 uint32_t rrc::generate_sibs()
 {
-  // nof_messages includes SIB2 by default, plus all configured SIBs
-  uint32_t           nof_messages = 1;// + cfg.sib1.sched_info_list_mbms_r14.size();
-  sched_info_list_mbms_r14_l& sched_info   = cfg.sib1.sched_info_list_mbms_r14;
-
-  // Store configs,SIBs in common cell ctxt list
-  cell_common_list.reset(new enb_cell_common_list{cfg});
+  // Build the new cell ctxt list off to the side (not the live cell_common_list member) so
+  // concurrent PHY-worker reads of the old list (via read_pdu_bcch_dlsch()) keep seeing a fully
+  // populated, consistent list until the new one is completely built and ready to publish.
+  std::shared_ptr<enb_cell_common_list> new_cell_list(new enb_cell_common_list{cfg});
 
   // generate and pack into SIB buffers
   for (uint32_t cc_idx = 0; cc_idx < cfg.cell_list.size(); cc_idx++) {
-    enb_cell_common* cell_ctxt = cell_common_list->get_cc_idx(cc_idx);
-    // msg is array of SI messages, each SI message msg[i] may contain multiple SIBs
-    // all SIBs in a SI message msg[i] share the same periodicity
-    asn1::dyn_array<bcch_dl_sch_msg_mbms_s> msg(1);
+    enb_cell_common* cell_ctxt = new_cell_list->get_cc_idx(cc_idx);
 
-    // Copy SIB1 to first SI message
-    msg[0].msg.set_c1().set_sib_type1_mbms_r14() = cell_ctxt->sib1;
+    // Two genuinely different SI-message container types below (bcch_dl_sch_msg_mbms_s vs.
+    // the legacy bcch_dl_sch_msg_s), so this branches over the whole per-cell body rather
+    // than trying to share one loop across both -- see rrc_config.h's sib1_legacy comment for
+    // why the MBMS/Unicast-mixed cell type exists (camping-capable 60%-carrier broadcast,
+    // still no real unicast serving) and phy_common.cc's is_mch_subframe()/enb_dl.c's put_mib() for the two
+    // other places already gated on this same cfg.cell.mbms_dedicated flag.
+    if (cfg.cell.mbms_dedicated) {
+      uint32_t                    nof_messages = 1 + cfg.sib1.sched_info_list_mbms_r14.size();
+      sched_info_list_mbms_r14_l& sched_info   = cfg.sib1.sched_info_list_mbms_r14;
 
-    // Copy rest of SIBs
-    /*
-    for (uint32_t sched_info_elem = 0; sched_info_elem < nof_messages - 1; sched_info_elem++) {
-      uint32_t msg_index = sched_info_elem + 1; // first msg is SIB1, therefore start with second
+      asn1::dyn_array<bcch_dl_sch_msg_mbms_s> msg(nof_messages);
+      msg[0].msg.set_c1().set_sib_type1_mbms_r14() = cell_ctxt->sib1;
 
-      msg[msg_index].msg.set_c1().set_sys_info_mbms_r14().crit_exts.set_sys_info_r8();
-      sys_info_r8_ies_s::sib_type_and_info_l_& sib_list =
-          msg[msg_index].msg.c1().sys_info_mbms_r14().crit_exts.sys_info_r8().sib_type_and_info;
+      for (uint32_t sched_info_elem = 0; sched_info_elem < nof_messages - 1; sched_info_elem++) {
+        uint32_t msg_index = sched_info_elem + 1; // first msg is SIB1, therefore start with second
 
-      // SIB2 always in second SI message
-      if (msg_index == 1) {
-        sib_info_item_c sibitem;
-        sibitem.set_sib2() = cell_ctxt->sib2;
-        sib_list.push_back(sibitem);
+        msg[msg_index].msg.set_c1().set_sys_info_mbms_r14().crit_exts.set_sys_info_r8();
+        sys_info_r8_ies_s::sib_type_and_info_l_& sib_list =
+            msg[msg_index].msg.c1().sys_info_mbms_r14().crit_exts.sys_info_r8().sib_type_and_info;
+
+        // SIB2 always in second SI message
+        if (msg_index == 1) {
+          sib_info_item_c sibitem;
+          sibitem.set_sib2() = cell_ctxt->sib2;
+          sib_list.push_back(sibitem);
+        }
+
+        // Add other SIBs: sib_type_mbms_r14_e::to_number() returns actual SIB number (10,11,12,13...)
+        for (uint32_t j = 0; j < sched_info[sched_info_elem].sib_map_info_r14.size(); j++) {
+          uint32_t sib_idx = sched_info[sched_info_elem].sib_map_info_r14[j].to_number() - 1;
+          if (sib_idx < ASN1_RRC_MAX_SIB) {
+            sib_list.push_back(cfg.sibs[sib_idx]);
+          }
+        }
       }
 
-      // Add other SIBs to this message, if any
-      for (auto& mapping_enum : sched_info[sched_info_elem].sib_map_info_r14) {
-        sib_list.push_back(cfg.sibs[(int)mapping_enum + 2]);
-      }
-    }
-    */
+      for (uint32_t msg_index = 0; msg_index < nof_messages; msg_index++) {
+        srsran::unique_byte_buffer_t sib_buffer = srsran::make_byte_buffer();
+        if (sib_buffer == nullptr) {
+          logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+          return SRSRAN_ERROR;
+        }
+        asn1::bit_ref bref(sib_buffer->msg, sib_buffer->get_tailroom());
+        if (msg[msg_index].pack(bref) != asn1::SRSASN_SUCCESS) {
+          logger.error("Failed to pack SIB message %d", msg_index);
+          return SRSRAN_ERROR;
+        }
+        sib_buffer->N_bytes = bref.distance_bytes();
+        cell_ctxt->sib_buffer.push_back(std::move(sib_buffer));
 
-    // Pack payload for all messages
-    for (uint32_t msg_index = 0; msg_index < nof_messages; msg_index++) {
-      srsran::unique_byte_buffer_t sib_buffer = srsran::make_byte_buffer();
-      if (sib_buffer == nullptr) {
-        logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
-        return SRSRAN_ERROR;
+        fmt::memory_buffer membuf;
+        const char*        msg_str = msg[msg_index].msg.c1().type().to_string();
+        if (msg[msg_index].msg.c1().type().value !=
+            asn1::rrc::bcch_dl_sch_msg_type_mbms_r14_c::c1_c_::types_opts::sib_type1_mbms_r14) {
+          msg_str = msg[msg_index].msg.c1().sys_info_mbms_r14().crit_exts.type().to_string();
+        }
+        fmt::format_to(membuf, "{}, cc={}, idx={}", msg_str, cc_idx, msg_index);
+        log_broadcast_rrc_message(
+            SRSRAN_SIRNTI_MBMS_DEDICATED, *cell_ctxt->sib_buffer.back(), msg[msg_index], srsran::to_c_str(membuf));
       }
-      asn1::bit_ref bref(sib_buffer->msg, sib_buffer->get_tailroom());
-      if (msg[msg_index].pack(bref) != asn1::SRSASN_SUCCESS) {
-        logger.error("Failed to pack SIB message %d", msg_index);
-        return SRSRAN_ERROR;
-      }
-      sib_buffer->N_bytes = bref.distance_bytes();
-      cell_ctxt->sib_buffer.push_back(std::move(sib_buffer));
 
-      // Log SIBs in JSON format
-      fmt::memory_buffer membuf;
-      const char*        msg_str = msg[msg_index].msg.c1().type().to_string();
-      if (msg[msg_index].msg.c1().type().value != asn1::rrc::bcch_dl_sch_msg_type_mbms_r14_c::c1_c_::types_opts::sib_type1_mbms_r14) {
-        msg_str = msg[msg_index].msg.c1().sys_info_mbms_r14().crit_exts.type().to_string();
+      nof_si_messages = nof_messages;
+    } else {
+      // Legacy (non-MBMS-r14) path, for an MBMS/Unicast-mixed cell -- same structure as the
+      // pre-FeMBMS reference this project forked from (rt-mbms-tx-for-qrd-and-crd).
+      uint32_t           nof_messages = 1 + cfg.sib1_legacy.sched_info_list.size();
+      sched_info_list_l& sched_info   = cfg.sib1_legacy.sched_info_list;
+
+      asn1::dyn_array<bcch_dl_sch_msg_s> msg(nof_messages);
+      msg[0].msg.set_c1().set_sib_type1() = cell_ctxt->sib1_legacy;
+
+      for (uint32_t sched_info_elem = 0; sched_info_elem < nof_messages - 1; sched_info_elem++) {
+        uint32_t msg_index = sched_info_elem + 1; // first msg is SIB1, therefore start with second
+
+        msg[msg_index].msg.set_c1().set_sys_info().crit_exts.set_sys_info_r8();
+        sys_info_r8_ies_s::sib_type_and_info_l_& sib_list =
+            msg[msg_index].msg.c1().sys_info().crit_exts.sys_info_r8().sib_type_and_info;
+
+        // SIB2 always in second SI message
+        if (msg_index == 1) {
+          sib_info_item_c sibitem;
+          sibitem.set_sib2() = cell_ctxt->sib2;
+          sib_list.push_back(sibitem);
+        }
+
+        // Add other SIBs: sib_type_e::to_number() returns actual SIB number (3,4,...,10,11,12,13,...)
+        for (uint32_t j = 0; j < sched_info[sched_info_elem].sib_map_info.size(); j++) {
+          uint32_t sib_idx = sched_info[sched_info_elem].sib_map_info[j].to_number() - 1;
+          if (sib_idx < ASN1_RRC_MAX_SIB) {
+            sib_list.push_back(cfg.sibs[sib_idx]);
+          }
+        }
       }
-      fmt::format_to(membuf, "{}, cc={}, idx={}", msg_str, cc_idx, msg_index);
-      log_broadcast_rrc_message(SRSRAN_SIRNTI_MBMS_DEDICATED, *cell_ctxt->sib_buffer.back(), msg[msg_index], srsran::to_c_str(membuf));
+
+      for (uint32_t msg_index = 0; msg_index < nof_messages; msg_index++) {
+        srsran::unique_byte_buffer_t sib_buffer = srsran::make_byte_buffer();
+        if (sib_buffer == nullptr) {
+          logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+          return SRSRAN_ERROR;
+        }
+        asn1::bit_ref bref(sib_buffer->msg, sib_buffer->get_tailroom());
+        if (msg[msg_index].pack(bref) != asn1::SRSASN_SUCCESS) {
+          logger.error("Failed to pack SIB message %d", msg_index);
+          return SRSRAN_ERROR;
+        }
+        sib_buffer->N_bytes = bref.distance_bytes();
+        cell_ctxt->sib_buffer.push_back(std::move(sib_buffer));
+
+        fmt::memory_buffer membuf;
+        const char*        msg_str = msg[msg_index].msg.c1().type().to_string();
+        if (msg[msg_index].msg.c1().type().value != asn1::rrc::bcch_dl_sch_msg_type_c::c1_c_::types_opts::sib_type1) {
+          msg_str = msg[msg_index].msg.c1().sys_info().crit_exts.type().to_string();
+        }
+        fmt::format_to(membuf, "{}, cc={}, idx={}", msg_str, cc_idx, msg_index);
+        log_broadcast_rrc_message(SRSRAN_SIRNTI, *cell_ctxt->sib_buffer.back(), msg[msg_index], srsran::to_c_str(membuf));
+      }
+
+      nof_si_messages = nof_messages;
     }
 
     if (cfg.sibs[6].type() == asn1::rrc::sys_info_r8_ies_s::sib_type_and_info_item_c_::types::sib7) {
@@ -874,9 +1241,529 @@ uint32_t rrc::generate_sibs()
     }
   }
 
-  nof_si_messages = nof_messages;
+  // Publish the fully-built list under the write lock. A mid-build failure above returns before
+  // reaching here, leaving the live cell_common_list (and thus the last-known-good SIBs) untouched.
+  {
+    srsran::rwlock_write_guard lock(cell_common_list_rwlock);
+    cell_common_list = std::move(new_cell_list);
+  }
 
   return SRSRAN_SUCCESS;
+}
+
+void rrc::reconfigure_embms(uint8_t            pmch_bandwidth,
+                            uint16_t           mcs,
+                            uint8_t            time_interleaving_n,
+                            uint8_t            time_interleaving_m,
+                            uint8_t            time_interleaving_n_last_mtch,
+                            uint8_t            time_interleaving_m_last_mtch,
+                            uint8_t            cyclic_shift_alpha,
+                            bool               freq_interleaving,
+                            bool               use_mcs_table2,
+                            bool               cas_muting,
+                            uint8_t            k_cas,
+                            uint8_t            n_cas,
+                            uint8_t            mch_sched_period_rf,
+                            uint8_t            nof_mbms_sessions,
+                            bool               time_separation_sl2,
+                            const std::string& subcarrier_spacing,
+                            const std::vector<pmch_cfg_t>& extra_pmch,
+                            const std::string&             session_teids)
+{
+  // extra_pmch is validated minimally here (each entry's own fields are used
+  // as-is; configure_mbsfn_sibs()/pack_mcch() are the actual OTA encoders and
+  // do their own per-field range handling the same way they already do for
+  // PMCH0's flat fields) and persisted onto cfg below so configure_mbsfn_sibs()
+  // - which has call sites other than this function - can see it too.
+  /* reload_embms_config()'s SIGHUP path re-parses embms.* from the config file
+   * directly into this call, bypassing the startup-only range checks in
+   * enb_cfg_parser.cc's set_derived_args()/parse_cell_cfg() — re-apply the
+   * same legal-value checks here so a bad live edit can't reach OTA SIB13/MCCH
+   * signaling or PHY buffer sizing unvalidated. */
+  /* pmch-Bandwidth-r17 (TS 36.331 §6.3.7) is ENUMERATED{n40,n35,n30,spare1} -- there is no
+   * n25 value in the spec, because this field signals *extended* PMCH coverage wider than
+   * the base cell, not an equal-or-narrower one. 25 used to be accepted here as if it were
+   * a fourth legal value, but rrc::configure_mbsfn_sibs()'s packer switch (which only has
+   * cases for 30/35/40) correctly has no case for it, so it was silently never signalled
+   * over the air -- a config accepted as "valid" that could never actually take effect. */
+  if (pmch_bandwidth != 0 && pmch_bandwidth != 30 && pmch_bandwidth != 35 && pmch_bandwidth != 40) {
+    logger.warning("reconfigure_embms: pmch_bandwidth=%u is not valid (must be 0, 30, 35, or 40 -- "
+                   "pmch-Bandwidth-r17 only signals extended coverage wider than the base cell) — setting to 0",
+                   pmch_bandwidth);
+    pmch_bandwidth = 0;
+  }
+  /* pmch-Bandwidth-r17 is Rel-17 MBMS-dedicated-only signalling (see the SIB13 gating in this
+   * same function, further down) -- an MBMS/Unicast-mixed cell (TS 36.300 §15.2.2) has no
+   * concept of PMCH wider than its own carrier at all in the original Rel-9 eMBMS spec it must
+   * stay within. Forcing 0 here (not just at the SIB13-signalling level) keeps the PHY's actual
+   * MBSFN buffer/RE-mapping width (enb_dl.c, pmch.c: sized from max(nof_prb, mbsfn_prb))
+   * consistent with what's declared OTA -- without this, a mixed cell would silently transmit
+   * a wider PMCH than any mixed-cell receiver is ever told to expect (confirmed live,
+   * 2026-07-22: "PMCH extract symbols error expecting 2250 symbols but got 2400" once SIB13
+   * stopped signalling the override this cell's config still requested internally). */
+  if (!cfg.cell.mbms_dedicated && pmch_bandwidth != 0) {
+    logger.warning("reconfigure_embms: pmch_bandwidth=%u requested on an MBMS/Unicast-mixed "
+                   "(non-MBMS-dedicated) cell -- pmch-Bandwidth-r17 is Rel-17 MBMS-dedicated-only "
+                   "signalling, forcing to 0",
+                   pmch_bandwidth);
+    pmch_bandwidth = 0;
+  }
+  /* No ">cfg.cell.nof_prb" clamp here. History: this clamp was removed once (2026-07-15),
+   * which correctly made pmch_bandwidth=30 signal over the air, but functional decode broke
+   * (BLER 1.0) -- traced at the time to mac::write_mcch()'s separate mbsfn_prb clamp still
+   * blocking the wider value from reaching MAC/PHY, and the clamp here was restored out of
+   * (mistaken) caution, concluding wideband PMCH wasn't implemented at the PHY level at all.
+   * That conclusion was wrong: srsran_cell_isvalid() (phy_common.c) and every downstream
+   * buffer (enb_dl.c, pmch.c, chest_dl.c, refsignal_dl.c) already correctly size/stride from
+   * max(nof_prb, mbsfn_prb) on the TX side. The actual bug was narrower and has been fixed:
+   * rt-mbms-modem's copy of pmch.c (a separate copy of this shared library) was missing the
+   * matching stride fix in its own PMCH RE mapping, corrupting every symbol beyond the first
+   * once mbsfn_prb genuinely exceeded nof_prb -- see that file's pmch_cp fix. mac.cc's clamp
+   * has also been relaxed to match. pmch_bandwidth=25 is unreachable here regardless (the
+   * validation above only allows {0,30,35,40}). */
+  if (time_interleaving_n > 1) {
+    static const uint8_t valid_n[] = {2, 4, 8, 16};
+    bool                 n_ok      = false;
+    for (uint8_t v : valid_n) {
+      if (time_interleaving_n == v) {
+        n_ok = true;
+        break;
+      }
+    }
+    if (!n_ok) {
+      logger.warning("reconfigure_embms: time_interleaving_n=%u is not valid (must be 2, 4, 8, or 16) — disabling "
+                     "time interleaving",
+                     time_interleaving_n);
+      time_interleaving_n = 0;
+      time_interleaving_m = 0;
+    } else if (!extra_pmch.empty()) {
+      /* TS 36.300 §15.3.3: "MTCH and MCCH can be multiplexed on the same MCH (if
+       * time interleaving is not configured)" - a time-interleaved MCH must not
+       * also carry MCCH. PMCH0 (this function's flat fields) always carries
+       * MCCH (phy_common.cc: pmch_start = (i==0) ? 1 : ...), so this really was
+       * unenforceable before extra_pmch existed - there was no other PMCH to
+       * route time-interleaved content to, so this could only ever warn. Now
+       * that a genuine second PMCH is configured, enforce it for real: PMCH0
+       * itself must not use time interleaving; put it on one of extra_pmch
+       * instead. */
+      logger.error("reconfigure_embms: time_interleaving_n=%u requested on PMCH0, which always carries MCCH - "
+                   "TS 36.300 §15.3.3 requires a time-interleaved MCH not carry MCCH. extra_pmch is configured, "
+                   "so this is now enforced rather than just warned about: disabling time interleaving on PMCH0. "
+                   "Configure time interleaving on one of embms.pmch1.* etc. instead.",
+                   time_interleaving_n);
+      time_interleaving_n = 0;
+      time_interleaving_m = 0;
+    } else {
+      /* No extra_pmch configured: same conflict, but there is no alternative
+       * PMCH to move this content to, so this can only warn (matches this
+       * function's long-standing pre-multi-PMCH behavior). */
+      logger.warning("reconfigure_embms: time_interleaving_n=%u enables time interleaving on pmch_info_list[0], "
+                     "which also carries MCCH — TS 36.300 §15.3.3 requires a time-interleaved MCH not carry MCCH; "
+                     "a spec-compliant UE may not correctly receive this configuration",
+                     time_interleaving_n);
+    }
+  }
+  if (time_interleaving_n > 1 && time_interleaving_m > 0) {
+    static const uint8_t valid_m[] = {4, 8, 16, 32};
+    bool                 m_ok      = false;
+    for (uint8_t v : valid_m) {
+      if (time_interleaving_m == v) {
+        m_ok = true;
+        break;
+      }
+    }
+    if (!m_ok) {
+      uint8_t fallback_m = (time_interleaving_n < 4) ? 4u : time_interleaving_n;
+      logger.warning("reconfigure_embms: time_interleaving_m=%u is not valid (must be 4, 8, 16, or 32) — setting to %u",
+                     time_interleaving_m, fallback_m);
+      time_interleaving_m = fallback_m;
+    }
+  }
+  if (time_interleaving_n > 1 && time_interleaving_m < time_interleaving_n) {
+    logger.warning("reconfigure_embms: time_interleaving_m (%d) < time_interleaving_n (%d), clamping M to N",
+                   time_interleaving_m, time_interleaving_n);
+    time_interleaving_m = time_interleaving_n;
+  }
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): lets the last of
+   * nof_mbms_sessions MTCH sessions on a time-interleaved MCH use different (or,
+   * via N-last=1/n1, no) time interleaving. N-last accepts 1 in addition to the
+   * main field's {2,4,8,16} — 1 is the one value the main N field cannot express
+   * (there, 0/1 both mean "disabled"; here 1 has its own distinct meaning: "this
+   * specific session opts out while the others stay interleaved"). */
+  if (time_interleaving_n_last_mtch > 0) {
+    static const uint8_t valid_n_last[] = {1, 2, 4, 8, 16};
+    bool                 n_last_ok      = false;
+    for (uint8_t v : valid_n_last) {
+      if (time_interleaving_n_last_mtch == v) {
+        n_last_ok = true;
+        break;
+      }
+    }
+    if (!n_last_ok) {
+      logger.warning("reconfigure_embms: time_interleaving_n_last_mtch=%u is not valid (must be 1, 2, 4, 8, or 16) "
+                     "— disabling LastMTCH time interleaving override",
+                     time_interleaving_n_last_mtch);
+      time_interleaving_n_last_mtch = 0;
+      time_interleaving_m_last_mtch = 0;
+    } else if (time_interleaving_n <= 1) {
+      logger.warning("reconfigure_embms: time_interleaving_n_last_mtch=%u set but main time_interleaving_n=%u "
+                     "(time interleaving disabled) — LastMTCH override has nothing to override; ignoring",
+                     time_interleaving_n_last_mtch, time_interleaving_n);
+      time_interleaving_n_last_mtch = 0;
+      time_interleaving_m_last_mtch = 0;
+    } else if (nof_mbms_sessions <= 1) {
+      logger.warning("reconfigure_embms: time_interleaving_n_last_mtch=%u set but nof_mbms_sessions=%u — LastMTCH "
+                     "only makes sense with 2+ sessions on this PMCH; ignoring",
+                     time_interleaving_n_last_mtch, nof_mbms_sessions);
+      time_interleaving_n_last_mtch = 0;
+      time_interleaving_m_last_mtch = 0;
+    }
+  }
+  if (time_interleaving_n_last_mtch > 1 && time_interleaving_m_last_mtch > 0) {
+    static const uint8_t valid_m_last[] = {4, 8, 16, 32};
+    bool                 m_last_ok      = false;
+    for (uint8_t v : valid_m_last) {
+      if (time_interleaving_m_last_mtch == v) {
+        m_last_ok = true;
+        break;
+      }
+    }
+    if (!m_last_ok) {
+      logger.warning("reconfigure_embms: time_interleaving_m_last_mtch=%u is not valid (must be 4, 8, 16, or 32) "
+                     "— falling back to the main time_interleaving_m=%u for the last MTCH",
+                     time_interleaving_m_last_mtch, time_interleaving_m);
+      time_interleaving_m_last_mtch = 0;
+    }
+  }
+  if (time_interleaving_n > 1 && nof_mbms_sessions > 1 && time_interleaving_n_last_mtch == 0) {
+    /* TS 36.300 CR1428 (the CSA/MSA paragraph): "the eNB applies MAC
+     * multiplexing of different MTCHs and optionally MCCH to be
+     * transmitted on this MCH, if time interleaving is not configured" -
+     * i.e. a time-interleaved MCH should carry at most one MTCH session.
+     * TS 36.331 CR5168r3 (pmch-TimeInterleaving{N,M}-LastMTCH-r19, the later,
+     * field-defining CR) presupposes the opposite -- multiple MTCH sessions on
+     * one time-interleaved MCH, with the last one individually opted out via
+     * this override. Narrowed to only warn when that override is NOT set: once
+     * it is, multi-session + time interleaving is the spec-blessed pattern
+     * CR5168r3 exists for, not a misconfiguration. */
+    logger.warning("reconfigure_embms: time_interleaving_n=%u enables time interleaving with nof_mbms_sessions=%u "
+                   "sessions configured and no time_interleaving_n_last_mtch override — TS 36.300 CR1428 expects a "
+                   "time-interleaved MCH to carry at most one MTCH session; a spec-compliant UE may not correctly "
+                   "receive this configuration. Set time_interleaving_n_last_mtch (TS 36.331 CR5168r3) to legitimize "
+                   "multiple sessions.",
+                   time_interleaving_n, nof_mbms_sessions);
+  }
+  if (mch_sched_period_rf > 0) {
+    static const uint8_t valid_sp[] = {4, 8, 16, 32, 64};
+    bool                 sp_ok      = false;
+    for (uint8_t v : valid_sp) {
+      if (mch_sched_period_rf == v) {
+        sp_ok = true;
+        break;
+      }
+    }
+    if (!sp_ok) {
+      logger.warning("reconfigure_embms: mch_sched_period_rf=%u is not valid (must be 4, 8, 16, 32, or 64) — ignoring",
+                     mch_sched_period_rf);
+      mch_sched_period_rf = 0; // 0 means "leave cfg.mch_sched_period_rf unchanged" below
+    }
+  }
+  if (cas_muting) {
+    static const uint8_t valid_n_cas[] = {2, 4, 8, 16};
+    bool                 n_cas_ok      = false;
+    for (uint8_t v : valid_n_cas) {
+      if (n_cas == v) {
+        n_cas_ok = true;
+        break;
+      }
+    }
+    if (!n_cas_ok) {
+      logger.warning("reconfigure_embms: n_cas=%u is not valid (must be 2, 4, 8, or 16) — disabling cas_muting",
+                     n_cas);
+      cas_muting = false;
+    } else if (k_cas < 4 || k_cas > 63) {
+      logger.warning("reconfigure_embms: k_cas=%u is not valid (must be 4..63) — disabling cas_muting", k_cas);
+      cas_muting = false;
+    }
+  }
+  cfg.pmch_bandwidth            = pmch_bandwidth;
+  cfg.mbms_mcs                  = mcs;
+  cfg.pmch_time_interleaving_n  = time_interleaving_n;
+  cfg.pmch_time_interleaving_m  = time_interleaving_m;
+  cfg.pmch_time_interleaving_n_last_mtch = time_interleaving_n_last_mtch;
+  cfg.pmch_time_interleaving_m_last_mtch = time_interleaving_m_last_mtch;
+  cfg.pmch_cyclic_shift_alpha   = cyclic_shift_alpha;
+  cfg.pmch_freq_interleaving    = freq_interleaving;
+  cfg.pmch_use_mcs_table2       = use_mcs_table2;
+  cfg.cell.cas_muting = cas_muting;
+  cfg.cell.k_cas      = k_cas;
+  cfg.cell.n_cas      = n_cas;
+  if (mch_sched_period_rf > 0) {
+    cfg.mch_sched_period_rf = mch_sched_period_rf;
+  }
+  if (nof_mbms_sessions > 0 && nof_mbms_sessions <= 8u) {
+    cfg.nof_mbms_sessions = nof_mbms_sessions;
+  }
+  cfg.pmch_time_separation_sl2 = time_separation_sl2;
+  cfg.pmch_subcarrier_spacing  = subcarrier_spacing;
+  cfg.extra_pmch               = extra_pmch;
+  cfg.session_teids            = session_teids;
+  configure_mbsfn_sibs();
+}
+
+void rrc::reload_sib12(bool activate)
+{
+  if (activate) {
+    if (cfg.sib12_alert_file.empty()) {
+      logger.error("reload_sib12: sib12_alert_file not configured");
+      return;
+    }
+    sib_type12_r9_s sib12_data = {};
+    if (sib_sections::parse_sib12(cfg.sib12_alert_file, &sib12_data) != SRSRAN_SUCCESS) {
+      logger.error("reload_sib12: failed to parse %s", cfg.sib12_alert_file.c_str());
+      return;
+    }
+    install_sib12(sib12_data);
+    activate_warning_broadcast();
+  } else {
+    clear_warning_sibs();
+  }
+}
+
+bool rrc::add_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt)
+{
+  // Already scheduled? (generate_sibs() maps each sched_info entry to its own SI message.)
+  for (uint32_t i = 0; i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
+    for (uint32_t j = 0; j < cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14.size(); j++) {
+      if (cfg.sib1.sched_info_list_mbms_r14[i].sib_map_info_r14[j].value == sib_opt) {
+        return false;
+      }
+    }
+  }
+  sched_info_mbms_r14_s new_si;
+  new_si.si_periodicity_r14.value = sched_info_mbms_r14_s::si_periodicity_r14_opts::rf16;
+  sib_type_mbms_r14_e sib_enum;
+  sib_enum.value = sib_opt;
+  new_si.sib_map_info_r14.push_back(sib_enum);
+  cfg.sib1.sched_info_list_mbms_r14.push_back(new_si);
+  return true;
+}
+
+void rrc::remove_mbms_sched_info(asn1::rrc::sib_type_mbms_r14_opts::options sib_opt)
+{
+  sched_info_list_mbms_r14_l new_list;
+  for (uint32_t i = 0; i < cfg.sib1.sched_info_list_mbms_r14.size(); i++) {
+    const sched_info_mbms_r14_s& si = cfg.sib1.sched_info_list_mbms_r14[i];
+    bool has_sib = false;
+    for (uint32_t j = 0; j < si.sib_map_info_r14.size(); j++) {
+      if (si.sib_map_info_r14[j].value == sib_opt) {
+        has_sib = true;
+        break;
+      }
+    }
+    if (!has_sib) {
+      new_list.push_back(si);
+    }
+  }
+  cfg.sib1.sched_info_list_mbms_r14 = new_list;
+}
+
+void rrc::regenerate_si()
+{
+  cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
+  if (!cfg.sib_tag_state_file.empty()) {
+    FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
+    if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
+  }
+  generate_sibs();
+  update_mac_sib_cfg();
+}
+
+// SIB10 = ETWS primary notification (TS 36.331 SystemInformationBlockType10). cfg.sibs[] is
+// indexed by (SIB number - 1), matching generate_sibs()'s to_number()-1 lookup, so SIB10 lives
+// at cfg.sibs[9].
+void rrc::install_sib10(const asn1::rrc::sib_type10_s& sib10_data)
+{
+  cfg.sibs[9].set_sib10() = sib10_data;
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type10)) {
+    sib10_sched_added_ = true;
+  }
+}
+
+// SIB11 = ETWS secondary notification (TS 36.331 SystemInformationBlockType11), at cfg.sibs[10].
+void rrc::install_sib11(const asn1::rrc::sib_type11_s& sib11_data)
+{
+  cfg.sibs[10].set_sib11() = sib11_data;
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type11)) {
+    sib11_sched_added_ = true;
+  }
+}
+
+void rrc::install_sib12(const asn1::rrc::sib_type12_r9_s& sib12_data)
+{
+  cfg.sibs[11].set_sib12_v920() = sib12_data;
+  if (add_mbms_sched_info(sib_type_mbms_r14_opts::sib_type12_v920)) {
+    sib12_sched_added_ = true;
+  }
+}
+
+void rrc::activate_warning_broadcast()
+{
+  regenerate_si();
+  etws_paging_active_.store(true);
+  etws_paging_count_.store(64);
+  logger.warning("Emergency alert activated — 64 ETWS paging broadcasts scheduled");
+}
+
+void rrc::clear_warning_sibs()
+{
+  etws_paging_active_.store(false);
+  etws_paging_count_.store(0);
+
+  if (sib10_sched_added_) {
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type10);
+    sib10_sched_added_ = false;
+  }
+  if (sib11_sched_added_) {
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type11);
+    sib11_sched_added_ = false;
+  }
+  if (sib12_sched_added_) {
+    remove_mbms_sched_info(sib_type_mbms_r14_opts::sib_type12_v920);
+    sib12_sched_added_ = false;
+  }
+
+  regenerate_si();
+  logger.warning("Emergency alert cancelled");
+}
+
+void rrc::write_replace_warning(const asn1::s1ap::write_replace_warning_request_ies_container& ies)
+{
+  // Single-segment only for now (see enb_rrc_interfaces.h's write_replace_warning() comment) --
+  // sib_type12_r9_s's warning_msg_segment_r9 is a dyn_octstring with no built-in size cap, but a
+  // real cell has a finite SI transport block size. Splitting a long Warning-Message-Contents
+  // across multiple SIB12 instances (warning_msg_segment_type_r9/_num_r9) is a defined follow-up,
+  // not implemented here -- flag it loudly instead of silently truncating.
+  static const uint32_t SINGLE_SEGMENT_WARN_THRESHOLD = 1000;
+  if (ies.warning_msg_contents.value.size() > SINGLE_SEGMENT_WARN_THRESHOLD) {
+    logger.warning(
+        "write_replace_warning: Warning-Message-Contents is %d bytes; multi-segment SIB12 chunking is not "
+        "implemented, sending as a single (possibly oversized for some cells) segment",
+        (int)ies.warning_msg_contents.value.size());
+  }
+
+  // Select the warning SIB(s) by alert type. Per TS 36.413 §9.1.13.1 the Warning Type IE is present
+  // only for ETWS; CMAS/PWS instead carries Data Coding Scheme + Warning Message Contents and no
+  // Warning Type. So warning_type_present is the canonical ETWS discriminator at the S1AP layer
+  // (equivalent to, and more robust than, matching the Message-Identifier against the ETWS ranges
+  // in TS 23.041 §9.4.1.2.2). ETWS -> SIB10 (+ SIB11 if a message body is present); CMAS -> SIB12.
+  if (ies.warning_type_present) {
+    // SIB10 -- ETWS primary notification (msg id, serial number, warning type, security info).
+    asn1::rrc::sib_type10_s sib10_data = {};
+    sib10_data.msg_id.from_number(ies.msg_id.value.to_number());
+    sib10_data.serial_num.from_number(ies.serial_num.value.to_number());
+    // Warning Type is a fixed 2-octet IE in both S1AP and SIB10; carried through verbatim.
+    memcpy(sib10_data.warning_type.data(), ies.warning_type.value.data(), sib10_data.warning_type.size());
+    if (ies.warning_security_info_present) {
+      // SIB10's 'dummy' field is the R9 warningSecurityInformation (renamed 'dummy' in later
+      // releases); carry the 50-octet ETWS security/timestamp info through untouched when present.
+      sib10_data.dummy_present = true;
+      memcpy(sib10_data.dummy.data(), ies.warning_security_info.value.data(), sib10_data.dummy.size());
+    }
+    install_sib10(sib10_data);
+
+    // SIB11 -- ETWS secondary notification, only when a message body is supplied. Single-segment
+    // only for now (see the multi-segment note above); mirrors the SIB12/CMAS handling below.
+    if (ies.warning_msg_contents_present) {
+      asn1::rrc::sib_type11_s sib11_data = {};
+      sib11_data.msg_id.from_number(ies.msg_id.value.to_number());
+      sib11_data.serial_num.from_number(ies.serial_num.value.to_number());
+      sib11_data.warning_msg_segment_type.value =
+          asn1::rrc::sib_type11_s::warning_msg_segment_type_opts::last_segment;
+      sib11_data.warning_msg_segment_num = 0;
+      sib11_data.warning_msg_segment.resize(ies.warning_msg_contents.value.size());
+      memcpy(sib11_data.warning_msg_segment.data(),
+             ies.warning_msg_contents.value.data(),
+             ies.warning_msg_contents.value.size());
+      if (ies.data_coding_scheme_present) {
+        sib11_data.data_coding_scheme[0]      = (uint8_t)ies.data_coding_scheme.value.to_number();
+        sib11_data.data_coding_scheme_present = true;
+      }
+      install_sib11(sib11_data);
+    }
+
+    activate_warning_broadcast();
+    return;
+  }
+
+  asn1::rrc::sib_type12_r9_s sib12_data = {};
+  sib12_data.msg_id_r9.from_number(ies.msg_id.value.to_number());
+  sib12_data.serial_num_r9.from_number(ies.serial_num.value.to_number());
+  sib12_data.warning_msg_segment_type_r9.value = asn1::rrc::sib_type12_r9_s::warning_msg_segment_type_r9_opts::last_segment;
+  sib12_data.warning_msg_segment_num_r9        = 0;
+
+  if (ies.data_coding_scheme_present) {
+    sib12_data.data_coding_scheme_r9[0]      = (uint8_t)ies.data_coding_scheme.value.to_number();
+    sib12_data.data_coding_scheme_r9_present = true;
+  }
+
+  if (ies.warning_msg_contents_present) {
+    sib12_data.warning_msg_segment_r9.resize(ies.warning_msg_contents.value.size());
+    memcpy(sib12_data.warning_msg_segment_r9.data(),
+           ies.warning_msg_contents.value.data(),
+           ies.warning_msg_contents.value.size());
+  }
+
+  if (ies.warning_area_coordinates_present) {
+    // Opaque octet string, per ATIS-0700041 -- carried through untouched, never decoded here
+    // (mirrors srsepc/src/mme/sbc.cc's own handling of the same IE on the CBC-facing side).
+    sib12_data.warning_area_coordinates_segment_r15_present = true;
+    sib12_data.warning_area_coordinates_segment_r15.resize(ies.warning_area_coordinates.value.size());
+    memcpy(sib12_data.warning_area_coordinates_segment_r15.data(),
+           ies.warning_area_coordinates.value.data(),
+           ies.warning_area_coordinates.value.size());
+  }
+
+  install_sib12(sib12_data);
+  activate_warning_broadcast();
+}
+
+void rrc::kill_warning(const asn1::s1ap::kill_request_ies_container& ies)
+{
+  // This eNB only tracks a single active alert slot (same model reload_sib12()/the file+SIGUSR1
+  // path already uses) -- Kill-Request's own msg_id/serial_num aren't matched against a specific
+  // still-active alert, it just clears whatever is currently broadcasting (SIB10/11 for ETWS or
+  // SIB12 for CMAS).
+  clear_warning_sibs();
+}
+
+void rrc::mbms_session_start(const std::string&    tmgi_key,
+                              const srsran::tmgi_t& tmgi,
+                              uint8_t               session_id,
+                              bool                  session_id_present,
+                              uint32_t              teid)
+{
+  srsran::pmch_info_t::mbms_session_info_t info;
+  info.tmgi               = tmgi;
+  info.session_id_present = session_id_present;
+  info.session_id         = session_id;
+  info.teid               = teid;
+  mbms_sessions[tmgi_key] = info;
+  logger.info(
+      "MBMS session start: TMGI key %s, TEID 0x%08x, total sessions now %zu", tmgi_key.c_str(), teid, mbms_sessions.size());
+  configure_mbsfn_sibs();
+}
+
+void rrc::mbms_session_stop(const std::string& tmgi_key)
+{
+  auto it = mbms_sessions.find(tmgi_key);
+  if (it == mbms_sessions.end()) {
+    logger.warning("MBMS session stop for unknown TMGI key %s", tmgi_key.c_str());
+    return;
+  }
+  mbms_sessions.erase(it);
+  logger.info("MBMS session stop: TMGI key %s, total sessions now %zu", tmgi_key.c_str(), mbms_sessions.size());
+  configure_mbsfn_sibs();
 }
 
 void rrc::configure_mbsfn_sibs()
@@ -886,13 +1773,17 @@ void rrc::configure_mbsfn_sibs()
   sibs2.mbsfn_sf_cfg_list_present = cfg.sibs[1].sib2().mbsfn_sf_cfg_list_present;
   sibs2.nof_mbsfn_sf_cfg          = cfg.sibs[1].sib2().mbsfn_sf_cfg_list.size();
   for (int i = 0; i < sibs2.nof_mbsfn_sf_cfg; i++) {
-    sibs2.mbsfn_sf_cfg_list[i].nof_alloc_subfrs = srsran::mbsfn_sf_cfg_t::sf_alloc_type_t::one_frame;
-    sibs2.mbsfn_sf_cfg_list[i].radioframe_alloc_offset =
-        cfg.sibs[1].sib2().mbsfn_sf_cfg_list[i].radioframe_alloc_offset;
+    const asn1::rrc::mbsfn_sf_cfg_s& src = cfg.sibs[1].sib2().mbsfn_sf_cfg_list[i];
+    sibs2.mbsfn_sf_cfg_list[i].radioframe_alloc_offset = src.radioframe_alloc_offset;
     sibs2.mbsfn_sf_cfg_list[i].radioframe_alloc_period =
-        (srsran::mbsfn_sf_cfg_t::alloc_period_t)cfg.sibs[1].sib2().mbsfn_sf_cfg_list[i].radioframe_alloc_period.value;
-    sibs2.mbsfn_sf_cfg_list[i].sf_alloc =
-        (uint32_t)cfg.sibs[1].sib2().mbsfn_sf_cfg_list[i].sf_alloc.one_frame().to_number();
+        (srsran::mbsfn_sf_cfg_t::alloc_period_t)src.radioframe_alloc_period.value;
+    if (src.sf_alloc.type() == asn1::rrc::mbsfn_sf_cfg_s::sf_alloc_c_::types::four_frames) {
+      sibs2.mbsfn_sf_cfg_list[i].nof_alloc_subfrs = srsran::mbsfn_sf_cfg_t::sf_alloc_type_t::four_frames;
+      sibs2.mbsfn_sf_cfg_list[i].sf_alloc         = (uint32_t)src.sf_alloc.four_frames().to_number();
+    } else {
+      sibs2.mbsfn_sf_cfg_list[i].nof_alloc_subfrs = srsran::mbsfn_sf_cfg_t::sf_alloc_type_t::one_frame;
+      sibs2.mbsfn_sf_cfg_list[i].sf_alloc         = (uint32_t)src.sf_alloc.one_frame().to_number();
+    }
   }
   // populate struct with sib13 values needed for PHY/MAC
   srsran::sib13_t sibs13;
@@ -903,6 +1794,10 @@ void rrc::configure_mbsfn_sibs()
   sibs13.nof_mbsfn_area_info    = cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9.size();
   for (uint32_t i = 0; i < sibs13.nof_mbsfn_area_info; i++) {
     sibs13.mbsfn_area_info_list[i] = srsran::make_mbsfn_area_info(cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9[i]);
+    /* Rel-17: pmch-Bandwidth-r17 overrides MBSFN PRB count */
+    if (cfg.pmch_bandwidth > 0) {
+      sibs13.mbsfn_area_info_list[i].pmch_bandwidth = cfg.pmch_bandwidth;
+    }
     /*
     sibs13.mbsfn_area_info_list[i].mbsfn_area_id =
         cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9[i].mbsfn_area_id_r9;
@@ -913,7 +1808,7 @@ void rrc::configure_mbsfn_sibs()
                                                           .mcch_cfg_r9.sig_mcs_r9.value;
     sibs13.mbsfn_area_info_list[i].mcch_cfg.sf_alloc_info =
         cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9[i].mcch_cfg_r9.sf_alloc_info_r9.to_number();
-    sibs13.mbsfn_area_info_list[i].mcch_cfg.mcch_repeat_period = 
+    sibs13.mbsfn_area_info_list[i].mcch_cfg.mcch_repeat_period =
       from_mcch_repeat_period_r9(cfg.sibs[12]
             .sib13_v920()
             .mbsfn_area_info_list_r9[i]
@@ -933,87 +1828,910 @@ void rrc::configure_mbsfn_sibs()
     */
   }
 
-  // pack MCCH for transmission and pass relevant MCCH values to PHY/MAC
-  pack_mcch();
-  srsran::mcch_msg_t mcch_t;
-  mcch_t.common_sf_alloc_period         = srsran::mcch_msg_t::common_sf_alloc_period_t::rf64;
-  mcch_t.nof_common_sf_alloc            = 1;
-  srsran::mbsfn_sf_cfg_t sf_alloc_item  = mcch_t.common_sf_alloc[0];
-  sf_alloc_item.radioframe_alloc_offset = 0;
-  sf_alloc_item.radioframe_alloc_period = srsran::mbsfn_sf_cfg_t::alloc_period_t::n1;
-  sf_alloc_item.sf_alloc                = 63;
-  mcch_t.nof_pmch_info                  = 1;
-  srsran::pmch_info_t* pmch_item        = &mcch_t.pmch_info_list[0];
+  /* Everything in this block (through the sib_type13_r14 mirror below) is Rel-16/Rel-17
+   * MBMS-dedicated-only signalling (0.37/2.5kHz SCS, SL2 time separation, r16 10-bit
+   * sf-AllocInfo, pmch-Bandwidth-r17): TS 36.331's original Rel-9 eMBMS spec (what an
+   * MBMS/Unicast-mixed cell's SIB13 must stay within, confirmed against the pre-FeMBMS reference this
+   * project forked from, rt-mbms-tx-for-qrd-and-crd, which has no equivalent code at all) has
+   * none of it. Applying it regardless of cell.mbms_dedicated would carry Rel-16+ information
+   * on a Rel-9 cell -- gated here so a live reconfigure_embms() call can't (re-)introduce it
+   * either, on top of enb_cfg_parser.cc's parse_sibs() already sanitizing the same fields at
+   * startup. */
+  if (cfg.cell.mbms_dedicated) {
+  /* Apply r16-only operator config to the internal sibs13 used by MAC get_mch_sched.
+   * make_mbsfn_area_info(r9) cannot derive 0.37/2.5 kHz SCS or SL2 from r9 alone. */
+  if (sibs13.nof_mbsfn_area_info > 0) {
+    using SCS = srsran::mbsfn_area_info_t::subcarrier_spacing_t;
+    using TS  = srsran::mbsfn_area_info_t::time_separation_t;
+    if (!cfg.pmch_subcarrier_spacing.empty()) {
+      if      (cfg.pmch_subcarrier_spacing == "khz0dot37") sibs13.mbsfn_area_info_list[0].subcarrier_spacing = SCS::khz_0dot37;
+      else if (cfg.pmch_subcarrier_spacing == "khz2dot5")  sibs13.mbsfn_area_info_list[0].subcarrier_spacing = SCS::khz_2dot5;
+      else if (cfg.pmch_subcarrier_spacing == "khz1dot25") sibs13.mbsfn_area_info_list[0].subcarrier_spacing = SCS::khz_1dot25;
+      else if (cfg.pmch_subcarrier_spacing == "khz7dot5")  sibs13.mbsfn_area_info_list[0].subcarrier_spacing = SCS::khz_7dot5;
+      else if (cfg.pmch_subcarrier_spacing == "khz15")     sibs13.mbsfn_area_info_list[0].subcarrier_spacing = SCS::khz_15;
+    }
+    if (cfg.pmch_time_separation_sl2) {
+      sibs13.mbsfn_area_info_list[0].time_separation = TS::sl2;
+    }
+    /* sf-AllocInfo-r16 override (TS 36.331 MBSFN-AreaInfo-r16): when the operator gives the
+     * 10-bit value (first bit=SF0), the eNB's own MCCH subframe table (build_mcch_table, which
+     * keys off this struct's sf_alloc_info + sf_alloc_info_is_r16) must use the r16 mapping so it
+     * transmits MCCH on the same subframe the OTA r16 sf-AllocInfo (packed below) tells receivers.
+     * This is the only way to place MCCH on SF0/4/5/9, unreachable via the r9 6-bit field.
+     * Absent (0): make_mbsfn_area_info(r9) already set sf_alloc_info from r9 with is_r16=false. */
+    if (cfg.sf_alloc_info_r16 > 0) {
+      sibs13.mbsfn_area_info_list[0].mcch_cfg.sf_alloc_info        = cfg.sf_alloc_info_r16;
+      sibs13.mbsfn_area_info_list[0].mcch_cfg.sf_alloc_info_is_r16 = true;
+    }
+  }
 
-  pmch_item->nof_mbms_session_info              = 1;
-  pmch_item->mbms_session_info_list[0].lc_ch_id = 1;
-  if (pmch_item->nof_mbms_session_info > 1) {
-    pmch_item->mbms_session_info_list[1].lc_ch_id = 2;
+  /* Serialize pmch-Bandwidth-r17 into OTA SIB13 via the dedicated MBSFN-AreaInfo-r17 wrapper
+   * (TS 36.331 §6.3.7 ASN1START: MBSFN-AreaInfo-r17 ::= SEQUENCE { mbsfn-AreaInfo-r17
+   * MBSFN-AreaInfo-r16, pmch-Bandwidth-r17 ENUMERATED{...}, ... } -- a self-contained entry
+   * with its own embedded copy of the r16 fields, not an in-place extension of
+   * mbsfn_area_info_r16_s itself, which has no extension groups of its own).
+   * Always clear both lists first so a transition from bandwidth>0 → 0 removes the stale entry. */
+  {
+    auto& sib13 = cfg.sibs[12].sib13_v920();
+    sib13.mbsfn_area_info_list_r16_present = false;
+    sib13.mbsfn_area_info_list_r16.resize(0);
+    sib13.mbsfn_area_info_list_r17_present = false;
+    sib13.mbsfn_area_info_list_r17.resize(0);
+    sib13.ext = sib13.notif_cfg_v1430.is_present();
   }
-  uint16_t mbms_mcs = cfg.mbms_mcs;
-  if (mbms_mcs > 28) {
-    mbms_mcs = 28; // TS 36.213, Table 8.6.1-1
-    logger.warning("PMCH data MCS too high, setting it to 28");
+  /* TS 36.331 §6.3.7 Rel-16: mbsfn_area_info_list_r16 must be present for all
+   * MBMS-dedicated cells, not only those needing pmch_bandwidth_r17, SL2, or a
+   * non-r9 SCS.  The SCS mapping below handles all four values correctly. */
+  if (cfg.sibs[12].sib13_v920().mbsfn_area_info_list_r9.size() > 0) {
+    using R16     = mbsfn_area_info_r16_s;
+    using R16MCCH = R16::mcch_cfg_r16_s_;
+    using R16SCS  = R16::subcarrier_spacing_mbms_r16_e_;
+    using R17BW   = mbsfn_area_info_r17_s::pmch_bandwidth_r17_e_;
+    using R16TS   = R16::time_separation_r16_e_;
+
+    auto& sib13 = cfg.sibs[12].sib13_v920();
+    sib13.ext   = true;
+    const uint32_t n = sib13.mbsfn_area_info_list_r9.size();
+    sib13.mbsfn_area_info_list_r16.resize(n);
+
+    for (uint32_t i = 0; i < n; i++) {
+      /* 7.5 kHz and 1.25 kHz are legacy Rel-14 values (subcarrierSpacingMBMS-r14)
+       * -- unlike 2.5 kHz and 0.37 kHz (which have no r9/r14 representation and
+       * need the r16 extension populated below), these must be signalled via the
+       * original r14 field itself, not only via the newer r16 extension: this is
+       * the field a legacy-anchored receiver (or one that falls back to r9/r14
+       * for any reason) actually reads. Previously only r16 was updated from the
+       * operator override, leaving this field at sib.conf's static value. */
+      if (cfg.pmch_subcarrier_spacing == "khz7dot5") {
+        sib13.mbsfn_area_info_list_r9[i].ext                                  = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14_present = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14.value =
+            mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_opts::khz7dot5;
+      } else if (cfg.pmch_subcarrier_spacing == "khz1dot25") {
+        sib13.mbsfn_area_info_list_r9[i].ext                                  = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14_present = true;
+        sib13.mbsfn_area_info_list_r9[i].subcarrier_spacing_mbms_r14.value =
+            mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_opts::khz1dot25;
+      }
+
+      const auto& r9  = sib13.mbsfn_area_info_list_r9[i];
+      auto&       r16 = sib13.mbsfn_area_info_list_r16[i];
+
+      r16.mbsfn_area_id_r16 = r9.mbsfn_area_id_r9;
+      r16.notif_ind_r16     = r9.notif_ind_r9;
+
+      // Map r9 MCCH repeat period (rf32..rf256) to r16 (rf1..rf256)
+      switch (r9.mcch_cfg_r9.mcch_repeat_period_r9.to_number()) {
+        case 1:   r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf1;   break;
+        case 2:   r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf2;   break;
+        case 4:   r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf4;   break;
+        case 8:   r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf8;   break;
+        case 16:  r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf16;  break;
+        case 32:  r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf32;  break;
+        case 64:  r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf64;  break;
+        case 128: r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf128; break;
+        default:  r16.mcch_cfg_r16.mcch_repeat_period_r16 = R16MCCH::mcch_repeat_period_r16_opts::rf256; break;
+      }
+
+      // Map r9 MCCH mod period (rf512..rf1024) to r16 (rf1..rf1024)
+      switch (r9.mcch_cfg_r9.mcch_mod_period_r9.to_number()) {
+        case 512:  r16.mcch_cfg_r16.mcch_mod_period_r16 = R16MCCH::mcch_mod_period_r16_opts::rf512;  break;
+        case 1024: r16.mcch_cfg_r16.mcch_mod_period_r16 = R16MCCH::mcch_mod_period_r16_opts::rf1024; break;
+        default:   r16.mcch_cfg_r16.mcch_mod_period_r16 = R16MCCH::mcch_mod_period_r16_opts::rf512;  break;
+      }
+
+      r16.mcch_cfg_r16.mcch_offset_r16 = r9.mcch_cfg_r9.mcch_offset_r9;
+      // sf-AllocInfo-r16 is a 10-bit field (TS 36.331 MBSFN-AreaInfo-r16), SF0..9 at bit
+      // positions 9..0 MSB-first (SF0=512, SF1=256, ... SF9=1) — this is exactly the layout
+      // the RX's generate_mcch_table_r16 (table[sf] = (alloc >> (9-sf)) & 1) decodes.
+      // The legacy r9 field is only 6 bits (SF1,2,3,6,7,8 at bit positions 5..0), so their
+      // bit positions differ — to_number()/from_number() cannot be used directly.
+      if (cfg.sf_alloc_info_r16 > 0) {
+        // Operator gave the 10-bit r16 value explicitly (lets MCCH sit on SF0/4/5/9,
+        // which the r9 field cannot express). Use it verbatim.
+        r16.mcch_cfg_r16.sf_alloc_info_r16.from_number(cfg.sf_alloc_info_r16);
+      } else {
+        const uint32_t v9 = r9.mcch_cfg_r9.sf_alloc_info_r9.to_number(); // bits: SF1=32,SF2=16,SF3=8,SF6=4,SF7=2,SF8=1
+        uint32_t v16 = 0;
+        if (v9 & 32u) v16 |= 256u; // SF1 → r16 bit 8
+        if (v9 & 16u) v16 |= 128u; // SF2 → r16 bit 7
+        if (v9 &  8u) v16 |=  64u; // SF3 → r16 bit 6
+        if (v9 &  4u) v16 |=   8u; // SF6 → r16 bit 3
+        if (v9 &  2u) v16 |=   4u; // SF7 → r16 bit 2
+        if (v9 &  1u) v16 |=   2u; // SF8 → r16 bit 1
+        r16.mcch_cfg_r16.sf_alloc_info_r16.from_number(v16);
+      }
+
+      // sig_mcs: same enumeration order in r9 and r16 (n2/n7/n13/n19)
+      r16.mcch_cfg_r16.sig_mcs_r16 = (R16MCCH::sig_mcs_r16_opts::options)r9.mcch_cfg_r9.sig_mcs_r9.value;
+
+      // Map subcarrier spacing to r16 enum.
+      // If the operator set an explicit override (required for 2.5/0.37 kHz which
+      // have no r9 representation), use it; otherwise derive from the r9 field.
+      // khz15 (plain LTE numerology, no FeMBMS override) is the spec default -- it must be
+      // the fallback in every branch below, not khz_7dot5. Before this fix, every one of
+      // these fallbacks (an unrecognized override string, a present-but-unhandled r9 value,
+      // and -- the common case -- no override and no r9 field at all) unconditionally chose
+      // khz_7dot5, so any plain-15kHz MBMS-dedicated cell mis-signalled itself as 7.5 kHz in
+      // this r16 extension (which is mandatory, always populated, for every MBMS-dedicated
+      // cell -- there is no "absent" state to fall back on instead).
+      if (!cfg.pmch_subcarrier_spacing.empty()) {
+        if      (cfg.pmch_subcarrier_spacing == "khz1dot25") r16.subcarrier_spacing_mbms_r16 = R16SCS::khz_1dot25;
+        else if (cfg.pmch_subcarrier_spacing == "khz2dot5")  r16.subcarrier_spacing_mbms_r16 = R16SCS::khz_2dot5;
+        else if (cfg.pmch_subcarrier_spacing == "khz7dot5")  r16.subcarrier_spacing_mbms_r16 = R16SCS::khz_7dot5;
+        else if (cfg.pmch_subcarrier_spacing == "khz0dot37") r16.subcarrier_spacing_mbms_r16 = R16SCS::khz0dot37;
+        else if (cfg.pmch_subcarrier_spacing == "khz15")     r16.subcarrier_spacing_mbms_r16 = R16SCS::khz15;
+        else                                                  r16.subcarrier_spacing_mbms_r16 = R16SCS::khz15;
+      } else if (r9.subcarrier_spacing_mbms_r14_present) {
+        // No khz15 case: subcarrierSpacingMBMS-r14 only has {khz7dot5, khz1dot25} as
+        // real values -- 15 kHz at the r9/r14 level is represented by this field being
+        // absent (the branch below), so it can't reach this switch at all.
+        switch (r9.subcarrier_spacing_mbms_r14.value) {
+          case mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_e_::khz7dot5:
+            r16.subcarrier_spacing_mbms_r16 = R16SCS::khz_7dot5;  break;
+          case mbsfn_area_info_r9_s::subcarrier_spacing_mbms_r14_e_::khz1dot25:
+            r16.subcarrier_spacing_mbms_r16 = R16SCS::khz_1dot25; break;
+          default:
+            r16.subcarrier_spacing_mbms_r16 = R16SCS::khz15;      break;
+        }
+      } else {
+        r16.subcarrier_spacing_mbms_r16 = R16SCS::khz15;
+      }
+
+      /* timeSeparation-r16: SL2 or SL4 for 0.37 kHz cells (TS 36.211 §4.1).
+       * Absent = SL4 (default). Only set when operator configures SL2. */
+      if (cfg.pmch_time_separation_sl2) {
+        r16.time_separation_r16_present = true;
+        r16.time_separation_r16         = R16TS::s12;
+      } else {
+        r16.time_separation_r16_present = false;
+      }
+    }
+    sib13.mbsfn_area_info_list_r16_present = true;
+
+    /* pmch-Bandwidth-r17: 30/35/40 PRBs for 6/7/8 MHz FeMBMS channels. Lives in the separate
+     * MBSFN-AreaInfoList-r17 (each entry embeds a full copy of its r16 counterpart, per the
+     * spec's own struct shape), not folded into mbsfn_area_info_list_r16 above. Only emitted
+     * when an override bandwidth is actually configured. */
+    R17BW::options r17bw_opt;
+    switch (cfg.pmch_bandwidth) {
+      case 30: r17bw_opt = R17BW::n30; break;
+      case 35: r17bw_opt = R17BW::n35; break;
+      case 40: r17bw_opt = R17BW::n40; break;
+      default: r17bw_opt = R17BW::nulltype; break;
+    }
+    if (r17bw_opt != R17BW::nulltype) {
+      sib13.mbsfn_area_info_list_r17.resize(n);
+      for (uint32_t i = 0; i < n; i++) {
+        sib13.mbsfn_area_info_list_r17[i].mbsfn_area_info_r17 = sib13.mbsfn_area_info_list_r16[i];
+        sib13.mbsfn_area_info_list_r17[i].pmch_bandwidth_r17  = r17bw_opt;
+      }
+      sib13.mbsfn_area_info_list_r17_present = true;
+    }
+    logger.info("SIB13: added mbsfn_area_info_list_r16: pmch_bandwidth_r17=%d PRBs, time_separation=%s, scs_override=%s",
+                cfg.pmch_bandwidth,
+                cfg.pmch_time_separation_sl2 ? "SL2" : "SL4(default)",
+                cfg.pmch_subcarrier_spacing.empty() ? "(from-r9)" : cfg.pmch_subcarrier_spacing.c_str());
+
+    /* SIB13 is broadcast two independent ways: as its own scheduled SI message
+     * (cfg.sibs[12], populated above) and embedded directly inside SIB1-MBMS
+     * (cfg.sib1.sib_type13_r14) -- see TS 36.331 SystemInformationBlockType1-MBMS-r14's
+     * sib-Type13-r14 field. Both are parsed independently from the same static
+     * sib.conf at startup (enb_cfg_parser.cc calls parse_sib13() twice), so both start
+     * with the same content, but only cfg.sibs[12] was being updated with the operator's
+     * --embms.subcarrier_spacing override above -- cfg.sib1.sib_type13_r14 was silently
+     * left at its stale, sib.conf-only value. Since SIB1-MBMS (and its embedded SIB13)
+     * is received far more often than the standalone SI window, mirror the corrected
+     * mbsfn-AreaInfo content into it too. */
+    cfg.sib1.sib_type13_r14.ext                             = sib13.ext;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r9         = sib13.mbsfn_area_info_list_r9;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r16_present = sib13.mbsfn_area_info_list_r16_present;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r16        = sib13.mbsfn_area_info_list_r16;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r17_present = sib13.mbsfn_area_info_list_r17_present;
+    cfg.sib1.sib_type13_r14.mbsfn_area_info_list_r17        = sib13.mbsfn_area_info_list_r17;
   }
-  logger.debug("PMCH data MCS=%d", mbms_mcs);
-  pmch_item->data_mcs         = mbms_mcs;
-  pmch_item->mch_sched_period = srsran::pmch_info_t::mch_sched_period_t::rf64;
-  pmch_item->sf_alloc_end     = (64*10)-16;
+  } // if (cfg.cell.mbms_dedicated) -- Rel-16/Rel-17 SIB13 signalling
+
+  srsran::mcch_msg_t mcch_t;
+  /* sf_alloc_end = sched_period_rf * 10 - nof_cas*(1 + add_non) - 1 (MCCH).
+   * Each active CAS frame removes 1 SF (SF0) plus add_non additional non-MBSFN SFs (SF1..N).
+   * With CAS muting, fewer active CAS frames leave more MBSFN data subframes. */
+  uint32_t sched_period_rf = cfg.mch_sched_period_rf ? cfg.mch_sched_period_rf : 64u;
+  /* CAS candidate period is 4 frames for wide cells (nof_prb>=25) but 8 frames
+   * for narrow cells (6<nof_prb<25, TS 36.211 §6.6.4.1) — see phy_common.cc. */
+  bool     narrow_cell = cfg.cell.nof_prb > 6 && cfg.cell.nof_prb < 25;
+  uint32_t nof_cas;
+  if (cfg.cell.cas_muting) {
+    uint32_t n_cas  = (uint32_t)cfg.cell.n_cas;
+    uint32_t k_cas  = (uint32_t)cfg.cell.k_cas;
+    uint32_t period = 16u * n_cas;
+    uint32_t rem    = sched_period_rf % period;
+    uint32_t cap    = 4u * k_cas;
+    nof_cas = (sched_period_rf / period) * k_cas + (rem < cap ? rem : cap) / 4u;
+  } else {
+    nof_cas = sched_period_rf / (narrow_cell ? 8u : 4u);
+  }
+  using CAP = srsran::mcch_msg_t::common_sf_alloc_period_t;
+  srsran::mcch_msg_t::common_sf_alloc_period_t cap;
+  switch (sched_period_rf) {
+    case 4:   cap = CAP::rf4;   break;
+    case 8:   cap = CAP::rf8;   break;
+    case 16:  cap = CAP::rf16;  break;
+    case 32:  cap = CAP::rf32;  break;
+    default:  cap = CAP::rf64;  break;
+  }
+  mcch_t.common_sf_alloc_period = cap;
+  mcch_t.nof_common_sf_alloc            = 1;
+  srsran::mbsfn_sf_cfg_t& sf_alloc_item  = mcch_t.common_sf_alloc[0];
+  sf_alloc_item.radioframe_alloc_offset  = 0;
+  sf_alloc_item.radioframe_alloc_period  = srsran::mbsfn_sf_cfg_t::alloc_period_t::n1;
+  sf_alloc_item.nof_alloc_subfrs         = srsran::mbsfn_sf_cfg_t::sf_alloc_type_t::one_frame;
+  sf_alloc_item.sf_alloc                 = 63;
+  /* Loop over PMCH0 (this function's long-standing flat cfg.pmch_* fields,
+   * p==0, "extra" below is null) plus any configured cfg.extra_pmch entries
+   * (p>=1). p==0's resolved values are byte-for-byte the same reads as
+   * before this loop existed, so today's single-PMCH behavior is unchanged
+   * when extra_pmch is empty (nof_pmch==1, loop body runs exactly once).
+   * maxPMCH-PerMBSFN (TS 36.331) is 15. */
+  uint32_t nof_pmch = 1u + (uint32_t)cfg.extra_pmch.size();
+  if (nof_pmch > 15u) {
+    logger.warning("configure_mbsfn_sibs: %u PMCHs configured (PMCH0 + %zu extra_pmch), capping at "
+                   "maxPMCH-PerMBSFN=15", nof_pmch, cfg.extra_pmch.size());
+    nof_pmch = 15u;
+  }
+  mcch_t.nof_pmch_info = nof_pmch;
+  std::vector<uint16_t> pmch_mcs_all(nof_pmch);
+
+  /* sf-AllocEnd-r9 is CUMULATIVE across the PMCH-InfoList, not independent per
+   * entry: pmch_start(i) for i>0 is defined (below, and identically in
+   * pack_mcch()) as the PREVIOUS PMCH's sf_alloc_end + 1, so each subsequent
+   * PMCH's data region continues where the last one's left off within the
+   * SAME shared area-wide schedule - there is only one common_sf_alloc/CAS
+   * pattern for the whole area, not one per PMCH. Computing every PMCH's
+   * sf_alloc_end independently (as if each started fresh at subframe 1) was
+   * an early-pass bug here: for 2+ PMCHs sharing the same mch_sched_period_rf
+   * it made every PMCH after the first get pmch_start > sf_alloc_end (an
+   * empty, unreachable range - it would decode nothing, ever). Fixed:
+   * compute the area's TOTAL data-subframe capacity once (same formula as
+   * before, using the area-wide reference period), then split it across
+   * however many PMCHs are configured, each getting a contiguous slice, the
+   * last one absorbing any remainder. Only correct today when every PMCH
+   * shares the same mch_sched_period_rf (the common case, and the only one
+   * exercised so far) - PMCHs with genuinely different periods would need a
+   * proper multi-period nesting model, not attempted here. */
+  uint32_t total_data_sfs =
+      sched_period_rf * 10u - nof_cas * (1u + (uint32_t)cfg.cell.additional_non_mbms_frames) - 1u;
+  uint32_t base_chunk      = total_data_sfs / nof_pmch;
+  uint32_t chunk_remainder = total_data_sfs % nof_pmch;
+  uint32_t cumulative_end  = 0;
+
+  for (uint32_t p = 0; p < nof_pmch; p++) {
+    const pmch_cfg_t* extra = (p > 0) ? &cfg.extra_pmch[p - 1] : nullptr;
+    srsran::pmch_info_t* pmch_item = &mcch_t.pmch_info_list[p];
+
+    uint16_t mcs_in           = extra ? extra->mcs : cfg.mbms_mcs;
+    bool     use_mcs_table2_p = extra ? extra->use_mcs_table2 : cfg.pmch_use_mcs_table2;
+    uint8_t  ti_n_p           = extra ? extra->time_interleaving_n : cfg.pmch_time_interleaving_n;
+    uint8_t  ti_m_p           = extra ? extra->time_interleaving_m : cfg.pmch_time_interleaving_m;
+    uint8_t  ti_n_last_p      = extra ? extra->time_interleaving_n_last_mtch : cfg.pmch_time_interleaving_n_last_mtch;
+    uint8_t  ti_m_last_p      = extra ? extra->time_interleaving_m_last_mtch : cfg.pmch_time_interleaving_m_last_mtch;
+    uint8_t  cyclic_alpha_p   = extra ? extra->cyclic_shift_alpha : cfg.pmch_cyclic_shift_alpha;
+    bool     freq_il_p        = extra ? extra->freq_interleaving : cfg.pmch_freq_interleaving;
+    uint16_t n_soft_cat_p     = extra ? extra->n_soft_ref_category : cfg.pmch_n_soft_ref_category;
+    uint8_t  sched_period_p   = extra ? (extra->mch_sched_period_rf ? extra->mch_sched_period_rf : 64u)
+                                        : (uint8_t)sched_period_rf;
+
+    auto resolved_sessions = resolve_pmch_sessions(extra, cfg, mbms_sessions);
+    if (!resolved_sessions.empty()) {
+      pmch_item->nof_mbms_session_info = (uint32_t)resolved_sessions.size();
+      for (size_t s = 0; s < resolved_sessions.size(); s++) {
+        pmch_item->mbms_session_info_list[s] = resolved_sessions[s];
+      }
+    } else {
+      // Fabricated fallback (nothing real configured/online) -- static single-session-per-slot stub,
+      // unchanged from before per-PMCH session routing existed.
+      uint32_t nof_sessions_p = extra ? (extra->nof_mbms_sessions ? extra->nof_mbms_sessions : 1u)
+                                        : (cfg.nof_mbms_sessions ? cfg.nof_mbms_sessions : 1u);
+      pmch_item->nof_mbms_session_info = nof_sessions_p;
+      for (uint32_t s = 0; s < nof_sessions_p && s < 8u; s++) {
+        pmch_item->mbms_session_info_list[s].lc_ch_id = (uint8_t)(s + 1);
+      }
+    }
+    uint16_t mbms_mcs = mcs_in;
+    if (mbms_mcs > 26) {
+      mbms_mcs = 26; // ETSI TS 103 720 Table 11.3.1-1/-2 (Physical layer capacity for
+                     // LTE-based 5G Broadcast, all supported numerologies, full
+                     // QPSK/16QAM/64QAM/256QAM range): both tables list MCS 0-26 only,
+                     // never 27/28, across both the published V1.2.1 and the current
+                     // draft. MCS 27/28 exist in the generic TS 36.213 clause 11.1 PMCH
+                     // MCS tables (Table 7.1.7.1-1/1A, Table 11.1-1/11.1-2) but are
+                     // outside the range this 5G Broadcast profile actually defines/uses.
+      logger.warning("PMCH[%u] data MCS too high, setting it to 26", p);
+    }
+    if (cfg.pmch_subcarrier_spacing.empty() || cfg.pmch_subcarrier_spacing == "khz15") {
+      uint32_t nof_prb_pmch = cfg.cell.mbsfn_prb ? cfg.cell.mbsfn_prb : cfg.cell.nof_prb;
+      uint16_t feasible_mcs = clamp_pmch_mcs_to_feasible(mbms_mcs, nof_prb_pmch, use_mcs_table2_p);
+      if (feasible_mcs < mbms_mcs) {
+        logger.error("Configured PMCH[%u] MCS=%d is infeasible for %d PRB (code rate > 1, every "
+                      "subframe would fail CRC); clamping to MCS=%d",
+                      p, mbms_mcs, nof_prb_pmch, feasible_mcs);
+        mbms_mcs = feasible_mcs;
+      }
+    }
+    logger.debug("PMCH[%u] data MCS=%d", p, mbms_mcs);
+    pmch_item->data_mcs = mbms_mcs;
+    pmch_mcs_all[p]     = mbms_mcs;
+    // Cumulative slice of total_data_sfs - see this loop's header comment.
+    uint32_t this_pmch_start = cumulative_end + 1; // 1 for p==0, prev end + 1 otherwise
+    uint32_t this_chunk      = base_chunk + (p == nof_pmch - 1 ? chunk_remainder : 0);
+    pmch_item->sf_alloc_end  = cumulative_end + this_chunk;
+    cumulative_end           = pmch_item->sf_alloc_end;
+    /* TS 36.211 §6.5.3: M_TimePMCH must divide THIS PMCH's OWN data subframe
+     * count (sf_alloc_end - pmch_start + 1, not the raw cumulative
+     * sf_alloc_end - those only coincide for PMCH0, where pmch_start is
+     * always 1; for PMCH1+ pmch_start is the previous PMCH's end + 1, so
+     * using the raw cumulative value here would check the wrong quantity and
+     * could reject an M that actually divides this PMCH's real slice size,
+     * or accept one that doesn't). pmch-TimeInterleavingM-r19 (TS 36.331
+     * PMCH-TFI-Config-r19) is ENUMERATED{sf4,sf8,sf16,sf32} -- only these 4
+     * discrete values are representable over the air. This used to clamp M
+     * by searching ALL integers down from the configured value, which for
+     * this rig's baseline sf_alloc_end (623 = 7x89, no divisor in
+     * {4,8,16,32} at any legal mch_sched_period_rf -- confirmed by direct
+     * computation) always landed on some unrepresentable value (1, 7, ...);
+     * pack_mcch()'s OTA-signalling switch has no case for those and silently
+     * fell through to "default: sf4" regardless, so every configured M
+     * decoded as 4 no matter what was actually requested or actually clamped
+     * to. Search only the legal enum values here instead, largest-first,
+     * capped at the configured M -- and if none divide evenly, disable time
+     * interleaving outright rather than silently misrepresenting an
+     * infeasible M as feasible. */
+    if (ti_n_p > 1 && ti_m_p > 1) {
+      uint32_t             data_sfs  = pmch_item->sf_alloc_end - this_pmch_start + 1u;
+      static const uint8_t legal_m[] = {32, 16, 8, 4};
+      uint8_t              m         = 0;
+      for (uint8_t candidate : legal_m) {
+        if (candidate <= ti_m_p && data_sfs % candidate == 0) {
+          m = candidate;
+          break;
+        }
+      }
+      if (m == 0) {
+        logger.warning("PMCH[%u] time_interleaving_m=%d: none of the legal values (4,8,16,32) divide "
+                       "sf_alloc_end=%d -- pmch-TimeInterleavingM-r19 cannot signal any other "
+                       "value, so time interleaving is not usable with this scheduling period; "
+                       "disabling",
+                       p, ti_m_p, data_sfs);
+        ti_n_p = 0;
+        ti_m_p = 0;
+      } else {
+        if (m != ti_m_p) {
+          logger.warning("PMCH[%u] time_interleaving_m=%d does not divide sf_alloc_end=%d; clamping to %d",
+                         p, ti_m_p, data_sfs, m);
+        }
+        ti_m_p = m;
+      }
+      pmch_item->time_interleaving_m = ti_m_p;
+      /* Write the (possibly just-clamped) M back to the source of truth so
+       * pack_mcch() - which reads cfg.pmch_time_interleaving_m / extra_pmch
+       * directly rather than taking these resolved locals as parameters -
+       * broadcasts the same value PHY/mcch_t actually use. Mirrors PMCH0's
+       * pre-loop behavior of writing back into cfg.pmch_time_interleaving_m. */
+      if (extra) {
+        cfg.extra_pmch[p - 1].time_interleaving_n = ti_n_p;
+        cfg.extra_pmch[p - 1].time_interleaving_m = ti_m_p;
+      } else {
+        cfg.pmch_time_interleaving_n = ti_n_p;
+        cfg.pmch_time_interleaving_m = ti_m_p;
+      }
+    }
+    using SP = srsran::pmch_info_t::mch_sched_period_t;
+    switch (sched_period_p) {
+      case 4:   pmch_item->mch_sched_period = SP::rf4;   break;
+      case 8:   pmch_item->mch_sched_period = SP::rf8;   break;
+      case 16:  pmch_item->mch_sched_period = SP::rf16;  break;
+      case 32:  pmch_item->mch_sched_period = SP::rf32;  break;
+      default:  pmch_item->mch_sched_period = SP::rf64;  break;
+    }
+    pmch_item->use_mcs_table2       = use_mcs_table2_p;
+    pmch_item->time_interleaving_n  = ti_n_p;
+    pmch_item->time_interleaving_m  = ti_m_p;
+    /* Only meaningful when the main N/M above are actually active with 2+ sessions
+     * (reconfigure_embms() already zeroes these otherwise) — read by mac.cc's
+     * get_mch_sched() to pick which of nof_mbms_session_info's sessions is "last"
+     * and give it different (or, via N-last=1, no) time interleaving. */
+    pmch_item->time_interleaving_n_last_mtch = ti_n_last_p;
+    pmch_item->time_interleaving_m_last_mtch = ti_m_last_p;
+    /* cyclic_shift_alpha can only be OTA-signaled to UEs inside the same v1900 IE as
+     * time interleaving (see pack_mcch(): pmch_cyclic_shift_alpha_r19 lives inside
+     * time_interleav_cfg_r19, only present when time_interleaving_n>1). Gate PHY's
+     * application of the shift the same way, or the transmitted waveform would use a
+     * rotation UEs were never told about and have no way to compensate for. */
+    pmch_item->cyclic_shift       = (ti_n_p > 1) && (cyclic_alpha_p > 0);
+    pmch_item->cyclic_shift_alpha = (ti_n_p > 1) ? cyclic_alpha_p : 0;
+    pmch_item->freq_interleaving    = freq_il_p;
+    /* PMCH-SoftBufferSizeParameters-r19 (TS 36.212 §5.1.4.1.2 N_cb capping) — only
+     * meaningful/OTA-signalled when time_interleaving_n > 1, same gating as cyclic_shift
+     * above; harmless to always set on the internal struct otherwise. */
+    pmch_item->n_soft_ref_category     = n_soft_cat_p;
+    uint8_t beta_num_p = 1, beta_den_p = 1; // "one" (TS 36.331 pmch-TimeInterleavingScalingFactorBeta-r19 default)
+    if (extra) {
+      if (!extra->scaling_factor_beta.empty() &&
+          !srsran::pmch_scaling_factor_beta_by_name(extra->scaling_factor_beta, &beta_num_p, &beta_den_p)) {
+        logger.error("PMCH[%u] scaling_factor_beta=\"%s\" is not a valid PMCH-SoftBufferSizeParameters-r19 token "
+                    "-- using default (one, 1/1)",
+                    p, extra->scaling_factor_beta.c_str());
+        beta_num_p = 1;
+        beta_den_p = 1;
+      }
+    } else {
+      beta_num_p = cfg.pmch_scaling_factor_beta_num;
+      beta_den_p = cfg.pmch_scaling_factor_beta_den;
+    }
+    pmch_item->scaling_factor_beta_num = beta_num_p;
+    pmch_item->scaling_factor_beta_den = beta_den_p;
+  }
+  /* pack_mcch() below reads cfg.pmch_time_interleaving_m/cfg.extra_pmch to build the
+   * OTA v1900 extension IE(s) — it must run after the divisor-clamp loop above, or the
+   * eNB would broadcast an M value different from the one it actually uses for TX
+   * timing. Pass the already-clamped per-PMCH MCS values computed above rather than
+   * letting pack_mcch() recompute them independently — see pack_mcch()'s own comment
+   * for why two independent copies of the same clamp used to be a real, if usually
+   * latent, divergence risk between the internal (mcch_t) and OTA (ASN.1 mcch)
+   * representations. */
+  pack_mcch(pmch_mcs_all);
 
   // Configure PHY when PHY is done being initialized
-  task_sched.defer_task([this, sibs2, sibs13, mcch_t]() mutable {
-    phy->configure_mbsfn(&sibs2, &sibs13, mcch_t);
-    mac->write_mcch(&sibs2, &sibs13, &mcch_t, mcch_payload_buffer, current_mcch_length);
-  });
+  //
+  // cas_muting/k_cas/n_cas/additional_non_mbsfn_subframes are captured by value here (like
+  // sibs2/sibs13/mcch_t above), not read fresh from cfg.cell inside the deferred lambda: this
+  // keeps whatever reaches PHY a consistent snapshot from *this* configure_mbsfn_sibs() call,
+  // not whatever cfg.cell happens to hold whenever the deferred task actually runs (which could
+  // be from a newer, concurrent reconfigure by then).
+  const bool    cas_muting_snapshot = cfg.cell.cas_muting;
+  const uint8_t k_cas_snapshot      = cfg.cell.k_cas;
+  const uint8_t n_cas_snapshot      = cfg.cell.n_cas;
+  const uint8_t add_non_snapshot    = cfg.cell.additional_non_mbms_frames;
+  task_sched.defer_task(
+      [this, sibs2, sibs13, mcch_t, cas_muting_snapshot, k_cas_snapshot, n_cas_snapshot, add_non_snapshot]() mutable {
+        phy->configure_mbsfn(&sibs2, &sibs13, mcch_t);
+        // See phy_interface_rrc_lte::set_cell_cas_muting_cfg()'s doc comment: configure_mbsfn()
+        // above only pushes the OTA-signalled SIB2/SIB13/MCCH content; PHY's own scheduling-
+        // exclusion logic reads a separate, otherwise-never-refreshed cell config copy.
+        phy->set_cell_cas_muting_cfg(cas_muting_snapshot, k_cas_snapshot, n_cas_snapshot, add_non_snapshot);
+        mac->write_mcch(&sibs2, &sibs13, &mcch_t, mcch_payload_buffer, current_mcch_length);
+      });
+
+  // Rebuild the packed OTA SI buffers so UEs see the updated SIB13 (e.g. after
+  // reconfigure_embms() changes pmch_bandwidth). Skip during init: generate_sibs()
+  // hasn't been called yet, so cell_common_list is null.
+  if (cell_common_list != nullptr) {
+    // Bump systemInfoValueTag (TS 36.331 §5.2.1.2) the same way regenerate_si() does for
+    // ETWS: this is the only signal a spec-compliant UE uses to know SI content changed
+    // and it should re-acquire SIB13, rather than keep using an already-cached copy.
+    // Previously only regenerate_si() (ETWS-only) bumped this; a live embms reconfigure
+    // rebuilt the broadcast SIB13 bytes without ever telling receivers to re-read them.
+    cfg.sib1.sys_info_value_tag_r14 = (cfg.sib1.sys_info_value_tag_r14 + 1) & 0x1F;
+    if (!cfg.sib_tag_state_file.empty()) {
+      FILE* f = fopen(cfg.sib_tag_state_file.c_str(), "w");
+      if (f) { fprintf(f, "%u\n", (unsigned)cfg.sib1.sys_info_value_tag_r14); fclose(f); }
+    }
+    generate_sibs();
+    update_mac_sib_cfg();
+  }
+  /* Refresh the broadcast RNTI's bearers to match whatever PMCH/session config this
+   * call just (re-)packed into MCCH -- add_user(SRSRAN_MRNTI, ...) only ever runs once
+   * per process lifetime (MAC's first-MCCH-ready event), so without this a PMCH or
+   * session added after that point (embms.nof_pmch live-set post-startup; a real M3AP
+   * session replacing the fabricated fallback) would be signalled correctly but never
+   * get a bearer to actually deliver data through. Guarded on the broadcast RNTI
+   * already existing: configure_mbsfn_sibs() also runs during startup/cell
+   * configuration, before add_user() has ever been called for it -- that first-time
+   * registration is add_user()'s own job. */
+  if (users.count(SRSRAN_MRNTI) != 0) {
+    configure_mbms_bearers();
+  }
 }
 
-int rrc::pack_mcch()
+int rrc::pack_mcch(const std::vector<uint16_t>& mbms_mcs_per_pmch)
 {
   mcch.msg.set_c1();
   mbsfn_area_cfg_r9_s& area_cfg_r9      = mcch.msg.c1().mbsfn_area_cfg_r9();
-  area_cfg_r9.common_sf_alloc_period_r9 = mbsfn_area_cfg_r9_s::common_sf_alloc_period_r9_e_::rf64;
+  uint32_t sched_period_rf_p = cfg.mch_sched_period_rf ? cfg.mch_sched_period_rf : 64u;
+  using CAP_r9 = mbsfn_area_cfg_r9_s::common_sf_alloc_period_r9_e_;
+  mbsfn_area_cfg_r9_s::common_sf_alloc_period_r9_e_ cap_r9;
+  switch (sched_period_rf_p) {
+    case 4:   cap_r9 = CAP_r9::rf4;   break;
+    case 8:   cap_r9 = CAP_r9::rf8;   break;
+    case 16:  cap_r9 = CAP_r9::rf16;  break;
+    case 32:  cap_r9 = CAP_r9::rf32;  break;
+    default:  cap_r9 = CAP_r9::rf64;  break;
+  }
+  area_cfg_r9.common_sf_alloc_period_r9 = cap_r9;
   area_cfg_r9.common_sf_alloc_r9.resize(1);
   mbsfn_sf_cfg_s* sf_alloc_item          = &area_cfg_r9.common_sf_alloc_r9[0];
   sf_alloc_item->radioframe_alloc_offset = 0;
   sf_alloc_item->radioframe_alloc_period = mbsfn_sf_cfg_s::radioframe_alloc_period_e_::n1;
   sf_alloc_item->sf_alloc.set_one_frame().from_number(32 + 31);
 
-  area_cfg_r9.pmch_info_list_r9.resize(1);
-  pmch_info_r9_s* pmch_item = &area_cfg_r9.pmch_info_list_r9[0];
-  pmch_item->mbms_session_info_list_r9.resize(1);
+  /* CAS candidate period is 4 frames for wide cells (nof_prb>=25) but 8 frames
+   * for narrow cells (6<nof_prb<25, TS 36.211 §6.6.4.1) — see phy_common.cc. */
+  bool narrow_cell = cfg.cell.nof_prb > 6 && cfg.cell.nof_prb < 25;
 
-  pmch_item->mbms_session_info_list_r9[0].lc_ch_id_r9           = 1;
-  pmch_item->mbms_session_info_list_r9[0].session_id_r9_present = true;
-  pmch_item->mbms_session_info_list_r9[0].session_id_r9[0]      = 0;
-  pmch_item->mbms_session_info_list_r9[0].tmgi_r9.plmn_id_r9.set_explicit_value_r9();
-  srsran::plmn_id_t plmn_obj;
-  plmn_obj.from_string("00003");
-  srsran::to_asn1(&pmch_item->mbms_session_info_list_r9[0].tmgi_r9.plmn_id_r9.explicit_value_r9(), plmn_obj);
-  uint8_t byte[] = {0x0, 0x0, 0x0};
-  memcpy(&pmch_item->mbms_session_info_list_r9[0].tmgi_r9.service_id_r9[0], &byte[0], 3);
+  uint32_t nof_pmch = (uint32_t)mbms_mcs_per_pmch.size();
 
-  if (pmch_item->mbms_session_info_list_r9.size() > 1) {
-    pmch_item->mbms_session_info_list_r9[1].lc_ch_id_r9           = 2;
-    pmch_item->mbms_session_info_list_r9[1].session_id_r9_present = true;
-    pmch_item->mbms_session_info_list_r9[1].session_id_r9[0]      = 1;
-    pmch_item->mbms_session_info_list_r9[1].tmgi_r9.plmn_id_r9.set_explicit_value_r9() =
-        pmch_item->mbms_session_info_list_r9[0].tmgi_r9.plmn_id_r9.explicit_value_r9();
-    byte[2] = 1;
-    memcpy(&pmch_item->mbms_session_info_list_r9[1].tmgi_r9.service_id_r9[0],
-           &byte[0],
-           3); // TODO: Check if service is set to 1
+  /* sf-AllocEnd-r9/r12 is cumulative across PMCH index order (pmch_start(i) for
+   * i>0 is the previous PMCH's sf_alloc_end + 1) - identical reasoning and
+   * formula to configure_mbsfn_sibs()'s matching precomputation (see that
+   * comment for the full rationale). Precomputed here, by PMCH index, BEFORE
+   * the r9-list and v1900-list are built below: those two lists only cover a
+   * SUBSET of PMCH indices each (split by has_phase2), in index order WITHIN
+   * each list but not necessarily consistently ACROSS the two lists (e.g. if
+   * PMCH0 has Phase 2 features and PMCH1 doesn't, the v1900 loop - which
+   * only visits PMCH0 - runs after the r9 loop - which only visits PMCH1 -
+   * in this function's own code order), so a single running cumulative
+   * counter threaded through both loops in code order would get the wrong
+   * answer whenever list membership and index order disagree. Looking up a
+   * precomputed per-index array sidesteps that entirely. */
+  uint32_t area_nof_cas;
+  if (cfg.cell.cas_muting) {
+    uint32_t n_cas_v  = (uint32_t)cfg.cell.n_cas;
+    uint32_t k_cas_v  = (uint32_t)cfg.cell.k_cas;
+    uint32_t period_v = 16u * n_cas_v;
+    uint32_t rem_v    = sched_period_rf_p % period_v;
+    uint32_t cap_v    = 4u * k_cas_v;
+    area_nof_cas = (sched_period_rf_p / period_v) * k_cas_v + (rem_v < cap_v ? rem_v : cap_v) / 4u;
+  } else {
+    area_nof_cas = sched_period_rf_p / (narrow_cell ? 8u : 4u);
+  }
+  uint32_t total_data_sfs =
+      sched_period_rf_p * 10u - area_nof_cas * (1u + (uint32_t)cfg.cell.additional_non_mbms_frames) - 1u;
+  uint32_t base_chunk      = total_data_sfs / nof_pmch;
+  uint32_t chunk_remainder = total_data_sfs % nof_pmch;
+  std::vector<uint32_t> sf_alloc_end_per_pmch(nof_pmch);
+  {
+    uint32_t running_end = 0;
+    for (uint32_t p = 0; p < nof_pmch; p++) {
+      uint32_t this_chunk    = base_chunk + (p == nof_pmch - 1 ? chunk_remainder : 0);
+      running_end            = running_end + this_chunk;
+      sf_alloc_end_per_pmch[p] = running_end;
+    }
   }
 
-  uint16_t mbms_mcs = cfg.mbms_mcs;
-  if (mbms_mcs > 28) {
-    mbms_mcs = 28; // TS 36.213, Table 8.6.1-1
-    logger.warning("PMCH data MCS too high, setting it to 28");
+  /* Per PTS 36.331 §6.3.7 field description (shared by the r12/v1900 variants of
+   * PMCH-InfoListExt): "includes ADDITIONAL PMCHs, i.e. extends the PMCH list" -
+   * there is no spec mechanism for the same PMCH to appear in both
+   * pmch-InfoList-r9 and pmch-InfoListExt-v1900 as a richer duplicate of the
+   * same entry. So each PMCH is described exactly once: in the r9 list if it
+   * has no Rel-19 Phase 2 feature enabled, or (only) via v1900 if it does -
+   * matching this function's own pre-multi-PMCH precedent (a single PMCH with
+   * any Phase 2 feature moved wholesale from r9 to v1900), just decided
+   * per-PMCH instead of once for the whole (former single-PMCH) area. */
+  struct pmch_resolved_t {
+    uint16_t mcs;
+    bool     use_mcs_table2;
+    uint8_t  ti_n, ti_m, ti_n_last, ti_m_last;
+    uint8_t  cyclic_alpha;
+    bool     freq_il;
+    uint8_t  sched_period_rf;
+    uint16_t n_soft_cat;
+    uint8_t  beta_num, beta_den;
+    bool     has_phase2;
+  };
+  std::vector<pmch_resolved_t> pmch(nof_pmch);
+  for (uint32_t p = 0; p < nof_pmch; p++) {
+    const pmch_cfg_t* extra = (p > 0) ? &cfg.extra_pmch[p - 1] : nullptr;
+    pmch_resolved_t&  r     = pmch[p];
+    r.mcs             = mbms_mcs_per_pmch[p];
+    r.use_mcs_table2  = extra ? extra->use_mcs_table2 : cfg.pmch_use_mcs_table2;
+    r.ti_n            = extra ? extra->time_interleaving_n : cfg.pmch_time_interleaving_n;
+    r.ti_m            = extra ? extra->time_interleaving_m : cfg.pmch_time_interleaving_m;
+    r.ti_n_last       = extra ? extra->time_interleaving_n_last_mtch : cfg.pmch_time_interleaving_n_last_mtch;
+    r.ti_m_last       = extra ? extra->time_interleaving_m_last_mtch : cfg.pmch_time_interleaving_m_last_mtch;
+    r.cyclic_alpha    = extra ? extra->cyclic_shift_alpha : cfg.pmch_cyclic_shift_alpha;
+    r.freq_il         = extra ? extra->freq_interleaving : cfg.pmch_freq_interleaving;
+    r.sched_period_rf = extra ? (extra->mch_sched_period_rf ? extra->mch_sched_period_rf : 64u)
+                                : (uint8_t)sched_period_rf_p;
+    r.n_soft_cat      = extra ? extra->n_soft_ref_category : cfg.pmch_n_soft_ref_category;
+    r.beta_num = 1;
+    r.beta_den = 1;
+    if (extra) {
+      if (!extra->scaling_factor_beta.empty() &&
+          !srsran::pmch_scaling_factor_beta_by_name(extra->scaling_factor_beta, &r.beta_num, &r.beta_den)) {
+        r.beta_num = 1;
+        r.beta_den = 1; // already logged as an error in configure_mbsfn_sibs()'s matching resolution
+      }
+    } else {
+      r.beta_num = cfg.pmch_scaling_factor_beta_num;
+      r.beta_den = cfg.pmch_scaling_factor_beta_den;
+    }
+    r.has_phase2 = (r.cyclic_alpha > 0) || r.freq_il || (r.ti_n > 1) || r.use_mcs_table2;
+  }
+  const bool any_has_phase2 =
+      std::any_of(pmch.begin(), pmch.end(), [](const pmch_resolved_t& r) { return r.has_phase2; });
+
+  /* Shared session-list builder: fills whichever ASN.1 list is passed in
+   * (pmch_info_r9_s::mbms_session_info_list_r9 for an r9 entry,
+   * pmch_info_ext_r19_s::mbms_session_info_list_r19 for a v1900-only entry -
+   * both are TS 36.331 MBMS-SessionInfoList-r9, the same underlying
+   * generated type, hence the generic/templated lambda parameter).
+   * resolve_pmch_sessions() (shared with configure_mbsfn_sibs()) resolves which
+   * real sessions - if any - belong on PMCH p, honoring embms.[pmchN.]session_teids
+   * when configured; an empty result falls back to the same static/fabricated
+   * single-session-per-slot stub every PMCH used before per-PMCH routing existed. */
+  auto fill_session_list = [&](uint32_t p, asn1::rrc::mbms_session_info_list_r9_l& session_list) {
+    const pmch_cfg_t* extra    = (p > 0) ? &cfg.extra_pmch[p - 1] : nullptr;
+    auto               resolved = resolve_pmch_sessions(extra, cfg, mbms_sessions);
+    if (!resolved.empty()) {
+      // Always signals the TMGI's PLMN explicitly (set_explicit_value_r9()) rather than guessing a
+      // plmn-idx-r9 into the cell's own broadcast PLMN-IdentityList, since a real MBMS session's PLMN
+      // isn't necessarily known to match without cross-checking that list (out of scope for this pass).
+      session_list.resize(resolved.size());
+      for (size_t s = 0; s < resolved.size(); s++) {
+        auto&       si   = session_list[s];
+        const auto& info = resolved[s];
+        si.lc_ch_id_r9           = info.lc_ch_id;
+        si.session_id_r9_present = info.session_id_present;
+        if (info.session_id_present) {
+          si.session_id_r9[0] = info.session_id;
+        }
+        if (info.tmgi.plmn_id_type == srsran::tmgi_t::plmn_id_type_t::plmn_idx) {
+          si.tmgi_r9.plmn_id_r9.set_plmn_idx_r9() = info.tmgi.plmn_id.plmn_idx;
+        } else {
+          srsran::to_asn1(&si.tmgi_r9.plmn_id_r9.set_explicit_value_r9(), info.tmgi.plmn_id.explicit_value);
+        }
+        memcpy(&si.tmgi_r9.service_id_r9[0], info.tmgi.serviced_id, 3);
+      }
+      return;
+    }
+    // Fabricated fallback (nothing real configured/online) -- static single-session-per-slot stub,
+    // unchanged from before per-PMCH session routing existed.
+    uint32_t nof_sessions_p = extra ? (extra->nof_mbms_sessions ? extra->nof_mbms_sessions : 1u)
+                                      : (cfg.nof_mbms_sessions ? cfg.nof_mbms_sessions : 1u);
+    session_list.resize(nof_sessions_p);
+    for (uint32_t s = 0; s < nof_sessions_p && s < 8u; s++) {
+      auto& si = session_list[s];
+      si.lc_ch_id_r9           = (uint8_t)(s + 1);
+      si.session_id_r9_present = true;
+      si.session_id_r9[0]      = (uint8_t)s;
+      si.tmgi_r9.plmn_id_r9.set_plmn_idx_r9() = 1;
+      uint8_t sid[3]           = {0x0, 0x0, (uint8_t)s};
+      memcpy(&si.tmgi_r9.service_id_r9[0], sid, 3);
+    }
+  };
+
+  // r9 list: every PMCH without any Phase 2 feature, in PMCH-index order.
+  std::vector<uint32_t> r9_pmchs;
+  for (uint32_t p = 0; p < nof_pmch; p++) {
+    if (!pmch[p].has_phase2) {
+      r9_pmchs.push_back(p);
+    }
+  }
+  area_cfg_r9.pmch_info_list_r9.resize(r9_pmchs.size());
+  for (size_t idx = 0; idx < r9_pmchs.size(); idx++) {
+    uint32_t         p         = r9_pmchs[idx];
+    pmch_info_r9_s*  pmch_item = &area_cfg_r9.pmch_info_list_r9[idx];
+    const auto&      r         = pmch[p];
+    fill_session_list(p, pmch_item->mbms_session_info_list_r9);
+
+    // mbms_mcs_per_pmch[p] is already fully-clamped (>26 and per-PRB-feasibility) by
+    // configure_mbsfn_sibs() before calling this function, and this ASN.1-facing
+    // pmch_item must broadcast that exact same value -- not an independently
+    // recomputed one -- or a receiver could be told a different MCS than the one
+    // the eNB actually schedules/transmits with.
+    logger.debug("PMCH[%u] data MCS=%d", p, r.mcs);
+    pmch_item->pmch_cfg_r9.data_mcs_r9 = r.mcs;
+    using SP_r9 = pmch_cfg_r9_s::mch_sched_period_r9_e_;
+    SP_r9 sp_r9;
+    switch (r.sched_period_rf) {
+      /* MCH-SchedulingPeriod-r9 has no rf4 value (r9 starts at rf8; rf4 was only
+       * added by later PMCH-Config-r12/r19 extensions), so a period of 4 falls
+       * through to the default below and is signalled at r9 level as rf64. */
+      case 8:   sp_r9 = SP_r9::rf8;   break;
+      case 16:  sp_r9 = SP_r9::rf16;  break;
+      case 32:  sp_r9 = SP_r9::rf32;  break;
+      default:  sp_r9 = SP_r9::rf64;  break;
+    }
+    pmch_item->pmch_cfg_r9.mch_sched_period_r9 = sp_r9;
+    // Cumulative by PMCH index - see sf_alloc_end_per_pmch's header comment.
+    pmch_item->pmch_cfg_r9.sf_alloc_end_r9 = (uint16_t)sf_alloc_end_per_pmch[p];
   }
 
-  logger.debug("PMCH data MCS=%d", mbms_mcs);
-  pmch_item->pmch_cfg_r9.data_mcs_r9         = mbms_mcs;
-  pmch_item->pmch_cfg_r9.mch_sched_period_r9 = pmch_cfg_r9_s::mch_sched_period_r9_e_::rf64;
-  pmch_item->pmch_cfg_r9.sf_alloc_end_r9     = (64*10)-16;
+  // Rel-19 Phase 2: encode v1900 extension chain when any PMCH has a Phase 2 feature enabled.
+  // Also enable the chain (up to v1610, not v1900) whenever the cell is MBMS-dedicated,
+  // so commonSF-Alloc-v1610 below can be signalled even with zero Phase 2 features on.
+  if (any_has_phase2 || cfg.cell.mbms_dedicated) {
+    using asn1::rrc::mbsfn_area_cfg_v1900_ies_s;
+    using asn1::rrc::pmch_info_ext_r19_s;
+    using asn1::rrc::pmch_tfi_cfg_r19_s;
+    using asn1::rrc::pmch_soft_buf_size_params_r19_s;
+    using asn1::rrc::pmch_cfg_r12_s;
+
+    // Enable the extension chain: r9 → v930 → v1250 → v1430 → v1610 → v1900
+    area_cfg_r9.non_crit_ext_present = true;
+    auto& v930  = area_cfg_r9.non_crit_ext;
+    v930.non_crit_ext_present = true;
+    auto& v1250 = v930.non_crit_ext;
+    v1250.non_crit_ext_present = true;
+    auto& v1430 = v1250.non_crit_ext;
+    v1430.non_crit_ext_present = true;
+    /* commonSF-Alloc-r14 is mandatory (SIZE(1..8)) once this IE is present —
+     * left unpopulated, pack() fails partway through the extension chain
+     * (silently truncating the transmitted message; see caller below) and
+     * v1610/v1900, the reason this chain was engaged, never gets encoded. */
+    v1430.common_sf_alloc_r14.resize(1);
+    v1430.common_sf_alloc_r14[0].sf_alloc_v1430.set_one_frame_v1430().from_number(3);
+    auto& v1610 = v1430.non_crit_ext;
+
+    /* commonSF-Alloc-v1610: TS 36.331 field description, "E-UTRAN includes commonSF-Alloc-
+     * v1610 only when the cell is a MBMS-dedicated cell" — unlike v1430's commonSF-Alloc-r14
+     * above, this field has its own presence bit and is genuinely optional. Signals both SF0
+     * and SF5 allocated (oneFrame-v1610 = "11"), mirroring the v1430 idiom exactly — matches
+     * is_mch_subframe()'s own scheduling, which (as of this fix) already treats SF5 (always)
+     * and SF0 (on non-CAS-anchor frames) as ordinary MCH capacity on a dedicated cell.
+     * Caveat, deliberately not modeled further here: this static "11" is not literally
+     * accurate on a true/unmuted CAS-anchor frame, where SF0 is dynamically excluded by that
+     * same function's CAS-muting logic — same "receivers must dynamically detect CAS
+     * independent of static declarations" principle CAS-muting already establishes
+     * elsewhere in this codebase, just applied to this IE for the first time. */
+    if (cfg.cell.mbms_dedicated) {
+      v1610.common_sf_alloc_v1610_present = true;
+      v1610.common_sf_alloc_v1610.resize(1);
+      v1610.common_sf_alloc_v1610[0].sf_alloc_v1610.set_one_frame_v1610().from_number(3);
+    }
+
+    // Continue into v1900 only when there is actual Rel-19 Phase 2 content to carry —
+    // mbms_dedicated alone (with no Phase 2 features) stops at v1610.
+    v1610.non_crit_ext_present = any_has_phase2;
+    if (any_has_phase2) {
+    auto& v1900 = v1610.non_crit_ext;
+
+    // v1900 list: every PMCH WITH at least one Phase 2 feature (the r9 list above
+    // already holds every PMCH without one - see this loop's header comment for
+    // why a PMCH is described in exactly one of the two lists, never both).
+    std::vector<uint32_t> v1900_pmchs;
+    for (uint32_t p = 0; p < nof_pmch; p++) {
+      if (pmch[p].has_phase2) {
+        v1900_pmchs.push_back(p);
+      }
+    }
+    v1900.pmch_info_list_ext_v1900_present = true;
+    v1900.pmch_info_list_ext_v1900.resize(v1900_pmchs.size());
+
+    for (size_t idx = 0; idx < v1900_pmchs.size(); idx++) {
+      uint32_t              p   = v1900_pmchs[idx];
+      const auto&            r   = pmch[p];
+      pmch_info_ext_r19_s&   ext = v1900.pmch_info_list_ext_v1900[idx];
+
+      // Cumulative by PMCH index - see sf_alloc_end_per_pmch's header comment.
+      ext.pmch_cfg_r19.sf_alloc_end_r12 = (uint16_t)sf_alloc_end_per_pmch[p];
+      using SP_r12 = pmch_cfg_r12_s::mch_sched_period_r12_e_;
+      SP_r12 sp_r12;
+      switch (r.sched_period_rf) {
+        case 4:   sp_r12 = SP_r12::rf4;   break;
+        case 8:   sp_r12 = SP_r12::rf8;   break;
+        case 16:  sp_r12 = SP_r12::rf16;  break;
+        case 32:  sp_r12 = SP_r12::rf32;  break;
+        default:  sp_r12 = SP_r12::rf64;  break;
+      }
+      ext.pmch_cfg_r19.mch_sched_period_r12 = sp_r12;
+      if (r.use_mcs_table2) {
+        ext.pmch_cfg_r19.data_mcs_r12.set_higer_order_r12() = r.mcs;
+      } else {
+        ext.pmch_cfg_r19.data_mcs_r12.set_normal_r12() = r.mcs;
+      }
+
+      // TFI config (time interleaving + optional cyclic shift)
+      /* pmch_time_interleav_n_r19 is a REQUIRED field inside time_interleav_cfg_r19_s_
+       * with no n1 option — it cannot represent "no time interleaving". Therefore
+       * time_interleav_cfg_r19_present may only be set when N >= 2. Cyclic shift lives
+       * inside the same IE, so it can only be signalled alongside time interleaving. */
+      if (r.ti_n > 1) {
+        using N = pmch_tfi_cfg_r19_s::time_interleav_cfg_r19_s_::pmch_time_interleav_n_r19_e_;
+        using M = pmch_tfi_cfg_r19_s::time_interleav_cfg_r19_s_::pmch_time_interleav_m_r19_e_;
+        using A = pmch_tfi_cfg_r19_s::time_interleav_cfg_r19_s_::pmch_cyclic_shift_alpha_r19_e_;
+
+        ext.pmch_tfi_cfg_r19_present        = true;
+        auto& tfi                           = ext.pmch_tfi_cfg_r19;
+        tfi.time_interleav_cfg_r19_present  = true;
+        auto& tc                            = tfi.time_interleav_cfg_r19;
+
+        tc.pmch_soft_buf_size_params_r19.pmch_time_interleaving_ref_ue_category_dl_r19  = r.n_soft_cat;
+        tc.pmch_soft_buf_size_params_r19.pmch_time_interleaving_scaling_factor_beta_r19 =
+          static_cast<pmch_soft_buf_size_params_r19_s::pmch_time_interleaving_scaling_factor_beta_r19_e_::options>(
+              srsran::pmch_scaling_factor_beta_num_den_to_ordinal(r.beta_num, r.beta_den));
+
+        switch (r.ti_n) {
+          case 4:  tc.pmch_time_interleav_n_r19 = N::n4;  break;
+          case 8:  tc.pmch_time_interleav_n_r19 = N::n8;  break;
+          case 16: tc.pmch_time_interleav_n_r19 = N::n16; break;
+          default: tc.pmch_time_interleav_n_r19 = N::n2;  break;
+        }
+        switch (r.ti_m) {
+          case 8:  tc.pmch_time_interleav_m_r19 = M::sf8;  break;
+          case 16: tc.pmch_time_interleav_m_r19 = M::sf16; break;
+          case 32: tc.pmch_time_interleav_m_r19 = M::sf32; break;
+          default: tc.pmch_time_interleav_m_r19 = M::sf4;  break;
+        }
+
+        /* pmch-TimeInterleavingN/M-LastMTCH-r19 (TS 36.331 CR5168r3): reconfigure_embms()
+         * has already validated these against nof_mbms_sessions>1 and main N>1 (both
+         * already guaranteed true in this block), so no further gating needed here
+         * beyond checking each field is actually set (0 = absent/inherit main). The
+         * two presence bits are independent — an operator may override just N, just
+         * M, or both for the last of nof_mbms_sessions MTCH sessions. */
+        using N_last = pmch_tfi_cfg_r19_s::time_interleav_cfg_r19_s_::pmch_time_interleav_n_last_mtch_r19_e_;
+        if (r.ti_n_last > 0) {
+          tc.pmch_time_interleav_n_last_mtch_r19_present = true;
+          switch (r.ti_n_last) {
+            case 1:  tc.pmch_time_interleav_n_last_mtch_r19 = N_last::n1;  break;
+            case 4:  tc.pmch_time_interleav_n_last_mtch_r19 = N_last::n4;  break;
+            case 8:  tc.pmch_time_interleav_n_last_mtch_r19 = N_last::n8;  break;
+            case 16: tc.pmch_time_interleav_n_last_mtch_r19 = N_last::n16; break;
+            default: tc.pmch_time_interleav_n_last_mtch_r19 = N_last::n2;  break;
+          }
+        }
+        if (r.ti_m_last > 0) {
+          tc.pmch_time_interleav_m_last_mtch_r19_present = true;
+          switch (r.ti_m_last) {
+            case 8:  tc.pmch_time_interleav_m_last_mtch_r19 = M::sf8;  break;
+            case 16: tc.pmch_time_interleav_m_last_mtch_r19 = M::sf16; break;
+            case 32: tc.pmch_time_interleav_m_last_mtch_r19 = M::sf32; break;
+            default: tc.pmch_time_interleav_m_last_mtch_r19 = M::sf4;  break;
+          }
+        }
+
+        if (r.cyclic_alpha > 0) {
+          tc.pmch_cyclic_shift_alpha_r19_present = true;
+          switch (r.cyclic_alpha) {
+            case 1:  tc.pmch_cyclic_shift_alpha_r19 = A::alpha1; break;
+            case 2:  tc.pmch_cyclic_shift_alpha_r19 = A::alpha2; break;
+            default: tc.pmch_cyclic_shift_alpha_r19 = A::alpha3; break;
+          }
+        }
+      } else if (r.cyclic_alpha > 0) {
+        logger.warning("PMCH[%u] cyclic_shift_alpha requires time_interleaving_n >= 2; cyclic shift ignored", p);
+      }
+
+      if (r.freq_il) {
+        if (!ext.pmch_tfi_cfg_r19_present) {
+          ext.pmch_tfi_cfg_r19_present = true;
+        }
+        ext.pmch_tfi_cfg_r19.pmch_freq_interleav_r19_present = true;
+        ext.pmch_tfi_cfg_r19.pmch_freq_interleav_r19 =
+          pmch_tfi_cfg_r19_s::pmch_freq_interleav_r19_e_::enabled;
+      }
+
+      fill_session_list(p, ext.mbms_session_info_list_r19);
+
+      logger.info("PMCH[%u] Phase 2 extension: cyclic_shift_alpha=%d freq_interleaving=%d time_interleaving_n=%d "
+                  "time_interleaving_m=%d time_interleaving_n_last_mtch=%d time_interleaving_m_last_mtch=%d "
+                  "use_mcs_table2=%d",
+                  p, r.cyclic_alpha, (int)r.freq_il, r.ti_n, r.ti_m, r.ti_n_last, r.ti_m_last,
+                  (int)r.use_mcs_table2);
+    }
+    } // if (any_has_phase2) -- v1900 content
+  } // if (any_has_phase2 || cfg.cell.mbms_dedicated) -- v1430/v1610 chain
 
   const int     rlc_header_len = 1;
   asn1::bit_ref bref(&mcch_payload_buffer[rlc_header_len], sizeof(mcch_payload_buffer) - rlc_header_len);
@@ -1102,7 +2820,14 @@ void rrc::log_rxtx_pdu_impl(direction_t             dir,
   static const char* dir_str[] = {"Rx", "Tx", "Tx S1AP", "Rx S1AP"};
   fmt::memory_buffer membuf;
   fmt::format_to(membuf, "{} ", dir_str[dir]);
-  if (rnti != SRSRAN_PRNTI and rnti != SRSRAN_SIRNTI_MBMS_DEDICATED) {
+  // SRSRAN_SIRNTI (used on the legacy/non-mbms_dedicated path -- see rrc::generate_sibs()) is
+  // a broadcast RNTI exactly like SRSRAN_SIRNTI_MBMS_DEDICATED; both are always logged with
+  // lcid=-1 (log_broadcast_rrc_message), which is not a valid SRB lcid.
+  // Before the legacy SIB1 path existed, this function was only ever called with
+  // SRSRAN_PRNTI/SRSRAN_SIRNTI_MBMS_DEDICATED, so the check below never needed to list it;
+  // omitting it routes lcid=-1 into srsran::lte_lcid_to_srb() below, an out-of-range lookup
+  // that crashes.
+  if (rnti != SRSRAN_PRNTI and rnti != SRSRAN_SIRNTI_MBMS_DEDICATED and rnti != SRSRAN_SIRNTI) {
     if (dir == Tx or dir == Rx) {
       fmt::format_to(membuf, "{} ", srsran::get_srb_name(srsran::lte_lcid_to_srb(lcid)));
     }

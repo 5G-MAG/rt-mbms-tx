@@ -23,6 +23,7 @@
 #define SRSENB_PHCH_COMMON_H
 
 #include "phy_interfaces.h"
+#include <array>
 #include "srsenb/hdr/phy/phy_ue_db.h"
 #include "srsran/common/gen_mch_tables.h"
 #include "srsran/common/interfaces_common.h"
@@ -33,6 +34,7 @@
 #include "srsran/interfaces/phy_common_interface.h"
 #include "srsran/interfaces/radio_interfaces.h"
 #include "srsran/phy/channel/channel.h"
+#include "srsran/phy/phch/pmch.h"
 #include "srsran/radio/radio.h"
 
 #include <map>
@@ -94,6 +96,29 @@ public:
     }
     return ret;
   }
+
+  /* max(nof_prb, mbsfn_prb): the eNB's own TX RF sample rate (txrx.cc) and per-subframe
+   * TX buffer sample count (sf_worker.cc) both need this width, not the plain carrier
+   * nof_prb above, or a wideband (FeMBMS extended-coverage) pmch_bandwidth's extra
+   * spectrum is never physically transmitted - confirmed live via raw IQ dumps on the
+   * RX side. Downlink-only: uplink (PUSCH/PUCCH/PRACH) has no "extended coverage"
+   * concept in the spec (TS 36.211 6.10.2's N_RB^DL->N_RB^PMCH substitution is scoped
+   * to downlink-only clauses), so RX sample rate must stay at get_nof_prb()'s plain,
+   * narrow value - see rf_zmq_imp.c's per-direction rx/tx rate split, which is what
+   * makes it safe for only this (TX) side to use the wider value. NR carriers have no
+   * MBSFN/PMCH concept, so this is nof_prb for those (matching get_nof_prb() above). */
+  uint32_t get_tx_nof_prb(uint32_t cc_idx)
+  {
+    uint32_t ret = get_nof_prb(cc_idx);
+
+    if (cc_idx < cell_list_lte.size()) {
+      uint32_t mbsfn_prb = cell_list_lte[cc_idx].cell.mbsfn_prb;
+      if (mbsfn_prb > ret) {
+        ret = mbsfn_prb;
+      }
+    }
+    return ret;
+  }
   uint32_t get_nof_ports(uint32_t cc_idx)
   {
     uint32_t ret = 0;
@@ -107,6 +132,19 @@ public:
 
     return ret;
   }
+  uint8_t get_semi_static_cfi(uint32_t cc_idx)
+  {
+    uint8_t ret = 0;
+
+    if (cc_idx < cell_list_lte.size()) {
+      ret = cell_list_lte[cc_idx].cell.semi_static_cfi;
+    }
+
+    return ret;
+  }
+  /* See pmch_ti_tx_buf's doc comment (below, private section) for why every
+   * cc_worker must share this same array rather than each holding its own. */
+  uint8_t** get_pmch_ti_tx_buf() { return pmch_ti_tx_buf; }
   uint32_t get_nof_rf_channels()
   {
     uint32_t count = 0;
@@ -217,6 +255,56 @@ public:
     return 0.0f;
   }
 
+  /* Snapshot of the cell-wide CAS-muting/additionalNonMBSFNSubframes config, kept in sync with
+   * cell_list_lte[0].cell via set_cell_cas_muting_cfg() below rather than only set once at PHY
+   * startup -- see that method's doc comment for why. */
+  struct cell_cas_muting_cfg_t {
+    bool    cas_muting                 = false;
+    uint8_t k_cas                      = 0;
+    uint8_t n_cas                      = 0;
+    uint8_t additional_non_mbms_frames = 0;
+  };
+
+  /**
+   * Updates the live CAS-muting/additionalNonMBSFNSubframes config for the (single, FeMBMS-only
+   * supports one) LTE cell, independent of cell_list_lte's other fields (nof_prb, mbsfn_prb,
+   * etc.), which are set once at PHY startup from the boot-time config and never refreshed.
+   * Before this method existed, a live eMBMS reconfigure (SIGHUP or the control socket) updated
+   * only rrc::cfg.cell -- which drives what's *signalled* in SIB1/SIB13/MCCH -- while
+   * is_mch_subframe()'s own scheduling-exclusion logic kept reading
+   * cell_list_lte[0].cell.cas_muting/k_cas/n_cas/additional_non_mbms_frames, frozen at whatever
+   * the startup config said: the eNB would tell UEs one CAS-muting pattern while actually
+   * transmitting a different (or no) one. Called from rrc::configure_mbsfn_sibs() every time it
+   * runs, including at startup (a harmless no-op re-write of the same boot-time values there).
+   */
+  void set_cell_cas_muting_cfg(bool cas_muting, uint8_t k_cas, uint8_t n_cas, uint8_t additional_non_mbms_frames)
+  {
+    if (cell_list_lte.empty()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(cell_cas_muting_mutex);
+    cell_list_lte[0].cell.cas_muting                 = cas_muting;
+    cell_list_lte[0].cell.k_cas                      = k_cas;
+    cell_list_lte[0].cell.n_cas                      = n_cas;
+    cell_list_lte[0].cell.additional_non_mbms_frames = additional_non_mbms_frames;
+  }
+
+  /** Thread-safe read of the live CAS-muting config set by set_cell_cas_muting_cfg() above.
+   * Returns a default (cas_muting=false) snapshot if no LTE cell is configured yet, matching
+   * is_mch_subframe()'s prior `!cell_list_lte.empty()` guards at each of its 4 read sites. */
+  cell_cas_muting_cfg_t get_cell_cas_muting_cfg()
+  {
+    std::lock_guard<std::mutex> lock(cell_cas_muting_mutex);
+    cell_cas_muting_cfg_t       cfg;
+    if (!cell_list_lte.empty()) {
+      cfg.cas_muting                 = cell_list_lte[0].cell.cas_muting;
+      cfg.k_cas                      = cell_list_lte[0].cell.k_cas;
+      cfg.n_cas                      = cell_list_lte[0].cell.n_cas;
+      cfg.additional_non_mbms_frames = cell_list_lte[0].cell.additional_non_mbms_frames;
+    }
+    return cfg;
+  }
+
   // Common Physical Uplink DMRS configuration
   srsran_refsignal_dmrs_pusch_cfg_t dmrs_pusch_cfg = {};
 
@@ -235,6 +323,21 @@ public:
   bool is_mbsfn_sf(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti);
   void set_mch_period_stop(uint32_t stop);
 
+  /* pmch-TimeInterleavingN/M-LastMTCH-r19 cross-layer channel (TS 36.331 CR5168r3):
+   * mac.cc's get_mch_sched() calls the setter once per scheduling period (in the
+   * same is_mcch branch that already calls set_mch_period_stop() above) to tell
+   * is_mch_subframe() where, within this PMCH's own data region, the last of
+   * nof_mbms_sessions MTCH sessions' window starts (0 = no distinct last-session
+   * window this period, i.e. num_mtch_sched<=1 or no LastMTCH override configured
+   * -- the single-session path must degenerate to today's flat counter exactly).
+   * Deliberately a plain atomic write/read, not the blocking pthread_cond_wait
+   * pattern set_mch_period_stop() above uses for mch_period_stop -- that consumer
+   * is dead code (see is_mch_subframe()'s own comment), and reviving a blocking
+   * wait here would risk stalling the PHY worker on a MAC-thread write that may
+   * never come for cells that never use this feature. */
+  void     set_last_mtch_start(uint8_t pmch_idx, uint32_t start_sf);
+  uint32_t get_last_mtch_start(uint8_t pmch_idx) const;
+
   // Getters and setters for ul grants which need to be shared between workers
   const stack_interface_phy_lte::ul_sched_list_t get_ul_grants(uint32_t tti);
   void set_ul_grants(uint32_t tti, const stack_interface_phy_lte::ul_sched_list_t& ul_grants);
@@ -248,19 +351,69 @@ private:
   phy_cell_cfg_list_t    cell_list_lte;
   phy_cell_cfg_list_nr_t cell_list_nr;
   std::mutex             cell_gain_mutex;
+  std::mutex             cell_cas_muting_mutex;
 
   bool                    have_mtch_stop   = false;
   pthread_mutex_t         mtch_mutex       = {};
   pthread_cond_t          mtch_cvar        = {};
+  /* Confirmed real race (2026-07-14, mirrors the identical bug found and
+   * fixed in rt-mbms-modem's Phy::_mcch): mbsfn is written wholesale
+   * (configure_mbsfn(): `mbsfn = *cfg;`) from the RRC stack thread whenever
+   * MCCH content is (re)decoded, while is_mch_subframe()/is_mcch_subframe()
+   * read it from the PHY worker thread pool (multiple concurrent workers,
+   * [PHY0]/[PHY1]/... in logs) once per subframe -- no synchronization
+   * existed. Live evidence: srsran_configure_pmch()'s own TI_DIAG_CFGPMCH
+   * diagnostic showed pdsch_cfg.grant.tb[0].tbs alternating between
+   * inconsistent values (137/501 one run, 1096/4008 another) with every
+   * other input (nof_prb, mbsfn_prb, scs) held constant -- only mbsfn_mcs
+   * (read from this racy struct) could explain that. This produces a real
+   * TX/RX transport-block-size mismatch: RX (using its own, now race-free,
+   * consistently-correct mcs=9/tbs=4008) expects far more coded data than TX
+   * actually transmitted whenever TX's read caught a torn/stale mbsfn_mcs,
+   * which would show up as intact reference signals (unaffected) alongside
+   * essentially-empty data REs (confirmed via a bit-exact TX/RX capture
+   * this same investigation) -- consistent with the near-total PMCH CRC
+   * failure this whole investigation has been chasing. Guards mbsfn. */
+  mutable std::mutex      mbsfn_mutex;
   srsran::phy_cfg_mbsfn_t mbsfn            = {};
   bool                    sib13_configured = false;
   bool                    mcch_configured  = false;
   uint8_t                 mch_table[40]    = {};
   uint8_t                 mcch_table[10]   = {};
   uint32_t                mch_period_stop  = 0;
+  /* Indexed by pmch_idx, sized to match mcch_msg_t::pmch_info_list's own capacity. */
+  std::array<uint32_t, 15> last_mtch_start = {};
+  mutable std::mutex       last_mtch_start_mutex;
   srsran::rf_buffer_t     tx_buffer        = {};
   bool                    is_mch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti);
-  bool                    is_mcch_subframe(srsran_mbsfn_cfg_t* cfg, uint32_t phy_tti);
+  bool                    is_mcch_subframe(srsran_mbsfn_cfg_t*            cfg,
+                                            uint32_t                      phy_tti,
+                                            const srsran::phy_cfg_mbsfn_t& mbsfn_snapshot,
+                                            const uint8_t                 mcch_table_snapshot[10]);
+
+  /* Shared, per-cell (not per-worker) cache of each PMCH time-interleaving
+   * slot's raw TB payload, for srsran_pmch_encode()'s re-encode-from-cache
+   * across a slot's own N subframes. srsran_pmch_t's own ti_tx_buf[] is
+   * embedded by value inside cc_worker's per-thread srsran_enb_dl_t - one
+   * instance per PHY worker thread. srsran::thread_pool assigns TTIs to
+   * whichever worker finishes first (thread_pool::find_finished_worker() -
+   * not a fixed tti%nof_workers formula), so a given slot m's successive
+   * subframes (spaced M apart) can land on a different worker thread
+   * whenever processing-time jitter causes a different worker to become
+   * idle first - even when M == nof_phy_threads. Each worker's private
+   * ti_tx_buf[m] would then see only some of slot m's subframes, silently
+   * losing the cached n==0 payload for the rest. Allocated once here
+   * (init_pmch_ti_tx_bufs(), called from configure_mbsfn() once cell
+   * bandwidth is known) and shared by every cc_worker via encode_pmch(), so
+   * the encode hot path never needs to allocate - and so never needs to
+   * synchronize concurrent allocation. See the roadmap doc's "TX-side
+   * ti_tx_buf per-worker fragmentation" design section for the full
+   * rationale and why pinning worker assignment instead isn't viable
+   * (thread_pool is generic infrastructure shared by every PHY channel,
+   * not just PMCH). */
+  uint8_t* pmch_ti_tx_buf[SRSRAN_PMCH_MAX_TI_M] = {};
+  void     init_pmch_ti_tx_bufs();
+  void     free_pmch_ti_tx_bufs();
 };
 
 } // namespace srsenb

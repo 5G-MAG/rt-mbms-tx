@@ -108,6 +108,14 @@ private:
   // TTI specific
   tti_point current_tti{};
   uint32_t  bc_aggr_level = 2;
+
+  /* MBMS-dedicated cells only ever have a single PDCCH candidate for SI messages,
+   * and only in subframe 0 every 40ms (the CAS occasion) -- see alloc_sibs()'s own
+   * doc comment. Round-robin the starting sib_idx each CAS occasion instead of
+   * always trying idx 0 first, so a SIB with an always-open window (e.g. SIB2)
+   * can't win that one candidate forever and starve every other pending SI
+   * message (including a dynamically-activated SIB12 CMAS/PWS alert). */
+  uint32_t next_sib_priority_idx = 0;
 };
 
 //! RAR/Msg3 scheduler

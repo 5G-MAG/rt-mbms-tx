@@ -464,5 +464,208 @@ struct gtpc_release_access_bearers_response {
   // Private extension
 };
 
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Start Request
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.1-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_start_request {
+  struct gtpc_f_teid_ie sender_f_teid; // M
+  struct gtpc_tmgi_ie   tmgi;          // M
+
+  struct gtpc_mbms_session_duration_ie mbms_session_duration; // M
+  struct gtpc_mbms_service_area_ie     mbms_service_area;     // M
+
+  bool                           mbms_session_id_present;
+  struct gtpc_mbms_session_id_ie mbms_session_id; // C
+
+  bool                         mbms_flow_id_present;
+  struct gtpc_mbms_flow_id_ie mbms_flow_id; // C
+
+  struct gtpc_bearer_qos_ie qos_profile; // M
+
+  struct gtpc_mbms_ip_mc_distrib_ie mbms_ip_multicast_distrib; // M, instance 0
+
+  bool    recovery_present;
+  uint8_t recovery; // C
+
+  bool                                mbms_time_to_data_transfer_present;
+  struct gtpc_mbms_time_to_data_transfer_ie mbms_time_to_data_transfer; // CO
+
+  bool                                       mbms_data_transfer_start_present;
+  struct gtpc_abs_time_mbms_data_transfer_ie mbms_data_transfer_start; // CO
+
+  bool                      mbms_flags_present;
+  struct gtpc_mbms_flags_ie mbms_flags; // CO
+
+  bool                               alternative_ip_multicast_distrib_present;
+  struct gtpc_mbms_ip_mc_distrib_ie alternative_ip_multicast_distrib; // CO, instance 1
+
+  bool                     ecgi_list_present;
+  struct gtpc_ecgi_list_ie ecgi_list; // CO
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Start Response
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.2-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_start_response {
+  struct gtpc_cause_ie  cause;         // M
+  struct gtpc_f_teid_ie sender_f_teid; // M
+
+  // Sn-only fields below: never populated on the Sm send path in this
+  // codebase, but parsed if unexpectedly present rather than erroring.
+  bool                                   mbms_distribution_ack_present;
+  struct gtpc_mbms_distribution_ack_ie mbms_distribution_ack; // C, Sn only
+  bool                                   sn_u_sgsn_f_teid_present;
+  struct gtpc_f_teid_ie                  sn_u_sgsn_f_teid; // C, Sn only, instance 1
+
+  bool    recovery_present;
+  uint8_t recovery; // C
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Update Request
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.3-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_update_request {
+  bool                              mbms_service_area_present;
+  struct gtpc_mbms_service_area_ie mbms_service_area; // C
+
+  struct gtpc_tmgi_ie tmgi; // M
+
+  bool                  sender_f_teid_present;
+  struct gtpc_f_teid_ie sender_f_teid; // O
+
+  struct gtpc_mbms_session_duration_ie mbms_session_duration; // M
+
+  struct gtpc_bearer_qos_ie qos_profile; // M
+
+  bool                           mbms_session_id_present;
+  struct gtpc_mbms_session_id_ie mbms_session_id; // C
+
+  bool                         mbms_flow_id_present;
+  struct gtpc_mbms_flow_id_ie mbms_flow_id; // C
+
+  bool                                mbms_time_to_data_transfer_present;
+  struct gtpc_mbms_time_to_data_transfer_ie mbms_time_to_data_transfer; // CO
+
+  // Table 7.13.3-1 reuses this one IE slot for three semantics (Start /
+  // Update / Stop) inside an Update Request; no disambiguation rule was
+  // available from primary source (flagged, not guessed -- see NOTE 3 under
+  // clause 7.13.3 and clause 8.95). Stored as received/to-be-sent without
+  // this codec inferring which semantic applies.
+  bool                                       mbms_data_transfer_start_update_stop_present;
+  struct gtpc_abs_time_mbms_data_transfer_ie mbms_data_transfer_start_update_stop; // CO
+
+  bool                     ecgi_list_present;
+  struct gtpc_ecgi_list_ie ecgi_list; // CO
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Update Response
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.4-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_update_response {
+  struct gtpc_cause_ie cause; // M
+
+  // Sn-only fields, see note in gtpc_mbms_session_start_response.
+  bool                                   mbms_distribution_ack_present;
+  struct gtpc_mbms_distribution_ack_ie mbms_distribution_ack; // C, Sn only
+  bool                                   sn_u_sgsn_f_teid_present;
+  struct gtpc_f_teid_ie                  sn_u_sgsn_f_teid; // C, Sn only
+
+  bool    recovery_present;
+  uint8_t recovery; // C
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Stop Request
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.5-1
+ *
+ * NOTE: `tmgi` is not listed in Table 7.13.5-1 itself, but TS 23.246 clause
+ * 8.5.2 step 1 states the Stop procedure is "identified by TMGI or
+ * TMGI+Flow Identifier" -- this codec includes it as Mandatory so
+ * correlation on receipt does not rely on GTP-C header TEID alone (a
+ * critical defect an earlier draft had, caught by adversarial verification
+ * against that exact clause).
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_stop_request {
+  struct gtpc_tmgi_ie tmgi; // M (added per TS 23.246 clause 8.5.2 step 1)
+
+  bool                         mbms_flow_id_present;
+  struct gtpc_mbms_flow_id_ie mbms_flow_id; // C, redundant per the spec's own note (NOTE 1, Table 7.13.5-1)
+
+  bool                                       mbms_data_transfer_stop_present;
+  struct gtpc_abs_time_mbms_data_transfer_ie mbms_data_transfer_stop; // CO
+
+  bool                      mbms_flags_present;
+  struct gtpc_mbms_flags_ie mbms_flags; // CO
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+/****************************************************************************
+ *
+ * GTP-C v2 MBMS Session Stop Response
+ * Ref: 3GPP TS 29.274 v19.6.0 Table 7.13.6-1
+ *
+ ***************************************************************************/
+struct gtpc_mbms_session_stop_response {
+  struct gtpc_cause_ie cause; // M
+
+  bool    recovery_present;
+  uint8_t recovery; // CO
+
+  bool           private_extension_present;
+  gtpc_opaque_ie private_extension; // O
+};
+
+int gtpc_pack_mbms_session_start_request(const gtpc_mbms_session_start_request& req, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_start_request(const uint8_t* ptr, uint32_t len, gtpc_mbms_session_start_request* req);
+
+int gtpc_pack_mbms_session_start_response(const gtpc_mbms_session_start_response& resp, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_start_response(const uint8_t*                    ptr,
+                                             uint32_t                          len,
+                                             gtpc_mbms_session_start_response* resp);
+
+int gtpc_pack_mbms_session_update_request(const gtpc_mbms_session_update_request& req, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_update_request(const uint8_t* ptr, uint32_t len, gtpc_mbms_session_update_request* req);
+
+int gtpc_pack_mbms_session_update_response(const gtpc_mbms_session_update_response& resp, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_update_response(const uint8_t*                     ptr,
+                                              uint32_t                           len,
+                                              gtpc_mbms_session_update_response* resp);
+
+int gtpc_pack_mbms_session_stop_request(const gtpc_mbms_session_stop_request& req, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_stop_request(const uint8_t* ptr, uint32_t len, gtpc_mbms_session_stop_request* req);
+
+int gtpc_pack_mbms_session_stop_response(const gtpc_mbms_session_stop_response& resp, srsran::byte_buffer_t* pdu);
+int gtpc_unpack_mbms_session_stop_response(const uint8_t*                   ptr,
+                                            uint32_t                         len,
+                                            gtpc_mbms_session_stop_response* resp);
+
 } // namespace srsran
 #endif // SRSRAN_GTPC_MSG_H

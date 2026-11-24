@@ -20,10 +20,13 @@
  */
 
 #include "srsepc/hdr/mme/mme_gtpc.h"
+#include "srsepc/hdr/mme/m3ap.h"
 #include "srsepc/hdr/mme/s1ap.h"
 #include "srsepc/hdr/spgw/spgw.h"
 #include "srsran/asn1/gtpc.h"
+#include <arpa/inet.h>
 #include <inttypes.h> // for printing uint64_t
+#include <unistd.h>   // for close()
 
 namespace srsepc {
 
@@ -482,6 +485,309 @@ bool mme_gtpc::send_downlink_data_notification_failure_indication(uint64_t imsi,
   // send msg to spgw
   send_s11_pdu(not_fail_pdu);
   return true;
+}
+
+/****************************************************************************
+ * Sm interface (MME <-> MBMS-GW session control, TS 23.246 / TS 29.274).
+ * MME is purely reactive: every bearer-context attribute comes from the
+ * received Request; it never allocates a sequence number and never
+ * retransmits (only the MBMS-GW side does, per TS 29.274 clause 7.6).
+ ***************************************************************************/
+std::string mme_gtpc::tmgi_key(const srsran::gtpc_tmgi_ie& tmgi)
+{
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%04x:%04x:%06x", tmgi.mcc_bcd, tmgi.mnc_bcd, tmgi.mbms_service_id & 0xFFFFFF);
+  return std::string(buf);
+}
+
+bool mme_gtpc::init_sm(const std::string& bind_addr, uint16_t bind_port)
+{
+  m_sm = socket(AF_INET, SOCK_DGRAM, 0);
+  if (m_sm < 0) {
+    m_logger.error("Error opening Sm UDP socket. Error %s", strerror(errno));
+    return false;
+  }
+  struct sockaddr_in addr = {};
+  addr.sin_family         = AF_INET;
+  addr.sin_port           = htons(bind_port);
+  if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
+    m_logger.error("Invalid Sm bind address: %s", bind_addr.c_str());
+    close(m_sm);
+    m_sm = -1;
+    return false;
+  }
+  m_sm_bind_ipv4 = addr.sin_addr.s_addr;
+  if (bind(m_sm, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    m_logger.error("Error binding Sm UDP socket to %s:%d. Error %s", bind_addr.c_str(), bind_port, strerror(errno));
+    close(m_sm);
+    m_sm = -1;
+    return false;
+  }
+  m_logger.info("MME Sm Interface Initialized on %s:%d", bind_addr.c_str(), bind_port);
+  srsran::console("MME Sm Interface Initialized on %s:%d\n", bind_addr.c_str(), bind_port);
+  return true;
+}
+
+void mme_gtpc::handle_sm_pdu(srsran::byte_buffer_t* msg, const struct sockaddr_in& from_addr)
+{
+  srsran::gtpc_header_t header = {};
+  if (srsran::gtpc_header_unpack(*msg, &header) != SRSRAN_SUCCESS) {
+    m_logger.error("Error unpacking Sm GTP-C header");
+    return;
+  }
+  m_logger.debug("Received Sm message. Type: %s", srsran::gtpc_msg_type_to_str(header.type));
+  const uint8_t* body_ptr = &msg->msg[12];
+  uint32_t       body_len = header.length >= 8 ? header.length - 8 : 0;
+
+  switch (header.type) {
+    case srsran::GTPC_MSG_TYPE_MBMS_SESSION_START_REQUEST: {
+      srsran::gtpc_mbms_session_start_request req;
+      if (srsran::gtpc_unpack_mbms_session_start_request(body_ptr, body_len, &req) != SRSRAN_SUCCESS) {
+        m_logger.error("Error unpacking MBMS Session Start Request");
+        return;
+      }
+      handle_mbms_session_start_request(req, header, from_addr);
+      break;
+    }
+    case srsran::GTPC_MSG_TYPE_MBMS_SESSION_UPDATE_REQUEST: {
+      srsran::gtpc_mbms_session_update_request req;
+      if (srsran::gtpc_unpack_mbms_session_update_request(body_ptr, body_len, &req) != SRSRAN_SUCCESS) {
+        m_logger.error("Error unpacking MBMS Session Update Request");
+        return;
+      }
+      handle_mbms_session_update_request(req, header, from_addr);
+      break;
+    }
+    case srsran::GTPC_MSG_TYPE_MBMS_SESSION_STOP_REQUEST: {
+      srsran::gtpc_mbms_session_stop_request req;
+      if (srsran::gtpc_unpack_mbms_session_stop_request(body_ptr, body_len, &req) != SRSRAN_SUCCESS) {
+        m_logger.error("Error unpacking MBMS Session Stop Request");
+        return;
+      }
+      handle_mbms_session_stop_request(req, header, from_addr);
+      break;
+    }
+    default:
+      m_logger.error("Unhandled Sm GTP-C Message type %s", srsran::gtpc_msg_type_to_str(header.type));
+  }
+}
+
+void mme_gtpc::handle_mbms_session_start_request(const srsran::gtpc_mbms_session_start_request& req,
+                                                  const srsran::gtpc_header_t&                   req_header,
+                                                  const struct sockaddr_in&                      from_addr)
+{
+  std::string key = tmgi_key(req.tmgi);
+  m_logger.info("MBMS Session Start Request. TMGI key: %s", key.c_str());
+
+  mbms_gtpc_ctx_t ctx;
+  ctx.tmgi               = req.tmgi;
+  ctx.flow_id_present    = req.mbms_flow_id_present;
+  ctx.flow_id            = req.mbms_flow_id.flow_id;
+  ctx.session_id_present = req.mbms_session_id_present;
+  ctx.session_id         = req.mbms_session_id.session_id;
+  ctx.state              = MME_MBMS_BEARER_ACTIVE;
+  ctx.peer_c_teid        = req.sender_f_teid.teid;
+  ctx.local_teid         = m_next_mbms_local_teid++;
+  ctx.peer_addr          = from_addr;
+  m_tmgi_to_mbms_ctx[key] = ctx;
+
+  // Real M3AP attachment point: forward to every connected MCE (eNB) concurrently. The Sm response below is
+  // NOT gated on this round trip -- TS 23.246 clause 8.3.2 step 6 permits responding "as soon as accepted by
+  // one E-UTRAN node", and mbms_session_start_confirm() (called back by m3ap once a real Response/Failure
+  // arrives) only updates confirmed_enbs/logs, it does not affect the already-sent Sm response.
+  m3ap::get_instance()->session_start(key, ctx, req);
+
+  srsran::gtpc_mbms_session_start_response resp = {};
+  resp.cause.cause_value                        = srsran::GTPC_CAUSE_VALUE_REQUEST_ACCEPTED;
+  resp.sender_f_teid.ipv4_present                = true;
+  resp.sender_f_teid.interface_type              = srsran::SM_MME_GTP_C_INTERFACE;
+  resp.sender_f_teid.teid                        = ctx.local_teid;
+  resp.sender_f_teid.ipv4                        = m_sm_bind_ipv4;
+
+  srsran::byte_buffer_t body;
+  if (srsran::gtpc_pack_mbms_session_start_response(resp, &body) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing MBMS Session Start Response");
+    return;
+  }
+  srsran::gtpc_header_t resp_header = {};
+  resp_header.version               = srsran::GTPC_V2;
+  resp_header.teid_present          = true;
+  resp_header.type                  = srsran::GTPC_MSG_TYPE_MBMS_SESSION_START_RESPONSE;
+  resp_header.teid                  = ctx.peer_c_teid;
+  resp_header.sequence              = req_header.sequence; // echo, per TS 29.274 clause 7.6
+
+  srsran::byte_buffer_t full;
+  if (srsran::gtpc_header_pack(resp_header, body.N_bytes, &full) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing Sm response header");
+    return;
+  }
+  full.append_bytes(body.msg, body.N_bytes);
+  if (sendto(m_sm, full.msg, full.N_bytes, 0, (const struct sockaddr*)&from_addr, sizeof(from_addr)) < 0) {
+    m_logger.error("Error sending MBMS Session Start Response. Error %s", strerror(errno));
+  }
+}
+
+void mme_gtpc::handle_mbms_session_update_request(const srsran::gtpc_mbms_session_update_request& req,
+                                                    const srsran::gtpc_header_t&                    req_header,
+                                                    const struct sockaddr_in&                       from_addr)
+{
+  std::string key = tmgi_key(req.tmgi);
+  m_logger.info("MBMS Session Update Request. TMGI key: %s", key.c_str());
+
+  auto it = m_tmgi_to_mbms_ctx.find(key);
+  if (it == m_tmgi_to_mbms_ctx.end()) {
+    m_logger.error("MBMS Session Update Request for unknown TMGI: %s", key.c_str());
+    // Still respond, per GTPv2-C convention -- Context Not Found.
+    srsran::gtpc_mbms_session_update_response resp = {};
+    resp.cause.cause_value                          = srsran::GTPC_CAUSE_VALUE_CONTEXT_NOT_FOUND;
+    srsran::byte_buffer_t body;
+    if (srsran::gtpc_pack_mbms_session_update_response(resp, &body) == SRSRAN_SUCCESS) {
+      srsran::gtpc_header_t resp_header = {};
+      resp_header.version               = srsran::GTPC_V2;
+      resp_header.teid_present          = true;
+      resp_header.type                  = srsran::GTPC_MSG_TYPE_MBMS_SESSION_UPDATE_RESPONSE;
+      resp_header.teid                  = req.sender_f_teid_present ? req.sender_f_teid.teid : 0;
+      resp_header.sequence              = req_header.sequence;
+      srsran::byte_buffer_t full;
+      if (srsran::gtpc_header_pack(resp_header, body.N_bytes, &full) == SRSRAN_SUCCESS) {
+        full.append_bytes(body.msg, body.N_bytes);
+        sendto(m_sm, full.msg, full.N_bytes, 0, (const struct sockaddr*)&from_addr, sizeof(from_addr));
+      }
+    }
+    return;
+  }
+
+  // Correlation: TMGI+Session Identifier when the request carries one (TS
+  // 23.246 clause 8.8.4 step 1), else TMGI+FlowID (flagged inference, since
+  // this fallback rule itself isn't verified clause text -- see project
+  // notes). The TMGI-keyed map lookup above already matched on TMGI; this
+  // additional check catches the case of two sessions sharing a TMGI+FlowID
+  // but distinguished by Session Identifier.
+  if (req.mbms_session_id_present && it->second.session_id_present &&
+      req.mbms_session_id.session_id != it->second.session_id) {
+    m_logger.warning("MBMS Session Update Request Session Identifier mismatch for TMGI %s", key.c_str());
+  }
+
+  it->second.state = MME_MBMS_BEARER_UPDATING;
+  if (req.mbms_flow_id_present) {
+    it->second.flow_id_present = true;
+    it->second.flow_id         = req.mbms_flow_id.flow_id;
+  }
+  if (req.mbms_session_id_present) {
+    it->second.session_id_present = true;
+    it->second.session_id         = req.mbms_session_id.session_id;
+  }
+  it->second.peer_addr = from_addr;
+  it->second.state     = MME_MBMS_BEARER_ACTIVE;
+
+  m3ap::get_instance()->session_update(key, it->second, req);
+
+  srsran::gtpc_mbms_session_update_response resp = {};
+  resp.cause.cause_value                          = srsran::GTPC_CAUSE_VALUE_REQUEST_ACCEPTED;
+
+  srsran::byte_buffer_t body;
+  if (srsran::gtpc_pack_mbms_session_update_response(resp, &body) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing MBMS Session Update Response");
+    return;
+  }
+  srsran::gtpc_header_t resp_header = {};
+  resp_header.version               = srsran::GTPC_V2;
+  resp_header.teid_present          = true;
+  resp_header.type                  = srsran::GTPC_MSG_TYPE_MBMS_SESSION_UPDATE_RESPONSE;
+  resp_header.teid                  = it->second.peer_c_teid;
+  resp_header.sequence              = req_header.sequence;
+
+  srsran::byte_buffer_t full;
+  if (srsran::gtpc_header_pack(resp_header, body.N_bytes, &full) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing Sm response header");
+    return;
+  }
+  full.append_bytes(body.msg, body.N_bytes);
+  if (sendto(m_sm, full.msg, full.N_bytes, 0, (const struct sockaddr*)&from_addr, sizeof(from_addr)) < 0) {
+    m_logger.error("Error sending MBMS Session Update Response. Error %s", strerror(errno));
+  }
+}
+
+void mme_gtpc::handle_mbms_session_stop_request(const srsran::gtpc_mbms_session_stop_request& req,
+                                                  const srsran::gtpc_header_t&                  req_header,
+                                                  const struct sockaddr_in&                     from_addr)
+{
+  // Correlation is by TMGI (TS 23.246 clause 8.5.2 step 1: "identified by
+  // TMGI or TMGI+Flow Identifier"), not header TEID alone -- the critical
+  // fix from adversarial verification against that exact clause.
+  std::string key = tmgi_key(req.tmgi);
+  m_logger.info("MBMS Session Stop Request. TMGI key: %s", key.c_str());
+
+  auto     it          = m_tmgi_to_mbms_ctx.find(key);
+  uint32_t peer_c_teid = 0;
+  if (it != m_tmgi_to_mbms_ctx.end()) {
+    // Header TEID cross-checked against the stored context as a consistency
+    // check only, not used as the identifier itself.
+    if (req_header.teid != 0 && req_header.teid != it->second.local_teid) {
+      m_logger.warning("MBMS Session Stop Request header TEID mismatch for TMGI %s (expected %u, got %" PRIu64 ")",
+                        key.c_str(),
+                        it->second.local_teid,
+                        req_header.teid);
+    }
+    peer_c_teid = it->second.peer_c_teid;
+    it->second.state = MME_MBMS_BEARER_STOPPING;
+  } else {
+    m_logger.warning("MBMS Session Stop Request for unknown TMGI: %s", key.c_str());
+  }
+
+  // Real M3AP attachment point for TS 23.246 clause 8.5.2 step 3's MME-to-eNB Stop forwarding.
+  m3ap::get_instance()->session_stop(key);
+
+  srsran::gtpc_mbms_session_stop_response resp = {};
+  resp.cause.cause_value                        = srsran::GTPC_CAUSE_VALUE_REQUEST_ACCEPTED;
+
+  srsran::byte_buffer_t body;
+  if (srsran::gtpc_pack_mbms_session_stop_response(resp, &body) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing MBMS Session Stop Response");
+    return;
+  }
+  srsran::gtpc_header_t resp_header = {};
+  resp_header.version               = srsran::GTPC_V2;
+  resp_header.teid_present          = true;
+  resp_header.type                  = srsran::GTPC_MSG_TYPE_MBMS_SESSION_STOP_RESPONSE;
+  resp_header.teid                  = peer_c_teid;
+  resp_header.sequence              = req_header.sequence;
+
+  srsran::byte_buffer_t full;
+  if (srsran::gtpc_header_pack(resp_header, body.N_bytes, &full) != SRSRAN_SUCCESS) {
+    m_logger.error("Error packing Sm response header");
+    return;
+  }
+  full.append_bytes(body.msg, body.N_bytes);
+  if (sendto(m_sm, full.msg, full.N_bytes, 0, (const struct sockaddr*)&from_addr, sizeof(from_addr)) < 0) {
+    m_logger.error("Error sending MBMS Session Stop Response. Error %s", strerror(errno));
+  }
+
+  if (it != m_tmgi_to_mbms_ctx.end()) {
+    m_tmgi_to_mbms_ctx.erase(it);
+  }
+}
+
+void mme_gtpc::mbms_session_start_confirm(const std::string& key, uint8_t cause, int32_t mce_assoc_id)
+{
+  m_logger.info(
+      "mbms_session_start_confirm: TMGI %s, cause %d, MCE association %d", key.c_str(), cause, mce_assoc_id);
+  auto it = m_tmgi_to_mbms_ctx.find(key);
+  if (it != m_tmgi_to_mbms_ctx.end() && cause == srsran::GTPC_CAUSE_VALUE_REQUEST_ACCEPTED) {
+    it->second.confirmed_enbs.push_back(mce_assoc_id);
+  }
+}
+
+void mme_gtpc::mbms_session_update_confirm(const std::string& key, uint8_t cause, int32_t mce_assoc_id)
+{
+  m_logger.info(
+      "mbms_session_update_confirm: TMGI %s, cause %d, MCE association %d", key.c_str(), cause, mce_assoc_id);
+}
+
+void mme_gtpc::mbms_session_stop_confirm(const std::string& key, uint8_t cause, int32_t mce_assoc_id)
+{
+  m_logger.info(
+      "mbms_session_stop_confirm: TMGI %s, cause %d, MCE association %d", key.c_str(), cause, mce_assoc_id);
 }
 
 } // namespace srsepc

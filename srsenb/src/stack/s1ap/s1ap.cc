@@ -658,6 +658,10 @@ bool s1ap::handle_initiatingmessage(const init_msg_s& msg)
       return handle_uectxtreleasecommand(msg.value.ue_context_release_cmd());
     case s1ap_elem_procs_o::init_msg_c::types_opts::paging:
       return handle_paging(msg.value.paging());
+    case s1ap_elem_procs_o::init_msg_c::types_opts::write_replace_warning_request:
+      return handle_write_replace_warning_request(msg.value.write_replace_warning_request());
+    case s1ap_elem_procs_o::init_msg_c::types_opts::kill_request:
+      return handle_kill_request(msg.value.kill_request());
     case s1ap_elem_procs_o::init_msg_c::types_opts::erab_setup_request:
       return handle_erabsetuprequest(msg.value.erab_setup_request());
     case s1ap_elem_procs_o::init_msg_c::types_opts::erab_release_cmd:
@@ -835,6 +839,40 @@ bool s1ap::handle_paging(const asn1::s1ap::paging_s& msg)
   uint32_t ueid = msg.protocol_ies.ue_id_idx_value.value.to_number();
   rrc->add_paging_id(ueid, msg.protocol_ies.ue_paging_id.value);
   return true;
+}
+
+// PWS (Public Warning System) origination, TS 36.413 §8.9/§8.10 -- non-UE-associated, same
+// category as send_error_indication() above. Per TS 29.168/36.413, the eNB acks the MME
+// immediately after installing the warning, without waiting for it to actually go out over
+// the air (that happens on the ETWS paging + SIB12 broadcast schedule, asynchronously).
+bool s1ap::handle_write_replace_warning_request(const asn1::s1ap::write_replace_warning_request_s& msg)
+{
+  WarnUnsupportFeature(msg.ext, "S1AP message extension");
+
+  rrc->write_replace_warning(msg.protocol_ies);
+
+  s1ap_pdu_c tx_pdu;
+  tx_pdu.set_successful_outcome().load_info_obj(ASN1_S1AP_ID_WRITE_REPLACE_WARNING);
+  auto& resp_ies = tx_pdu.successful_outcome().value.write_replace_warning_resp().protocol_ies;
+  resp_ies.msg_id.value     = msg.protocol_ies.msg_id.value;
+  resp_ies.serial_num.value = msg.protocol_ies.serial_num.value;
+
+  return sctp_send_s1ap_pdu(tx_pdu, SRSRAN_INVALID_RNTI, "WriteReplaceWarningResponse");
+}
+
+bool s1ap::handle_kill_request(const asn1::s1ap::kill_request_s& msg)
+{
+  WarnUnsupportFeature(msg.ext, "S1AP message extension");
+
+  rrc->kill_warning(msg.protocol_ies);
+
+  s1ap_pdu_c tx_pdu;
+  tx_pdu.set_successful_outcome().load_info_obj(ASN1_S1AP_ID_KILL);
+  auto& resp_ies = tx_pdu.successful_outcome().value.kill_resp().protocol_ies;
+  resp_ies.msg_id.value     = msg.protocol_ies.msg_id.value;
+  resp_ies.serial_num.value = msg.protocol_ies.serial_num.value;
+
+  return sctp_send_s1ap_pdu(tx_pdu, SRSRAN_INVALID_RNTI, "KillResponse");
 }
 
 bool s1ap::handle_erabsetuprequest(const erab_setup_request_s& msg)

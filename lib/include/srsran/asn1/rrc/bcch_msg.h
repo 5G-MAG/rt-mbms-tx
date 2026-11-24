@@ -1089,8 +1089,10 @@ struct mbsfn_area_info_r16_s {
   };
 
   struct subcarrier_spacing_mbms_r16_opts {
+    // kHz15-v1710 (the plain-LTE-numerology option, TS 36.331 v17.1.0+): occupies the
+    // slot that earlier spec versions left as a reserved spare value.
     enum options { khz_7dot5, khz_2dot5, khz_1dot25, khz0dot37,
-      spare4, spare3, spare2, spare1, nulltype } value;
+      khz15, spare3, spare2, spare1, nulltype } value;
     typedef float number_type;
 
     std::string to_string() const;
@@ -1109,17 +1111,10 @@ struct mbsfn_area_info_r16_s {
   };
   typedef enumerated<time_separation_r16_opts> time_separation_r16_e_;
 
-  struct pmch_bandwidth_v16xy_opts {
-    enum options { n30, n35, n40, spare1, nulltype } value;
-    typedef uint8_t number_type;
-
-    std::string to_string() const;
-    uint8_t       to_number() const;
-    std::string to_number_string() const;
-  };
-  typedef enumerated<pmch_bandwidth_v16xy_opts> pmch_bandwidth_v16xy_e_;
-
-  // member variables
+  // member variables. NOTE: no pmch-Bandwidth-r17 here -- per TS 36.331's ASN1START block,
+  // that field belongs to the separate MBSFN-AreaInfo-r17 wrapper type below, not to this
+  // type's own (currently empty) extension. MBSFN-AreaInfo-r16 itself has no defined
+  // extension groups as of V19.3.0, hence no ext-group pack/unpack logic in the .cc.
   bool                           ext              = false;
   uint16_t                       mbsfn_area_id_r16 = 0;
   uint8_t                        notif_ind_r16 = 0;
@@ -1127,14 +1122,38 @@ struct mbsfn_area_info_r16_s {
   subcarrier_spacing_mbms_r16_e_ subcarrier_spacing_mbms_r16;
   bool                           time_separation_r16_present = false;
   time_separation_r16_e_         time_separation_r16;
-  bool                           pmch_bandwidth_v16xy_present = false;
-  pmch_bandwidth_v16xy_e_        pmch_bandwidth_v16xy;
 
   // sequence methods
-  // SRSASN_CODE pack(bit_ref& bref) const; // not implemented
+  SRSASN_CODE pack(bit_ref& bref) const;
   SRSASN_CODE unpack(cbit_ref& bref);
   void        to_json(json_writer& j) const;
 };
+
+// MBSFN-AreaInfo-r17 ::= SEQUENCE
+struct mbsfn_area_info_r17_s {
+  struct pmch_bandwidth_r17_opts {
+    enum options { n40, n35, n30, spare1, nulltype } value;
+    typedef uint8_t number_type;
+
+    std::string to_string() const;
+    uint8_t       to_number() const;
+    std::string to_number_string() const;
+  };
+  typedef enumerated<pmch_bandwidth_r17_opts> pmch_bandwidth_r17_e_;
+
+  // member variables
+  bool                   ext = false;
+  mbsfn_area_info_r16_s  mbsfn_area_info_r17;
+  pmch_bandwidth_r17_e_  pmch_bandwidth_r17;
+
+  // sequence methods
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
+// MBSFN-AreaInfoList-r17 ::= SEQUENCE (SIZE (1..maxMBSFN-Area)) OF MBSFN-AreaInfo-r17
+using mbsfn_area_info_list_r17_l = dyn_array<mbsfn_area_info_r17_s>;
 
 // NeighCellListCDMA2000 ::= SEQUENCE (SIZE (1..16)) OF NeighCellCDMA2000
 using neigh_cell_list_cdma2000_l = dyn_array<neigh_cell_cdma2000_s>;
@@ -1542,6 +1561,35 @@ using mbms_sai_inter_freq_list_v1140_l = dyn_array<mbms_sai_inter_freq_v1140_s>;
 using mbsfn_area_info_list_r9_l = dyn_array<mbsfn_area_info_r9_s>;
 
 using mbsfn_area_info_list_r16_l = dyn_array<mbsfn_area_info_r16_s>;
+
+// MBMS-ROM-FreqInfo-r16 — channel descriptor for Receive-Only Mode receivers (TS 36.331 §6.3.7)
+struct mbms_rom_info_r16_s {
+  struct subcarrier_spacing_r16_opts {
+    enum options { khz15, khz7dot5, khz1dot25, nulltype } value;
+    typedef float number_type;
+    const char* to_string() const;
+    float       to_number() const;
+    const char* to_number_string() const;
+  };
+  typedef enumerated<subcarrier_spacing_r16_opts> subcarrier_spacing_r16_e_;
+  struct bw_r16_opts {
+    enum options { n6, n15, n25, n50, n75, n100, nulltype } value;
+    typedef uint8_t number_type;
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<bw_r16_opts> bw_r16_e_;
+
+  bool                      subcarrier_spacing_r16_present = false;
+  uint32_t                  rom_freq_r16                   = 0;
+  subcarrier_spacing_r16_e_ subcarrier_spacing_r16;
+  bw_r16_e_                 bw_r16;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+using mbms_rom_info_list_r16_l = dyn_array<mbms_rom_info_r16_s>;
 
 // MeasIdleConfigSIB-r15 ::= SEQUENCE
 struct meas_idle_cfg_sib_r15_s {
@@ -1979,6 +2027,12 @@ struct sib_type10_s {
   bool                dummy_present = false;
   fixed_bitstring<16> msg_id;
   fixed_bitstring<16> serial_num;
+  /* TS 23.041 §9.3.24, figure 9.3.24-2 (verified directly against spec text, not
+   * assumed): octet1 bits 7..1 = Warning Type Value (7-bit, 0=earthquake,
+   * 1=tsunami, 2=earthquake+tsunami, 3=test, 4=other, 5-127=reserved), octet1
+   * bit 0 = Emergency User Alert; octet2 bit 7 = Popup, octet2 bits 6..0 =
+   * padding. i.e. warning_type[0] = (value << 1) | emergency_user_alert,
+   * warning_type[1] = (popup << 7). */
   fixed_octstring<2>  warning_type;
   fixed_octstring<50> dummy;
   // ...
@@ -2061,8 +2115,12 @@ struct sib_type13_r9_s {
   // group 0
   copy_ptr<mbms_notif_cfg_v1430_s> notif_cfg_v1430;
 
-  bool                      mbsfn_area_info_list_r16_present = false;
+  bool                       mbsfn_area_info_list_r16_present = false;
   mbsfn_area_info_list_r16_l mbsfn_area_info_list_r16;
+
+  // group 2 -- Cond Ded15or25PRB (MBMS-dedicated cell, dl-Bandwidth-MBMS n15 or n25)
+  bool                       mbsfn_area_info_list_r17_present = false;
+  mbsfn_area_info_list_r17_l mbsfn_area_info_list_r17;
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;
@@ -4007,6 +4065,29 @@ using plmn_id_list_mbms_r14_l = dyn_array<plmn_id_s>;
 using sched_info_list_mbms_r14_l = dyn_array<sched_info_mbms_r14_s>;
 
 // SystemInformationBlockType1-MBMS-r14 ::= SEQUENCE
+// SystemInformationBlockType1-MBMS-v1900 (Rel-19 CAS muting extension)
+struct sib_type1_mbms_v1900_s {
+  struct n_cas_r19_opts {
+    enum options { n2, n4, n8, n16, nulltype } value;
+    typedef uint8_t number_type;
+    const char* to_string() const;
+    uint8_t     to_number() const;
+  };
+  typedef enumerated<n_cas_r19_opts> n_cas_r19_e_;
+
+  struct cas_muting_cfg_r19_s_ {
+    uint8_t      k_cas_r19 = 0;
+    n_cas_r19_e_ n_cas_r19;
+  };
+
+  bool                  cas_muting_cfg_r19_present = false;
+  cas_muting_cfg_r19_s_ cas_muting_cfg_r19;
+
+  SRSASN_CODE pack(bit_ref& bref) const;
+  SRSASN_CODE unpack(cbit_ref& bref);
+  void        to_json(json_writer& j) const;
+};
+
 struct sib_type1_mbms_r14_s {
   struct cell_access_related_info_r14_s_ {
     plmn_id_list_mbms_r14_l plmn_id_list_r14;
@@ -4039,6 +4120,7 @@ struct sib_type1_mbms_r14_s {
   pdsch_cfg_common_s                   pdsch_cfg_common_r14;
   sib_type13_r9_s                      sib_type13_r14;
   cell_access_related_info_list_r14_l_ cell_access_related_info_list_r14;
+  sib_type1_mbms_v1900_s               non_crit_ext;  // v1900 extension
 
   // sequence methods
   SRSASN_CODE pack(bit_ref& bref) const;
