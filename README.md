@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/banner.svg" width="100%" alt="Reference Tools · 5G Broadcast - TV and Radio Services: 5G Broadcast Transmitter">
+  <img src=".github/banner.svg" width="100%" alt="Reference Tools · 5G Broadcast for TV and Radio Services: 5G Broadcast Transmitter">
 </p>
 
 <p align="center">
@@ -7,16 +7,15 @@
 </p>
 
 <p align="center">
-  <img alt="Status: under development"
-    src="https://img.shields.io/badge/Status-Under_Development-yellow">
+  <img alt="Status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fwww.5g-mag.com%2Fbadges%2Fstatus%2Frt-mbms-tx.json">
   <a href="https://github.com/5G-MAG/rt-mbms-tx/releases"><img alt="Version"
-    src="https://img.shields.io/github/v/release/5G-MAG/rt-mbms-tx?label=Version&sort=semver"></a>
+    src="https://img.shields.io/github/v/release/5G-MAG/rt-mbms-tx?label=Version"></a>
   <a href="LICENSE"><img alt="License: GNU Affero General Public License v3.0"
     src="https://img.shields.io/badge/License-AGPL%20v3.0-blue"></a>
 </p>
 
 <p align="center">
-  <a href="https://www.5g-mag.com/reference-tools/5g-broadcast">Project page</a> &nbsp;&middot;&nbsp;
+  <a href="https://www.5g-mag.com/reference-tools/5g-broadcast/">Project page</a> &nbsp;&middot;&nbsp;
   <a href="https://github.com/5G-MAG/rt-mbms-tx/issues">Issues</a> &nbsp;&middot;&nbsp;
   <a href="https://www.5g-mag.com/contributing">Contributing</a>
 </p>
